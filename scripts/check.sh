@@ -11,3 +11,11 @@ git diff --cached --check
 [[ -f AGENTS.md && ! -L AGENTS.md && -L CLAUDE.md ]]
 [[ $(readlink CLAUDE.md) == AGENTS.md ]]
 echo 'Shell syntax, executable files, whitespace, and Claude bridge verified.'
+
+scripts/setup.sh
+uv_command=${FESNYNG_UV:-uv}
+"$uv_command" run --locked --project backend ruff check backend
+"$uv_command" run --locked --project backend ruff format --check backend
+"$uv_command" run --locked --project backend ty check --project backend
+(cd backend && "$uv_command" run --locked pytest)
+npm run check --prefix frontend

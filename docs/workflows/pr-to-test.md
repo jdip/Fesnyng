@@ -1,6 +1,6 @@
 # Deliver a task to test
 
-Use the global `pr-to-test` skill with this runbook. The current repository has documentation and Bash Tooling, with no product, CI pipeline, or deployment. Completion is a reviewed merge-commit PR, verification of its committed tree, and a clean primary `test` checkout at the fetched `origin/test` revision.
+Use the global `pr-to-test` skill with this runbook. The repository contains Python and frontend Application Code plus Bash Tooling. Completion is a reviewed merge-commit PR, applicable application checks and actual runtime/browser evidence, verification of the committed tree, and a clean primary `test` checkout at the fetched `origin/test` revision. The foundation requires both independently running service health endpoints and the frontend connection page; later product tickets add their own approved runtime acceptance. Hosted checks, when configured, also apply.
 
 ## Prepare and review
 

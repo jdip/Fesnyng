@@ -75,7 +75,7 @@ verify_revision() {
     return 1
   fi
   git worktree remove -- "$verification_dir"
-  echo "Verified committed revision $revision. No application/deployment exists."
+  echo "Verified committed revision $revision. Confirm runtime acceptance under docs/workflows/pr-to-test.md."
 }
 
 verify_merge() {
