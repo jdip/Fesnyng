@@ -6,7 +6,7 @@ The foundation exposes service health and durable instance identity. Authenticat
 
 ## Install and check
 
-Use Node 22.12+ with npm and uv with Python 3.12 or newer. Dependencies belong in `backend/pyproject.toml` and `frontend/package.json`, with their committed lockfiles. Follow `backend/README.md` for Python runtime details. If uv is outside PATH, set `FESNYNG_UV` to its absolute executable path; the setup and delivery commands preserve this override.
+Use a Node version supported by `frontend/package.json` (verified with Node 22.23.1), npm, and uv with Python 3.12 or newer. Dependencies belong in `backend/pyproject.toml` and `frontend/package.json`, with their committed lockfiles. Follow `backend/README.md` for Python runtime details. If uv is outside PATH, set `FESNYNG_UV` to its absolute executable path; the setup and delivery commands preserve this override.
 
 ```bash
 scripts/setup.sh
