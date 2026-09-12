@@ -74,7 +74,7 @@ User A ───────── Organization 2
 User C ───────── Organization 3
 ```
 
-Initially, all organization members may have equivalent access if that keeps the MVP simple. The schema and authorization boundaries must still leave room for later distinctions such as:
+The MVP distinguishes owner/admin management from member use. The schema and authorization boundaries leave room for later distinctions such as:
 
 - organization owner/admin;
 - manager;
@@ -138,19 +138,14 @@ The organization layer should not need to understand the internal logic of those
 ## Initial Architecture
 
 ```text
-                    Web Application
-                          │
-              organization / agent UI
-                          │
-                    assistant-ui
-                          │
-          @assistant-ui/react-opencode
-                          │
-                    OpenCode Server
-                          │
-          ┌───────────────┼───────────────┐
-          │               │               │
-       OpenAI          Anthropic        Local/etc.
+React application + assistant-ui
+               │
+      Python control plane
+        │             │
+ Python host A ↔ Python host B
+      │                 │
+ Agent containers    Agent containers
+  (OpenCode)          (OpenCode)
 ```
 
 The application above OpenCode is intentionally narrow.
@@ -236,7 +231,7 @@ Public-safe examples should be the default rather than something cleaned up late
 
 ## Status
 
-Early architecture/design stage.
+The application foundation is being implemented against the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). [Development instructions](docs/development.md) describe the runnable components and current verification boundary. [PLAN.md](PLAN.md) remains the initial architecture source, amended by the confirmed primary map.
 
 The first implementation target is a minimal proof of concept with:
 
@@ -250,5 +245,5 @@ The first implementation target is a minimal proof of concept with:
 8. per-agent skills and identity;
 9. direct interactive sessions without requiring a task object.
 
-Fine-grained organization roles and per-agent grants do not need to ship in the first prototype, but the initial user/organization/membership model must be designed so they can be added without changing the tenancy architecture.
+The full-system MVP uses one control plane and two independent local Python agent-host APIs with one Docker container per persistent agent. Owner/admin and member roles ship initially; finer per-agent grants are deferred. Hosts retain execution, credentials and applied peer communication while the control plane is unavailable.
 

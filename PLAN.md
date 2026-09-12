@@ -1,6 +1,8 @@
 # Starting Architecture Plan
 
-This is a starting point. It is *not* gospel.
+This is the initial architecture source for the [primary product map](https://github.com/jdip/Fesnyng/issues/8). The map's confirmed dialogue and [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10) amend the original starting plan; the sections below incorporate those decisions. [The initial snapshot](https://github.com/jdip/Fesnyng/blob/b7aeb8ade1116ed924269632d943b4d7390a2cd9/PLAN.md) preserves the original proposal. README.md owns the enduring project purpose.
+
+The MVP uses a separate React/TypeScript/npm/Vite frontend and two Python/FastAPI backend components, managed with uv, Ruff and ty. One control plane manages multiple independently running agent hosts. SQLite owns durable Fesnyng state from the start; OpenCode owns execution and native session records.
 
 ## 0. Public Repository Constraint
 
@@ -76,7 +78,7 @@ created_at
 
 `created_by_user_id` is provenance, not the authorization boundary. Access is determined through `OrganizationMembership`.
 
-The initial product may use a very small role set, even a single effective member role, but the schema/API must be able to evolve toward:
+The MVP distinguishes owner/admin management from ordinary member access. Real authentication, owner bootstrap and additional users are required. The schema/API can later evolve toward:
 
 ```text
 owner/admin
@@ -223,7 +225,7 @@ Every organization-owned entity should carry or inherit an `organization_id` bou
 
 - departments;
 - agents;
-- hosts;
+- organization-scoped host registrations and placement grants;
 - credential profiles;
 - memory profiles;
 - skill assignments/configuration;
@@ -250,19 +252,11 @@ Agent
 
 ## 3. Runtime Isolation
 
-Start with one OpenCode runtime/service per credential or isolation boundary rather than assuming every employee must have its own container.
+Use **one Docker container per persistent agent**, with one home host. An agent is its identity, instructions, skills, tools, memory and reporting relationships; it is not a thread. Multiple native threads can execute concurrently inside that agent's boundary. Assign workspaces deliberately and use separate Git worktrees for concurrent repository work.
 
-We should test whether OpenCode's native agent/session model is sufficient to isolate durable employees cleanly.
+Persist the runtime home, workspaces and installed tooling across restart and container replacement. Default to broad access inside host-controlled container privileges, mounts and resource limits, including ordinary internet access and tool installation. Agents receive no Docker socket. Ops owns infrastructure, reachability and private-network controls.
 
-Potential boundaries include:
-
-- work organization vs personal organization;
-- separate OpenAI accounts;
-- separate hosts;
-- highly privileged agents;
-- experimental/untrusted agents.
-
-Do not introduce Docker-per-agent unless it solves a concrete security or dependency problem.
+Organization defaults, mandatory limits and authorized per-thread overrides configure native permissions. Avoid routine approval stops. Version desired/applied configuration: delivered restrictions apply before subsequent actions, while instructions/model changes take effect at safe turn boundaries. A future native macOS execution profile can give agents device access after the Docker MVP.
 
 ---
 
@@ -286,7 +280,7 @@ Examples:
 
 ### Explicit-only skills
 
-Available to the user but not advertised for automatic model selection.
+Use native OpenCode commands for workflows available to the user but absent from automatic skill discovery. Keep native skill loading and command execution with OpenCode.
 
 Examples:
 
@@ -303,31 +297,9 @@ Existing Codex/agent-team skills should be reused where practical rather than re
 
 ## 5. Memory
 
-Long-term memory remains an architectural area to design separately.
+Hosts persist explicit, inspectable and editable agent memory in SQLite, exposed to authorized users and agents through host APIs and native tools. Memory is distinct from OpenCode transcripts. Repository/project documents remain canonical shared knowledge.
 
-Initial principle:
-
-```text
-OpenCode session history
-    = conversational/task context
-
-Agent memory
-    = durable employee-specific knowledge
-
-Repository/project docs
-    = canonical shared project knowledge
-```
-
-Do not overload conversation history as permanent memory.
-
-The memory implementation should remain replaceable and should not force the project into a larger agent framework such as Hermes.
-
-Possible later options:
-
-- structured filesystem memory;
-- QMD/semantic retrieval;
-- lightweight vector memory;
-- shared organization/project knowledge stores.
+Memory edits require organization authorization and retain their attribution. Use the maintained Python MCP SDK for host-owned memory and collaboration tools when needed; do not build a skill dispatcher or another agent framework. Shared writable organization knowledge and semantic/vector retrieval are deferred.
 
 ---
 
@@ -372,28 +344,24 @@ Do not mirror external task systems into an internal issue tracker unless a futu
 
 ## 7. Multi-Host Design
 
-The organization should eventually support agents running across multiple machines.
-
-Conceptually:
+One control plane manages **multiple autonomous backend agent hosts from the MVP**:
 
 ```text
-                   Org UI
-                     │
-          ┌──────────┼──────────┐
-          │          │          │
-       Linux VM    Mac Mini    Server
-          │          │          │
-      OpenCode     OpenCode   OpenCode
+React frontend → Python control plane
+                         │ desired configuration / placement
+                  ┌──────┴──────┐
+             Python host A ↔ Python host B
+                │   │             │   │
+             agent containers   agent containers
 ```
 
-The control plane should know:
+The control plane owns users, organizations, memberships, desired policy/configuration, placement and discovery. Hosts own applied configuration, execution, credentials, memory, workspaces and supervision. Physical hosts may serve multiple organizations through isolated organization-scoped registrations and agents.
 
-- which host owns an agent/runtime;
-- host availability;
-- how to reach the OpenCode server;
-- runtime status.
+The local proof runs two independent host API instances on macOS with its existing Docker environment, each with its own identity, SQLite state and credential ownership. A second physical machine and Linux validation are deferred. Host administration and network reachability belong to ops, including private networks or Tailscale.
 
-Initial implementation can target one host first.
+Agents and configured peer communication continue without the browser/control plane. Hosts deliver same-organization contributions directly with cached applied peer authorization, durable outbox/inbox receipts, retry and duplicate suppression. There is no implicit control-plane relay. Agents can discover/read existing threads and intervene at safe boundaries or start recipient threads. Organization-chart distance biases collaborator selection without granting authority.
+
+Hosts preserve human/agent provenance and ordered delivery envelopes around native calls. Distinguish queued messages, safe-boundary steering and explicit stop. On restart reconcile native history, dispatch identity and effect evidence; automatically resume known-safe work and investigate uncertain effects before replay. Escalate only unresolved decisions.
 
 ---
 
@@ -413,96 +381,29 @@ Agents reference credential profiles rather than embedding credentials directly.
 
 The runtime isolation strategy must prevent one employee from accidentally using another organization's account.
 
-Secrets should remain outside the normal application database wherever practical.
+Each host owns its own login and refresh for each organization-scoped profile. Assigned local agents share that host authorization; multiple accounts for the same provider remain distinct profiles. Different hosts may use the same account through independent logins, never synchronized rotating credentials.
+
+The host protects its credential database and serializes refresh. The approved narrow native OpenCode JS/TS authentication plugin obtains current access credentials from Python; refresh tokens remain on the host. Reject mismatched account/profile assignments and expose subscription-supported model choices.
 
 ---
 
 ## 9. MVP
 
-### Phase 1 — Establish tenancy and prove the interaction layer
+The [approved implementation specification and seven-ticket backlog](https://github.com/jdip/Fesnyng/issues/10) owns executable acceptance. The retained full-system proof includes:
 
-Start with the correct tenancy model even in the prototype.
+1. Two users and two organizations, shared membership, role enforcement and denied cross-organization access across HTTP, events, native runtime operations, artifacts, memory and peer delivery.
+2. Persistent agents performing real repository work, editable memory, concurrent threads, native reusable skills and explicit-only commands.
+3. Maintained assistant-ui Thread and companion components for messages, composer, Markdown, scrolling, actions, branches and generic tools; supported slots for actual Fesnyng-specific gaps.
+4. Two local host APIs, each sharing independently refreshed profile credentials among its assigned Docker agents.
+5. CEO-to-senior-to-existing-junior-thread collaboration, discovery, visible provenance and meaningful results returning to the initiator.
+6. Browser/control-plane outages, direct peer queue/retry, host restart and container replacement with retained work, tooling, history and safe recovery.
+7. Organization switching, searchable agents/threads, actionable activity and an additional reporting-chart view. Notify for useful results, failures or unresolved input rather than every internal event.
 
-Build a small web prototype that:
+The native adapter proof found missing pre-existing requests on initial attachment and stale requests after another client answered during disconnection. Apply the approved narrow `patch-package` fix to react-opencode's existing interaction synchronization unless upstream has released an equivalent fix. Reconcile authoritative pending IDs by request kind/session, preserve errors and record patch provenance/removal criteria; do not replace its conversation runtime.
 
-1. supports more than one human user;
-2. lets a user create more than one organization;
-3. lets an organization be shared with another user through `OrganizationMembership`;
-4. verifies that a user cannot access an organization they are not a member of;
-5. connects assistant-ui to one OpenCode server for an organization-scoped agent;
-6. starts/resumes a session;
-7. renders messages;
-8. renders shell/tool activity compactly;
-9. renders file changes/diffs;
-10. handles permission requests;
-11. handles interactive questions;
-12. verifies that tool output can stay collapsed by default.
+## 10. Deferred decisions
 
-This phase answers two foundational questions:
-
-> Is the user/organization/membership boundary correct enough to grow into finer-grained authorization later?
-
-> Can OpenCode + assistant-ui reproduce the interaction experience we like from Codex Desktop?
-
-### Phase 2 — Persistent employee
-
-Add one durable employee with:
-
-- name;
-- title;
-- persona;
-- assigned skills;
-- provider/model;
-- persistent OpenCode session access.
-
-Validate Matt Pocock-style explicit and auto-invoked skills.
-
-### Phase 3 — Organization experience
-
-Expand the tenancy model into the full organization experience:
-
-- organization switcher;
-- member management;
-- departments;
-- `reports_to`;
-- org-chart UI;
-- agent roster/status;
-- click-through from an employee to its conversation.
-
-Keep authorization centralized so later role-based and per-agent grants can be introduced without rewriting each feature.
-
-### Phase 4 — Multiple employees/accounts
-
-Add:
-
-- several persistent employees;
-- separate credential profiles;
-- different models/providers;
-- employee-specific skills;
-- durable agent memory.
-
-### Phase 5 — Multiple hosts
-
-Add host registration and remote OpenCode instances.
-
----
-
-## 10. Open Questions
-
-These should be answered through prototypes rather than prematurely designed around.
-
-1. Does GPT-5.6 running through OpenCode perform comparably enough to native Codex for our workflows?
-2. How should durable employee identity map onto OpenCode's native agent/session model?
-3. Do we need one OpenCode server per employee, per credential profile, per host, or something in between?
-4. How should employee memory be stored and retrieved?
-5. How much organization context should automatically enter an employee's prompt?
-6. Should managers have direct runtime-level delegation abilities, or should delegation itself be implemented as a skill/tool?
-7. What is the cleanest multi-host transport and authentication model?
-8. How much of assistant-ui's OpenCode adapter will need customization to reach the desired Codex-Desktop-like presentation?
-9. How should voice interaction eventually attach to an existing employee/session?
-10. What minimal organization role model should ship first: owner/member, admin/member, or another small set?
-11. Should per-agent grants be allow-list based, deny-list based, or inherited from organization roles when introduced?
-12. Which resources besides agents will eventually need finer-grained grants (hosts, credential profiles, memory, settings)?
+The resolved map records the completed architecture dialogue and live integration evidence. Keep future native macOS agents with device access, Windows, automatic agent cloning/migration, cross-host credential sync, shared writable organization knowledge, finer grants/superior-agent approvals, public signup/external identity providers and infrastructure fleet UI out of this MVP. Reopen the map for a substantive new design gap; routine implementation choices remain with the implementer.
 
 ---
 

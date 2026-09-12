@@ -3,6 +3,7 @@
 Fesnyng is a public, self-hosted control plane for multi-user organizations of persistent AI agents. Preserve its organization boundary: Fesnyng manages durable agent organizations while external systems continue to own their work tracking and execution.
 
 - For GitHub issues, planning records, claims, and remediation follow [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+- For product planning, read [PLAN.md](PLAN.md), the initial source for the [primary map](https://github.com/jdip/Fesnyng/issues/8), and its [approved implementation specification](https://github.com/jdip/Fesnyng/issues/10).
 - For product terms and architecture decisions, start with [docs/agents/domain.md](docs/agents/domain.md).
 - For the current environment, code classification, and local checks, use [docs/development.md](docs/development.md).
 
@@ -12,7 +13,7 @@ This is a public GitHub repository under the [MIT License](LICENSE). Before any 
 
 ## Languages and environments
 
-There is no Application Code, product runtime, package manager, or deployment environment yet. Current delivery and maintenance scripts are Tooling, approved to use Bash 3.2+ with the existing macOS `git` and authenticated `gh` CLIs. Adding any application language, runtime, build/package toolchain, execution environment, or additional helper environment requires explicit user authorization.
+Application Code uses a separate React/TypeScript/npm/Vite frontend and Python/FastAPI control-plane and agent-host services with uv, Ruff, ty and SQLite. Docker provides one container per agent; the initial proof runs two independent host APIs locally on macOS. OpenCode owns execution; assistant-ui owns conversation presentation. The narrow native JS/TS OpenCode auth plugin and the specification’s frontend patch/test tools are approved. Delivery and maintenance scripts are Bash Tooling. Additional languages, toolchains or execution environments require explicit user authorization.
 
 ## Checkouts and delivery
 
