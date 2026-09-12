@@ -19,3 +19,4 @@ uv_command=${FESNYNG_UV:-uv}
 "$uv_command" run --locked --project backend ty check --project backend
 (cd backend && "$uv_command" run --locked pytest)
 npm run check --prefix frontend
+npm run check --prefix agent-runtime

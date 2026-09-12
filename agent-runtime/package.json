@@ -1,0 +1,21 @@
+{
+  "name": "fesnyng-agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
+  "scripts": {
+    "check": "eslint . && tsc --noEmit && node --test host-auth.test.mjs"
+  },
+  "dependencies": {
+    "opencode-ai": "1.18.30"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.10.0",
+    "typescript": "5.7.3",
+    "@types/node": "22.20.2"
+  }
+}
