@@ -2,18 +2,20 @@
 
 Fesnyng has separate Python/FastAPI control-plane and agent-host services in `backend/`, and a React/TypeScript/Vite application in `frontend/`. The Python package shares contracts while each service owns its SQLite database and schema. Product code and contracts are **Application Code**; setup and delivery scripts are **Tooling**.
 
-The current API supports service health, durable identity, human authentication, organizations, memberships and desired agent configuration. Host execution and the assistant-ui conversation workspace are subsequent children of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). A running foundation is not the complete MVP.
+The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Ordered thread coordination and the assistant-ui conversation workspace are subsequent children of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). Host execution alone is not the complete MVP.
 
 ## Install and check
 
-Use a Node version supported by `frontend/package.json` (verified with Node 22.23.1), npm, and uv with Python 3.12 or newer. Dependencies belong in `backend/pyproject.toml` and `frontend/package.json`, with their committed lockfiles. Follow `backend/README.md` for Python runtime details. If uv is outside PATH, set `FESNYNG_UV` to its absolute executable path; the setup and delivery commands preserve this override.
+Use a Node version supported by `frontend/package.json` (verified with Node 22.23.1), npm, and uv with Python 3.12 or newer. Dependencies belong in `backend/pyproject.toml`, `frontend/package.json` and `agent-runtime/package.json`, with their committed lockfiles. Follow `backend/README.md` for Python runtime details and `agent-runtime/README.md` for the pinned Docker runtime and native auth plugin. If uv is outside PATH, set `FESNYNG_UV` to its absolute executable path; the setup and delivery commands preserve this override.
 
 ```bash
 scripts/setup.sh
 scripts/check.sh
 ```
 
-Setup consumes the locked manifests. The canonical check includes setup, Python lint/format/type/behavior checks, frontend lint/behavior/type/build checks, Bash syntax, executable script modes, whitespace and the `CLAUDE.md -> AGENTS.md` bridge. Run focused component checks during implementation; use the canonical gate before delivery. Product tests exercise public behavior with temporary isolated state. Tooling is verified through successful real use, without a tooling coverage suite.
+Setup consumes the locked manifests. The canonical check includes setup, Python lint/format/type/behavior checks, frontend lint/behavior/type/build checks, native auth plugin lint/type/behavior checks, Bash syntax, executable script modes, whitespace and the `CLAUDE.md -> AGENTS.md` bridge. Run focused component checks during implementation; use the canonical gate before delivery. Product tests exercise public behavior with temporary isolated state. Tooling is verified through successful real use, without a tooling coverage suite.
+
+After building the agent image, run `FESNYNG_DOCKER_TESTS=true uv run --locked --project backend pytest backend/tests/test_docker_integration.py -q` to verify native configuration, managed skill removal and container-replacement persistence against real Docker. This opt-in check creates isolated containers and volumes, removes its own successfully verified resources, and retains failed resources for diagnosis. Real provider login and shared-credential verification use private installation state and are separate from credential-free tests.
 
 ## Run locally
 

@@ -4,6 +4,7 @@ import argparse
 import getpass
 import sqlite3
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -24,6 +25,9 @@ def main(arguments: list[str] | None = None) -> int:
     host.add_argument("--name", required=True)
     host.add_argument("--api-url", required=True)
     host.add_argument("--organization", type=UUID, required=True)
+    host.add_argument(
+        "--token-file", type=Path, help="Private organization/host binding token file"
+    )
     args = parser.parse_args(arguments)
     try:
         app = create_app()
@@ -54,8 +58,14 @@ def main(arguments: list[str] | None = None) -> int:
                 args.api_url.rstrip("/"),
                 str(args.organization),
             )
+            if args.token_file:
+                if args.token_file.stat().st_mode & 0o077:
+                    raise ValueError("Binding token file must be private")
+                AgentStore(store).set_host_credential(
+                    str(args.organization), str(args.id), args.token_file.read_text().strip()
+                )
             print("Host allocated.")
-    except (ValueError, LookupError, RuntimeError, sqlite3.IntegrityError) as error:
+    except (ValueError, LookupError, RuntimeError, OSError, sqlite3.IntegrityError) as error:
         print(f"Installation failed: {error}", file=sys.stderr)
         return 1
     return 0

@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS organization_hosts (
     host_id TEXT NOT NULL REFERENCES hosts(id),
     PRIMARY KEY (organization_id, host_id)
 );
+CREATE TABLE IF NOT EXISTS organization_host_credentials (
+    organization_id TEXT NOT NULL, host_id TEXT NOT NULL, token TEXT NOT NULL,
+    PRIMARY KEY(organization_id,host_id),
+    FOREIGN KEY(organization_id,host_id) REFERENCES organization_hosts(organization_id,host_id)
+);
 CREATE TABLE IF NOT EXISTS credential_profiles (
     id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL REFERENCES organizations(id),
@@ -88,6 +93,46 @@ class AgentStore:
             connection.execute(
                 "INSERT OR IGNORE INTO organization_hosts(organization_id,host_id) VALUES(?,?)",
                 (organization_id, host_id),
+            )
+
+    def set_host_credential(self, organization_id: str, host_id: str, token: str) -> None:
+        if len(token) < 32:
+            raise ValueError("Host binding token must contain at least 32 characters")
+        with self.control.connect() as connection:
+            connection.execute(
+                "INSERT INTO organization_host_credentials VALUES(?,?,?) ON CONFLICT(organization_id,host_id) DO UPDATE SET token=excluded.token",
+                (organization_id, host_id, token),
+            )
+
+    def host_connection(self, organization_id: str, host_id: str) -> tuple[str, str]:
+        with self.control.connect() as connection:
+            row = connection.execute(
+                "SELECT h.api_url,c.token FROM hosts h JOIN organization_host_credentials c ON c.host_id=h.id WHERE c.organization_id=? AND h.id=?",
+                (organization_id, host_id),
+            ).fetchone()
+        if row is None:
+            raise LookupError("Host binding is not configured by installation")
+        return row[0], row[1]
+
+    def acknowledge_host(
+        self, organization_id: str, agent_id: str, host_id: str, version: int
+    ) -> None:
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT host_id FROM agents WHERE organization_id=? AND id=?",
+                (organization_id, agent_id),
+            ).fetchone()
+            if row is None or row[0] != host_id:
+                raise ValueError("Acknowledgement is not from the assigned host")
+            if not connection.execute(
+                "SELECT 1 FROM agent_configurations WHERE agent_id=? AND version=?",
+                (agent_id, version),
+            ).fetchone():
+                raise ValueError("Acknowledged configuration version does not exist")
+            connection.execute(
+                "UPDATE agents SET applied_version=MAX(COALESCE(applied_version,0),?) WHERE organization_id=? AND id=?",
+                (version, organization_id, agent_id),
             )
 
     def create_agent(

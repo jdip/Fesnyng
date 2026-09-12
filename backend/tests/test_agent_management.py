@@ -152,3 +152,19 @@ def test_policy_defaults_to_broad_access_and_preserves_versioned_limits(organiza
     with pytest.raises(ValueError, match="version conflict"):
         agents.update_policy(org.id, owner.id, {"expected_version": 1, "configuration": {}})
     assert agents.get_policy(org.id) == updated
+
+
+def test_host_acknowledgement_cannot_apply_foreign_or_future_configuration(organization):
+    _, _, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    with pytest.raises(ValueError):
+        agents.acknowledge_host(org.id, agent["id"], str(uuid4()), 1)
+    with pytest.raises(ValueError):
+        agents.acknowledge_host(org.id, agent["id"], host_id, 2)
+    agents.update_agent(org.id, agent["id"], owner.id, {"expected_version": 1, "name": "Updated"})
+    agents.acknowledge_host(org.id, agent["id"], host_id, 1)
+    assert agents.get_agent(org.id, agent["id"])["configuration_status"] == "pending"
+    agents.acknowledge_host(org.id, agent["id"], host_id, 2)
+    assert agents.get_agent(org.id, agent["id"])["configuration_status"] == "applied"
+    agents.acknowledge_host(org.id, agent["id"], host_id, 1)
+    assert agents.get_agent(org.id, agent["id"])["applied_version"] == 2

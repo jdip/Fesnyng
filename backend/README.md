@@ -1,6 +1,6 @@
 # Fesnyng backends
 
-The independently runnable control-plane and agent-host APIs each own a private SQLite file, state directory and durable UUID. The control plane also owns users, memberships, desired organization policy, agent configuration and host allocations. The host's execution and OAuth integration are the next approved milestone.
+The independently runnable control-plane and agent-host APIs each own a private SQLite file, state directory and durable UUID. The control plane owns users, memberships, desired organization policy, agent configuration and host allocations. Each agent host owns Docker execution and its own credential state.
 
 ## Install and verify
 
@@ -33,14 +33,7 @@ Secure cookies are the default for HTTPS installations. Configure the actual fro
 
 Each service defaults to `./.fesnyng/<service>/fesnyng.sqlite3`. Set `FESNYNG_CONTROL_PLANE_STATE_DIRECTORY` or `FESNYNG_AGENT_HOST_STATE_DIRECTORY` to choose another private directory, and the corresponding `*_DATABASE_PATH` to override the database location. Use the same values for installation commands and server startup. Existing state must have private permissions; the app does not change unrelated directory permissions.
 
-Run two independent host instances with distinct directories and ports:
-
-```bash
-FESNYNG_AGENT_HOST_STATE_DIRECTORY=./.fesnyng/host-a \
-  uv run --locked --project backend uvicorn fesnyng_backend.agent_host:create_app --factory --host 127.0.0.1 --port 8001
-FESNYNG_AGENT_HOST_STATE_DIRECTORY=./.fesnyng/host-b \
-  uv run --locked --project backend uvicorn fesnyng_backend.agent_host:create_app --factory --host 127.0.0.1 --port 8002
-```
+For a two-host local proof, use the installation commands below with separate state directories, host API ports, and container-reachable credential URLs for each host.
 
 `GET /health` returns the service, durable instance UUID and foundation schema version. An optional `FESNYNG_CONTROL_PLANE_INSTANCE_ID` or `FESNYNG_AGENT_HOST_INSTANCE_ID` sets its first UUID; subsequent starts reject mismatches. Control-plane tables evolve independently of the foundation identity and host state.
 
@@ -57,6 +50,69 @@ uv run --locked --project backend python -m fesnyng_backend.cli register-host \
 
 Only allocated hosts appear through organization APIs. One host can be allocated to multiple organizations. Ordinary organization management cannot alter its network address or infrastructure.
 
-The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/organizations/{id}`. Credential profiles are metadata here; host-local login/refresh arrives with host execution. Agent creation assigns one home host. Configuration edits carry `expected_version`; stale updates return 409. When supplied in a patch, `configuration` replaces the complete configuration object. Host assignment and applied status are not client-writable. Desired state remains pending until the assigned host acknowledges it in the host integration milestone.
+The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/organizations/{id}`. Credential profiles are metadata here; each host owns the local login and refresh state for its assigned profiles. Agent creation assigns one home host. Configuration edits carry `expected_version`; stale updates return 409. When supplied in a patch, `configuration` replaces the complete configuration object. Host assignment and applied status are not client-writable. Desired state remains pending until the assigned host acknowledges the exact configuration version.
 
 Agent workspaces are logical names, not arbitrary filesystem paths. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
+
+## Install an agent host
+
+The host launches one OpenCode container per applied agent. Build the pinned runtime image from the repository root before applying an agent configuration:
+
+```bash
+docker build -t fesnyng-agent:local agent-runtime
+```
+
+Run each host with a private state directory, its own API port, the image name, and a credential URL that its containers can reach. Bind the host API to `0.0.0.0` so containers can reach it through the Docker host gateway. `FESNYNG_AGENT_HOST_CREDENTIAL_URL` must use the gateway name available inside the agent containers: Docker Desktop commonly provides `host.docker.internal`; Colima may provide `host.lima.internal`. The runtime's `host.lima.internal` default is therefore not portable—set the variable explicitly for every host.
+
+```bash
+# Set this to the Docker host gateway name resolvable inside your agent containers.
+HOST_GATEWAY=host.docker.internal
+
+# Host A
+FESNYNG_AGENT_HOST_STATE_DIRECTORY=./.fesnyng/host-a \
+FESNYNG_AGENT_HOST_IMAGE=fesnyng-agent:local \
+FESNYNG_AGENT_HOST_CREDENTIAL_URL=http://${HOST_GATEWAY}:8001 \
+  uv run --locked --project backend uvicorn fesnyng_backend.agent_host:create_app \
+  --factory --host 0.0.0.0 --port 8001
+
+# Host B
+FESNYNG_AGENT_HOST_STATE_DIRECTORY=./.fesnyng/host-b \
+FESNYNG_AGENT_HOST_IMAGE=fesnyng-agent:local \
+FESNYNG_AGENT_HOST_CREDENTIAL_URL=http://${HOST_GATEWAY}:8002 \
+  uv run --locked --project backend uvicorn fesnyng_backend.agent_host:create_app \
+  --factory --host 0.0.0.0 --port 8002
+```
+
+Read each host's `GET /health` response and use its `instance_id` when registering that host. Its durable instance identity, SQLite state, agent containers, and credential profiles are independent.
+
+### Bind an organization to its host
+
+An organization-host binding uses one opaque token shared by the control plane and the selected host. Keep the token in a file outside the repository with permissions no broader than `0600`; both installation commands reject a public token file. Substitute the same private file, organization UUID, and host UUID in these commands:
+
+```bash
+uv run --locked --project backend python -m fesnyng_backend.cli register-host \
+  --id HOST_UUID --name 'Local host' --api-url http://127.0.0.1:8001 \
+  --organization ORGANIZATION_UUID --token-file /private/path/host-binding-token
+
+FESNYNG_AGENT_HOST_STATE_DIRECTORY=./.fesnyng/host-a \
+  uv run --locked --project backend python -m fesnyng_backend.host_cli bind-organization \
+  --organization ORGANIZATION_UUID --token-file /private/path/host-binding-token
+```
+
+`register-host` makes the host available for organization placement and stores the control-plane side of the binding. `bind-organization` stores only the binding digest on the host. The control plane uses this token for host API calls; browsers and agent containers do not receive it.
+
+Owners and admins create profile metadata and agent configuration in the control plane. Applying an agent sends its versioned configuration to its assigned host. The host accepts only its assigned organization binding and acknowledges the exact host, organization, agent, policy, and configuration version. A failed or mismatched acknowledgement leaves the control-plane agent pending.
+
+## Host-local OAuth profiles
+
+Credential profiles are organization-scoped metadata in the control plane and durable OAuth state on each assigned host. An owner or admin starts device authorization with `POST /organizations/{organization_id}/hosts/{host_id}/profiles/{profile_id}/login` through the authenticated control-plane API. The response contains the official device verification URL and user code. Complete that step in a browser; access and refresh tokens remain in the host's private SQLite state and are never returned by profile status or control-plane APIs.
+
+The host is the only login and refresh owner. It derives the assigned profile from each container's host-issued agent key, serializes refreshes per profile, and fails closed on an uncertain rotation or account mismatch. Several agents on one host can share a profile. A second host can authenticate the same account through a separate login, but it keeps independent refresh credentials and receives no cross-host token synchronization.
+
+## Container state and replacement
+
+Applied agents use labeled Docker volumes for `/home/agent` and `/workspace`; the native OpenCode server binds its port only to loopback. The host writes the agent's configuration, skill files, and broker configuration with a private umask. Docker receives no socket mount from this runtime.
+
+The organization-bound host API provides `POST /organizations/{organization_id}/agents/{agent_id}/replace`. It waits for native sessions to be idle, stops the container, commits a checkpoint image, removes the container, and starts the replacement from that checkpoint while retaining the labeled home and workspace volumes. If an already-applied container is missing without a recorded checkpoint, the host retains state for inspection and refuses replacement.
+
+This establishes container and credential ownership for the current host runtime. Ordered delivery reconciliation, uncertain external-effect recovery, and the broader MVP acceptance journey remain subsequent work.
