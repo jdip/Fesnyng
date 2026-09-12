@@ -24,11 +24,11 @@ scripts/promote-to-main.sh merge PROMOTION_PR_NUMBER
 Inspect the synchronization PR against its immutable head and current `test`. Confirm it carries the intended promotion and any separately reviewed main changes, then:
 
 ```bash
-scripts/promote-to-main.sh sync SYNC_PR_NUMBER
+scripts/promote-to-main.sh sync SYNC_PR_NUMBER REVIEWED_MAIN_SHA
 scripts/promote-to-main.sh verify PROMOTION_PR_NUMBER SYNC_PR_NUMBER
 ```
 
-`sync` verifies the selected remote main revision, performs the merge-commit synchronization, verifies the resulting commit, and refreshes/checks the clean primary `test` checkout. Final `verify` establishes that both PRs are merged to the intended branches and the synchronization includes the selected promotion. A clean verified primary checkout, both merge SHAs, and the actual version/deployment disposition are the completion evidence.
+`sync` requires the full main commit SHA from the completed synchronization review and rejects remote or PR head drift. It verifies that revision, performs the merge-commit synchronization, verifies the resulting commit, and refreshes/checks the clean primary `test` checkout. Final `verify` establishes that both PRs are merged to the intended branches and the synchronization includes the selected promotion. A clean verified primary checkout, both merge SHAs, and the actual version/deployment disposition are the completion evidence.
 
 ## Recovery and cleanup
 

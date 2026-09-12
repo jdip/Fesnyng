@@ -98,7 +98,11 @@ verify_merge() {
 refresh_primary() {
   [[ $(git -C "$primary" branch --show-current) == test && -z $(git -C "$primary" status --porcelain) ]] ||
     fail 'Primary checkout has changed or is dirty; preserve it and report incomplete refresh.'
+  git -C "$primary" merge-base --is-ancestor HEAD origin/test ||
+    fail 'Primary test is ahead of or diverged from origin/test; preserve it and investigate.'
   git -C "$primary" merge --ff-only origin/test
+  [[ $(git -C "$primary" rev-parse HEAD) == $(git rev-parse origin/test) ]] ||
+    fail 'Primary test does not match the fetched remote revision.'
   "$primary/scripts/check.sh"
   echo "Primary test checkout verified at $(git -C "$primary" rev-parse HEAD)."
 }

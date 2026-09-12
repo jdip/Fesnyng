@@ -6,7 +6,7 @@ usage() {
   echo 'Requires a separate explicit operator promotion request.'
   echo 'Usage: scripts/promote-to-main.sh submit TITLE BODY_FILE'
   echo '       scripts/promote-to-main.sh merge PR_NUMBER'
-  echo '       scripts/promote-to-main.sh sync SYNC_PR_NUMBER'
+  echo '       scripts/promote-to-main.sh sync SYNC_PR_NUMBER REVIEWED_MAIN_SHA'
   echo '       scripts/promote-to-main.sh verify PROMOTION_PR_NUMBER SYNC_PR_NUMBER'
 }
 [[ $# -gt 0 ]] || { usage; exit 2; }
@@ -37,13 +37,14 @@ Synchronize the verified main promotion from pull request #$2 back to test using
 EOF
     create_pr test main 'Synchronize main into test after promotion' "$synchronization_body" semver:none
     rm -- "$synchronization_body"
-    echo 'Review the synchronization diff, then run sync with its PR number.'
+    echo 'Review the synchronization diff, then run sync with its PR number and reviewed main SHA.'
     ;;
   sync)
-    [[ $# == 2 && $2 =~ ^[0-9]+$ ]] || { usage; exit 2; }
+    [[ $# == 3 && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9a-f]{40}$ ]] || { usage; exit 2; }
     git fetch origin
-    verify_revision "$(git rev-parse origin/main)"
-    merge_pr "$2" test main "$(git rev-parse origin/main)"
+    [[ $(git rev-parse origin/main) == "$3" ]] || fail 'Main has changed since synchronization review; review the new revision first.'
+    verify_revision "$3"
+    merge_pr "$2" test main "$3"
     verify_merge "$2" test main
     refresh_primary
     ;;
