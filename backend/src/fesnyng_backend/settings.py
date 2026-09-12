@@ -29,6 +29,17 @@ class ServiceSettings(BaseModel):
         return self
 
 
+class ControlPlaneSessionSettings(BaseModel):
+    """Browser-session settings kept separate from durable service identity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    cookie_name: str = "fesnyng_session"
+    cookie_secure: bool = True
+    allowed_origin: str | None = None
+    session_lifetime_seconds: int = Field(default=60 * 60 * 24 * 7, ge=60, le=60 * 60 * 24 * 31)
+
+
 def settings_from_environment(service: ServiceName) -> ServiceSettings:
     """Read only this service's local configuration from its environment."""
 
@@ -43,4 +54,15 @@ def settings_from_environment(service: ServiceName) -> ServiceSettings:
         database_path=database_path,
         state_directory=state_directory,
         instance_id=instance_id,
+    )
+
+
+def control_plane_session_settings_from_environment() -> ControlPlaneSessionSettings:
+    """Use secure cookies unless explicit local-development configuration opts out."""
+
+    local_development = os.environ.get("FESNYNG_CONTROL_PLANE_LOCALHOST_DEVELOPMENT") == "true"
+    return ControlPlaneSessionSettings(
+        cookie_name=os.environ.get("FESNYNG_CONTROL_PLANE_SESSION_COOKIE_NAME", "fesnyng_session"),
+        cookie_secure=not local_development,
+        allowed_origin=os.environ.get("FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN"),
     )

@@ -2,7 +2,7 @@
 
 Fesnyng has separate Python/FastAPI control-plane and agent-host services in `backend/`, and a React/TypeScript/Vite application in `frontend/`. The Python package shares contracts while each service owns its SQLite database and schema. Product code and contracts are **Application Code**; setup and delivery scripts are **Tooling**.
 
-The foundation exposes service health and durable instance identity. Authentication, organization management, agent execution and the assistant-ui conversation workspace are subsequent children of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). A running foundation is not the complete MVP.
+The current API supports service health, durable identity, human authentication, organizations, memberships and desired agent configuration. Host execution and the assistant-ui conversation workspace are subsequent children of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). A running foundation is not the complete MVP.
 
 ## Install and check
 
