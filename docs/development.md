@@ -13,6 +13,6 @@ git diff --check
 
 ## Dependency upkeep and repository verification
 
-There are no manifests or current dependency surfaces, and this repository has no version configuration. During normal discovery, invoke `dependabot-upkeep` to read actionable alerts. Where GitHub supports and permits it, enable the dependency graph and Dependabot alerts while disabling automated Dependabot security-update and version-update pull requests. Current settings access is blocked, so those settings are not verified.
+There are no dependency manifests or scheduled version-update configuration. During normal discovery, invoke `dependabot-upkeep` to read actionable alerts. Enable the dependency graph and Dependabot alerts while disabling automated Dependabot security-update and version-update pull requests. Verify graph/alert coverage, update configuration, and auto-triage PR-generation rules separately; administration access is needed for some settings. Record actual hosted evidence and access limits in the owning issue rather than inferring settings from an empty alert list.
 
 Reusable repository verification is deferred until Fesnyng has runnable product behavior. Reassess then with `repository-verification`; do not add a standalone verification framework in advance.
