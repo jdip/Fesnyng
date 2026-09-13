@@ -266,6 +266,38 @@ class ControlPlaneStore:
             )
         return self.list_thread_pins(organization_id, user_id, agent_id)
 
+    def list_thread_acknowledgements(
+        self, organization_id: str, user_id: str, agent_id: str
+    ) -> list[dict[str, str]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT session_id,delivery_id,kind,outcome_id
+                FROM thread_acknowledgements
+                WHERE organization_id=? AND user_id=? AND agent_id=?
+                ORDER BY created_at,session_id,delivery_id,kind,outcome_id""",
+                (organization_id, user_id, agent_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def acknowledge_thread(
+        self,
+        organization_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        delivery_id: str,
+        kind: str,
+        outcome_id: str,
+    ) -> list[dict[str, str]]:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO thread_acknowledgements(
+                organization_id,user_id,agent_id,session_id,delivery_id,kind,outcome_id,created_at
+                ) VALUES(?,?,?,?,?,?,?,unixepoch())""",
+                (organization_id, user_id, agent_id, session_id, delivery_id, kind, outcome_id),
+            )
+        return self.list_thread_acknowledgements(organization_id, user_id, agent_id)
+
     def login(
         self, login: str, password: str, lifetime_seconds: int
     ) -> tuple[User, SessionCredentials] | None:

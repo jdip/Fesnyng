@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useThreadPins } from "@/ThreadPins";
+import { ThreadNotificationBadge } from "@/ThreadNotificationBadge";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -343,6 +344,7 @@ export const ThreadListItem: FC = () => {
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
         >
           {pinned && <PinIcon role="img" aria-label="Pinned" className="me-1.5 size-3.5 shrink-0" />}
+          {session && <ThreadNotificationBadge session={session} />}
           {isRunning && (
             <Loader2Icon
               aria-hidden

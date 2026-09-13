@@ -36,9 +36,13 @@ login instructions and status, never host management or refresh credentials.
 Members can use agents, inspect/edit memory, and set allowed thread overrides.
 Mandatory organization limits retain precedence.
 
-Thread activity links an agent contribution to its originating thread. Activity
-reports results, failures, and pending input while preserving healthy-host
-results when another host is unavailable. Thread permissions expose desired and
+Thread and agent indicators distinguish unread completed results from unresolved
+attention. Read state is personal and persists across devices; a result is read
+only when its rendered content is visible. Questions and approvals remain until
+answered, and terminal failures have an explicit personal “Mark failure handled”
+action that never repeats execution. Refresh failures preserve known indicators
+and expose a retry notice. Thread activity retains contribution origins and
+investigation controls. Thread permissions expose desired and
 applied revisions. While an agent is working, the same conversation composer
 steers on Enter; Queue remains a secondary action and Stop stays beside it. Type
 `/` in that composer to choose a configured explicit workflow. A rejected or

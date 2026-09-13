@@ -2,7 +2,8 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { NetworkIcon, SettingsIcon } from 'lucide-react';
 import { readWorkspaceLocation, saveWorkspaceLocation } from './workspace-location';
 import { ConversationBoundary } from './ConversationBoundary';
-import { Activity } from './Activity';
+import { ThreadNotificationsProvider, useThreadNotifications } from './ThreadNotifications';
+import { ThreadNotificationBadge } from './ThreadNotificationBadge';
 import { ThreadContext } from './ThreadContext';
 const Conversation = lazy(async () => ({ default: (await import('./Conversation')).Conversation }));
 import { AgentSettings } from './AgentSettings';
@@ -83,28 +84,34 @@ function OrganizationWorkspace({ organization, organizations, onOrganization, se
   const agent = agents.find((item) => item.id === selected);
   const navigate = (next: string) => { setView(next); setMobile(false); setError(''); };
   const openAgent = (id: string, nativeSession?: string) => { saveWorkspaceLocation(organization, id, nativeSession); setSelected(id); setThread(nativeSession); setThreadMount((value) => value + 1); navigate('conversation'); };
-  return <div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><Brand />
+  return <ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><Brand />
     <label className="app-label">Organization<select className="app-select" value={organization} onChange={(event) => onOrganization(event.target.value)}>{organizations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}<option value="__new__">+ Create organization</option></select></label>
-    <nav className="app-nav"><button aria-current={view === 'activity' ? 'page' : undefined} onClick={() => navigate('activity')}>Activity</button></nav>
     <div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
     <input className="app-input" aria-label="Search agents" placeholder="Find an agent…" value={search} onChange={(event) => setSearch(event.target.value)} />
-    <div className="agent-list">{agents.filter((item) => `${item.name} ${item.title}`.toLowerCase().includes(search.toLowerCase())).map((item) => <button key={item.id} className="agent-choice" aria-pressed={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><span>{item.name}<small>{item.title || 'Agent'}</small></span></button>)}</div>
+    <div className="agent-list">{agents.filter((item) => `${item.name} ${item.title}`.toLowerCase().includes(search.toLowerCase())).map((item) => <button key={item.id} className="agent-choice" aria-pressed={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><span>{item.name}<small>{item.title || 'Agent'}</small></span><ThreadNotificationBadge agent={item.id} /></button>)}</div>
     <div className="sidebar-utilities" aria-label="Organization navigation"><button className="sidebar-icon-button" aria-label="Reporting chart" aria-current={view === 'chart' ? 'page' : undefined} title="Reporting chart" onClick={() => navigate('chart')}><NetworkIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Reporting chart</span></button>{manager && <button className="sidebar-icon-button" aria-label="Organization settings" aria-current={view === 'organization' ? 'page' : undefined} title="Organization settings" onClick={() => navigate('organization')}><SettingsIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Organization settings</span></button>}</div>
     <div className="sidebar-footer"><span>{session.user.display_name}</span><button className="app-button quiet" onClick={() => { void api('/auth/logout', { method: 'POST', csrf: session.csrf_token }).then(onLogout).catch((cause: unknown) => setError(errorMessage(cause))); }}>Sign out</button></div>
-  </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1>{view === 'activity' ? 'Activity' : view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['chart', 'organization', 'activity'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
-    <div className="header-actions">{agent && !['chart', 'organization', 'activity'].includes(view) && <><button className="app-button" onClick={() => navigate('conversation')}>Threads</button><button className="app-button" onClick={() => navigate('memory')}>Memory</button>{manager && <button className="app-button" onClick={() => navigate('agent-settings')}>Agent settings</button>}</>}<button className="app-button quiet" onClick={() => setVersion((current) => current + 1)}>Refresh</button></div></header>
-    {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content">
-    <Activity organization={organization} agents={agents} onOpen={openAgent} compact={view !== 'activity'} />
+  </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1>{view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['chart', 'organization'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
+    <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button" onClick={() => navigate('conversation')}>Threads</button><button className="app-button" onClick={() => navigate('memory')}>Memory</button>{manager && <button className="app-button" onClick={() => navigate('agent-settings')}>Agent settings</button>}</>}<button className="app-button quiet" onClick={() => setVersion((current) => current + 1)}>Refresh</button></div></header>
+    {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content"><NotificationErrors />
     {view === 'conversation' && agent && <div className="conversation-region" style={{ display: 'flex', flexDirection: 'column' }}>{thread && <ThreadContext key={`${agent.id}:${thread}`} organization={organization} agent={agent.id} session={thread} csrf={session.csrf_token} onOpen={openAgent} />}<ConversationBoundary key={`${agent.id}:${threadMount}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}><Conversation key={`${agent.id}:${threadMount}`} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={session.csrf_token} refreshKey={version} sessionId={thread} onSessionChange={(id) => { setThread(id); saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} /></Suspense></ConversationBoundary></div>}
     {view === 'agent-settings' && manager && <AgentSettings key={agent?.id ?? 'new'} organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} onSaved={(saved) => { setAgents((items) => [...items.filter((item) => item.id !== saved.id), saved]); setSelected(saved.id); }} />}
     {view === 'organization' && manager && <OrganizationSettings organization={organization} csrf={session.csrf_token} agents={agents} onChanged={() => setVersion((current) => current + 1)} />}
     {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
     {view === 'chart' && <div className="workspace-page"><p className="page-intro">Reporting relationships help agents find the right collaborator.</p><ReportingChart agents={agents} onOpen={openAgent} />{!agents.length && <p className="app-empty">{manager ? 'Create your first agent to get started.' : 'Your organization has no agents yet.'}</p>}</div>}
-    </div></main></div>;
+    </div></main></div></ThreadNotificationsProvider>;
 }
 function ReportingChart({ agents, onOpen }: { agents: Agent[]; onOpen: (id: string) => void }) {
   function branch(parent: string | null, seen: Set<string>) {
     return <ul className="chart-list">{agents.filter((agent) => (agent.reports_to_agent_id ?? null) === parent && !seen.has(agent.id)).map((agent) => <li key={agent.id}><button className="chart-node" onClick={() => onOpen(agent.id)}><span className="agent-avatar">{agent.name.slice(0, 2).toUpperCase()}</span><span>{agent.name}<small>{agent.title || 'Agent'}</small></span></button>{agents.some((item) => item.reports_to_agent_id === agent.id) && branch(agent.id, new Set([...seen, agent.id]))}</li>)}</ul>;
   }
   return branch(null, new Set());
+}
+function NotificationErrors() {
+  const notifications = useThreadNotifications();
+  if (!notifications?.errors.length) return null;
+  return <details className="app-notice"><summary>Some notification updates failed</summary>
+    {notifications.errors.map((error) => <p key={error}>{error}</p>)}
+    <button className="app-button" onClick={() => { void notifications.refresh(); }}>Retry notifications</button>
+  </details>;
 }

@@ -27,6 +27,7 @@ test('switches organization scope and removes the previous agents immediately', 
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? session
       : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }, { id: 'two', name: 'Second organization' }]
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
       : input === '/api/organizations/one/agents' ? [{ id: 'agent-one', name: 'First researcher', title: 'Research', configuration: { workspace: 'default' } }]
       : input === '/api/organizations/two/agents' ? [{ id: 'agent-two', name: 'Second researcher', title: 'Research', configuration: { workspace: 'default' } }]
@@ -45,6 +46,7 @@ test('uses the reporting chart as the default overview with compact settings nav
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? { user: { id: 'owner', display_name: 'Owner' }, csrf_token: 'csrf-example' }
       : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{ user_id: 'owner', role: 'owner' }]
       : input.endsWith('/policy') ? { desired_version: 1, configuration: { default_permission: 'allow', mandatory_permissions: [], allow_thread_overrides: true } }
       : [];
@@ -57,6 +59,7 @@ test('uses the reporting chart as the default overview with compact settings nav
   const settings = await screen.findByRole('button', { name: 'Organization settings' });
   expect(screen.getByText('Create your first agent to get started.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Overview' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
   const chart = screen.getByRole('button', { name: 'Reporting chart' });
   expect(chart.getAttribute('title')).toBe('Reporting chart');
   expect(chart.getAttribute('aria-current')).toBe('page');
@@ -71,6 +74,7 @@ test('restores a selected native thread after reloading an authorized organizati
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? {user: {id: 'human', display_name: 'Member'}, csrf_token: 'csrf-example'}
       : input === '/api/organizations' ? [{id: 'one', name: 'First organization'}]
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{user_id: 'human', role: 'member'}]
       : input.endsWith('/agents') ? [{id: 'agent-one', name: 'Researcher', title: 'Research', configuration: {workspace: 'default'}}]
       : [];
@@ -84,6 +88,7 @@ test('lets an existing member create another organization without losing the ori
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string, options: RequestInit) => {
     const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
       : input === '/api/organizations' ? options.method === 'POST' ? {id: 'two', name: 'Second organization'} : [{id: 'one', name: 'First organization'}]
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{user_id: 'human', role: 'member'}] : [];
     return new Response(JSON.stringify(body));
   }));
@@ -93,4 +98,22 @@ test('lets an existing member create another organization without losing the ori
   fireEvent.click(screen.getByRole('button', { name: 'Create organization' }));
   expect(await screen.findByRole('option', { name: 'First organization' })).toBeTruthy();
   expect(screen.getByRole('option', { name: 'Second organization' })).toBeTruthy();
+});
+
+test('shows an unread result on its agent without a standalone Activity view', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'Organization' }]
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'agent', name: 'Researcher', configuration: { workspace: 'default' } }]
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/sessions') ? [{ session_id: 'thread', title: 'Result' }]
+      : input.endsWith('/dispatches') ? [{ id: 'delivery', session_id: 'thread', state: 'completed', updated_at: 1, author: { name: 'Member' }, payload: { mode: 'queued', text: 'Research' }, outcome: { kind: 'native_run_completed', message_id: 'result' } }]
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+  render(<App />);
+  const pip = await screen.findByRole('img', { name: 'Unread result' });
+  expect(pip.closest('button')?.textContent).toContain('Researcher');
+  expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
 });

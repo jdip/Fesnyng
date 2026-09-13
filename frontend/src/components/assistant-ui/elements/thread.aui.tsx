@@ -88,6 +88,8 @@ export type ThreadComponents = {
     | undefined;
   /** A native runtime action rendered beside maintained assistant actions. */
   MessageAction?: ComponentType | undefined;
+  /** Product read receipts anchored after the rendered assistant content. */
+  MessageFooter?: ComponentType | undefined;
 };
 
 export type ThreadComposerProps = {
@@ -425,6 +427,7 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
     MessageAction,
+    MessageFooter,
   } = useContext(ThreadComponentsContext);
 
   const ACTION_BAR_PT = "pt-1.5";
@@ -517,6 +520,7 @@ const AssistantMessage: FC = () => {
           }}
         </MessagePrimitive.GroupedParts>
         <MessageError />
+        {MessageFooter && <MessageFooter />}
       </div>
 
       <div
