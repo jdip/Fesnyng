@@ -35,6 +35,7 @@ _READ_PATHS = {
     "permission",
     "provider",
     "config",
+    "command",
     "event",
     *_ARTIFACT_PATHS,
 }

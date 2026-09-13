@@ -138,6 +138,8 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
 
     def native(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        if request.url.path.endswith("/command"):
+            return httpx.Response(200, json=[{"name": "fesnyng/review", "description": "review"}])
         if request.url.path.endswith("/provider"):
             return httpx.Response(
                 422,
@@ -176,6 +178,14 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
                 f"/organizations/{org.id}/agents/{agent['id']}/opencode/session"
             )
             assert listed.json() == [{"id": "ses_main", "title": "Main"}]
+            workflows = await client.get(
+                f"/organizations/{org.id}/agents/{agent['id']}/opencode/command"
+            )
+            assert workflows.status_code == 200
+            assert workflows.json() == [{"name": "fesnyng/review", "description": "review"}]
+            assert (
+                await client.get(f"/organizations/{uuid4()}/agents/{agent['id']}/opencode/command")
+            ).status_code == 404
             error = await client.get(
                 f"/organizations/{org.id}/agents/{agent['id']}/opencode/provider"
             )
@@ -212,7 +222,7 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
             ).status_code == 404
 
     asyncio.run(exercise())
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert all(request.headers["authorization"].startswith("Bearer ") for request in calls)
 
 

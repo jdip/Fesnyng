@@ -667,3 +667,93 @@ def test_workspace_events_use_native_identity_shapes_sse_framing_and_new_directo
 
     asyncio.run(check())
     assert _event_session({"properties": {"info": {"id": "ses_main"}}}) == "ses_main"
+
+
+def test_composer_lists_applied_workflows_and_durably_submits_command_only(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    token = secrets.token_urlsafe(32)
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, token)
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Agent",
+        configuration=AgentConfiguration(
+            skills=[
+                {"name": "review", "content": "Review the current work", "explicit_only": True},
+                {"name": "research", "content": "Reusable research", "explicit_only": False},
+            ]
+        ),
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(org, agent, "ses_main", "/workspace/default/main", "Main")
+    pending = envelope.model_copy(
+        update={
+            "version": 2,
+            "configuration": AgentConfiguration(
+                skills=[{"name": "pending", "content": "Not applied", "explicit_only": True}]
+            ),
+        }
+    )
+    store.stage_agent(pending)
+    native = Native()
+    app = FastAPI()
+    app.state.host_store = store
+    app.state.host_runtime = native
+    app.state.dispatch_store = DispatchStore(store)
+    app.state.dispatch_store.initialize()
+    app.state.dispatcher = Dispatcher(app.state.dispatch_store, native)
+    app.state.interactions = Interactions(store, native)
+    app.state.interactions.initialize()
+    app.include_router(router)
+    author = {"kind": "human", "id": str(uuid4()), "name": "Member"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Fesnyng-Actor": json.dumps(author),
+        "Idempotency-Key": str(uuid4()),
+    }
+
+    async def check():
+        base = f"/organizations/{org}/agents/{agent}/opencode"
+        async with AsyncClient(
+            transport=ASGITransport(app), base_url="http://host", headers=headers
+        ) as client:
+            inventory = await client.get(f"{base}/command")
+            assert inventory.status_code == 200
+            assert inventory.json() == [{"name": "fesnyng/review", "description": "review"}]
+            foreign = await client.get(f"/organizations/{uuid4()}/agents/{agent}/opencode/command")
+            assert foreign.status_code in {401, 403, 404}
+            result = await client.post(
+                f"{base}/session/ses_main/prompt_async",
+                json={"parts": [], "command": "fesnyng/review", "mode": "steering"},
+            )
+            assert result.status_code == 202
+            receipt = result.json()
+            assert receipt["payload"]["command"] == "fesnyng/review"
+            assert receipt["payload"]["mode"] == "steering"
+            assert receipt["payload"]["text"] == ""
+            assert receipt["author"]["id"] == author["id"]
+            repeated = await client.post(
+                f"{base}/session/ses_main/prompt_async",
+                json={"parts": [], "command": "fesnyng/review", "mode": "steering"},
+            )
+            assert repeated.json()["id"] == receipt["id"]
+            for body in ({"parts": []}, {"parts": [], "command": "../invalid"}):
+                invalid = await client.post(
+                    f"{base}/session/ses_main/prompt_async",
+                    json=body,
+                    headers={"Idempotency-Key": str(uuid4())},
+                )
+                assert invalid.status_code == 422
+
+    asyncio.run(check())

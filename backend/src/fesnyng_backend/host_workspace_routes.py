@@ -327,6 +327,14 @@ def models(request: Request, organization_id: UUID, agent_id: UUID):
         return _workspace(request).models(org, agent)
 
 
+@router.get("/agents/{agent_id}/opencode/command")
+def commands(request: Request, organization_id: UUID, agent_id: UUID):
+    org, agent = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        return _workspace(request).commands(org, agent)
+
+
 @router.get("/agents/{agent_id}/opencode/config")
 def config(request: Request, organization_id: UUID, agent_id: UUID):
     org, agent = str(organization_id), str(agent_id)

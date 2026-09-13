@@ -298,6 +298,18 @@ refuses to create a look-alike replacement. Preserve the host state, Docker
 resources, and error evidence for inspection rather than deleting volumes or
 replaying uncertain work.
 
+## Messages, steering and workflows
+
+Use the same chat composer throughout a conversation. Enter sends a message when
+idle and steers the agent while it is working; Shift+Enter adds a newline. Queue
+is a secondary action beside the composer, and Stop remains directly accessible
+during a run. A queued message waits for current work to finish.
+
+Type `/` to select an applied explicit workflow, then add any instructions and
+submit from the composer. Configure explicit workflows under Agent settings and
+apply the configuration before expecting them in the picker. A submission error
+preserves the draft so it can be corrected or retried.
+
 ## Local proof boundaries
 
 This guide establishes the local topology only. Use `scripts/check.sh` for the

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from fesnyng_backend.agent_models import Contract, Name, PermissionRule
 from fesnyng_backend.host_dispatch import DispatchStore, HostSubmission
@@ -25,8 +25,15 @@ class TextPart(Contract):
 
 
 class Prompt(Contract):
-    parts: list[TextPart] = Field(min_length=1, max_length=100)
+    parts: list[TextPart] = Field(default_factory=list, max_length=100)
+    command: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_/-]+$")
     mode: Literal["queued", "steering"] = "queued"
+
+    @model_validator(mode="after")
+    def require_content(self):
+        if not self.command and not self.text().strip():
+            raise ValueError("Prompt requires text or a workflow command")
+        return self
 
     def text(self) -> str:
         return "".join(part.text for part in self.parts)
@@ -226,7 +233,7 @@ class Workspace:
         self, org: str, agent: str, session_id: str, operation_id: UUID, body: Prompt, author: Actor
     ) -> dict[str, Any]:
         submission = HostSubmission(
-            id=operation_id, text=body.text(), mode=body.mode, author=author
+            id=operation_id, text=body.text(), command=body.command, mode=body.mode, author=author
         )
         return self.dispatches.enqueue(org, agent, session_id, submission, author)
 
@@ -505,6 +512,14 @@ class Workspace:
             "provider_id": envelope.configuration.provider,
             "model_id": envelope.configuration.model,
         }
+
+    def commands(self, org: str, agent: str) -> list[dict[str, str]]:
+        envelope = self.interactions._applied_envelope(org, agent)
+        return [
+            {"name": f"fesnyng/{skill.name}", "description": skill.name}
+            for skill in envelope.configuration.skills
+            if skill.explicit_only
+        ]
 
     def config(self, org: str, agent: str) -> dict[str, str]:
         envelope = self.interactions._applied_envelope(org, agent)
