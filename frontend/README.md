@@ -58,6 +58,12 @@ creating a second delivery. The Files panel reads text artifacts relative to the
 selected thread's workspace. Selection is preserved in the page fragment so a
 reload can reattach to the same authorized conversation.
 
+The sidebar identifies the current organization with its configured icon and name.
+Its compact menu supports keyboard selection and organization creation. Owners
+and administrators can choose an emoji, upload a validated PNG/JPEG/WebP image,
+or restore initials in organization settings. Image uploads are bounded and
+normalized by the control plane; organization membership governs icon access.
+
 The initial composer accepts text; file/image/PDF submission is disabled rather
 than discarding attachments. Native edit/write diff presentation uses a narrow
 supported tool slot; all other generic tools use the maintained ToolFallback.

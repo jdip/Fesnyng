@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { agentPath, api, errorMessage, type Agent, type Host, type Member, type Policy, type Profile } from './workspace-api';
+import { agentPath, api, errorMessage, type Agent, type Host, type Member, type Organization, type Policy, type Profile } from './workspace-api';
 import { RuleEditor } from './RuleEditor';
-export function OrganizationSettings({ organization, csrf, agents, onChanged }: { organization: string; csrf: string; agents: Agent[]; onChanged: () => void }) {
+import { OrganizationIconSettings } from './OrganizationIconSettings';
+export function OrganizationSettings({ organization, csrf, agents, onChanged, onIdentityChanged }: { organization: string; csrf: string; agents: Agent[]; onChanged: () => void; onIdentityChanged?: (updated: Organization) => void }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -19,6 +20,7 @@ export function OrganizationSettings({ organization, csrf, agents, onChanged }: 
   async function run(action: () => Promise<void>) { setError(''); setNotice(''); setBusy(true); try { await action(); } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); } }
   return <div className="workspace-page"><h2>Organization settings</h2><p className="page-intro">Manage the people, credentials, and execution defaults shared by this organization.</p>
     {error && <p className="app-error" role="alert">{error}</p>}{notice && <p className="app-notice" role="status">{notice}</p>}
+    <OrganizationIconSettings organization={organization} csrf={csrf} onSaved={(updated) => { onIdentityChanged?.(updated); onChanged(); }} />
     <section className="app-panel"><h3>People</h3><table className="app-table"><thead><tr><th>Name</th><th>Login</th><th>Role</th><th /></tr></thead><tbody>{members.map((member) => <tr key={member.user_id}><td>{member.display_name}</td><td>{member.login}</td><td>{member.role}</td><td>{member.role !== 'owner' && <button className="app-button danger" disabled={busy} onClick={() => { void run(async () => { await api(`${base}/members/${member.user_id}`, { method: 'DELETE', csrf }); setRevision((value) => value + 1); onChanged(); setNotice('Membership removed.'); }); }}>Remove</button>}</td></tr>)}</tbody></table><form className="app-form" style={{ marginTop: 20 }} onSubmit={(event) => {
       event.preventDefault(); const form = event.currentTarget; const values = new FormData(form);
       void run(async () => { await api(`${base}/members`, { method: 'PUT', csrf, body: { login: values.get('login'), display_name: values.get('display_name'), password: values.get('password') || null, role: values.get('role') } }); form.reset(); setRevision((value) => value + 1); onChanged(); setNotice('Member added.'); });
