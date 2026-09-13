@@ -22,6 +22,9 @@ Threads are ordered by their latest incoming human or other-agent message;
 the thread agent's own replies and tool activity do not bump them. Threads with
 no incoming messages use creation time. The list refreshes while the app is
 visible and when returning to it, preserving the selected conversation and draft.
+Use a thread's menu to pin or unpin it. Pinned threads appear above the remaining
+threads, retaining incoming-message recency within each group. Pins belong only
+to the signed-in user and persist across devices and sign-in sessions.
 
 Owners and admins manage agents, organization permissions, membership, and named
 credential profiles. Host registration and networking remain installation/ops

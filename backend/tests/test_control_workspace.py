@@ -7,7 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 
-from fesnyng_backend import control_workspace_routes
+from fesnyng_backend import control_thread_pin_routes, control_workspace_routes
 from fesnyng_backend.control_plane import create_app
 from fesnyng_backend.host_client import HostClient
 from fesnyng_backend.host_dispatch import DispatchStore
@@ -448,3 +448,103 @@ def test_workspace_facade_reaches_the_real_host_router_with_agent_scope(
             assert created.json() == {"id": "ses_created", "title": "New thread"}
 
     asyncio.run(exercise())
+
+
+def test_personal_thread_pins_persist_per_user_and_order_workspace_lists(organization, monkeypatch):
+    settings, control, owner, org, agents, host_id = organization
+    agents.set_host_credential(org.id, host_id, secrets.token_urlsafe(32))
+    agent = agents.create_agent(org.id, owner.id, {"name": "Workspace", "host_id": host_id})
+    second = control.add_member(
+        org.id,
+        "member",
+        "Member",
+        "correct horse battery staple",
+        "member",
+        actor_id=owner.id,
+    )
+    other_org = control.create_organization(owner.id, "Other organization")
+    requested: list[str] = []
+
+    def native(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path.endswith("/opencode/session"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": "ses_recent", "title": "Recent"},
+                    {"id": "ses_pin", "title": "Pinned"},
+                    {"id": "ses_other", "title": "Other"},
+                ],
+            )
+        if request.url.path.endswith(("/opencode/session/ses_pin", "/opencode/session/ses_other")):
+            return httpx.Response(200, json={"id": request.url.path.rsplit("/", 1)[-1]})
+        return httpx.Response(404, json={"detail": "Thread not found"})
+
+    monkeypatch.setattr(
+        control_workspace_routes,
+        "host_client",
+        lambda _: HostClient(agents, transport=httpx.MockTransport(native)),
+    )
+    monkeypatch.setattr(
+        control_thread_pin_routes,
+        "host_client",
+        lambda _: HostClient(agents, transport=httpx.MockTransport(native)),
+    )
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+
+    async def login(client: httpx.AsyncClient, name: str, password: str):
+        response = await client.post("/auth/login", json={"login": name, "password": password})
+        assert response.status_code == 200
+        client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+
+    async def exercise():
+        pins = f"/organizations/{org.id}/agents/{agent['id']}/thread-pins"
+        workspace = f"/organizations/{org.id}/agents/{agent['id']}/opencode/session"
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+            ) as owner_device,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+            ) as owner_second_device,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+            ) as member_device,
+        ):
+            await login(owner_device, "owner", "correct horse battery staple")
+            no_csrf = await owner_device.put(f"{pins}/ses_pin", headers={"X-CSRF-Token": "missing"})
+            assert no_csrf.status_code == 403
+            assert (await owner_device.get(pins)).json() == {"session_ids": []}
+            pinned = await owner_device.put(f"{pins}/ses_pin")
+            assert pinned.status_code == 200 and pinned.json() == {"session_ids": ["ses_pin"]}
+            assert (await owner_device.put(f"{pins}/ses_pin")).json() == {
+                "session_ids": ["ses_pin"]
+            }
+            assert (await owner_device.get(workspace)).json() == [
+                {"id": "ses_pin", "title": "Pinned"},
+                {"id": "ses_recent", "title": "Recent"},
+                {"id": "ses_other", "title": "Other"},
+            ]
+            await login(owner_second_device, "owner", "correct horse battery staple")
+            assert (await owner_second_device.get(pins)).json() == {"session_ids": ["ses_pin"]}
+            await login(member_device, "member", "correct horse battery staple")
+            assert (await member_device.get(pins)).json() == {"session_ids": []}
+            assert (await member_device.put(f"{pins}/ses_other")).json() == {
+                "session_ids": ["ses_other"]
+            }
+            assert (await owner_device.get(pins)).json() == {"session_ids": ["ses_pin"]}
+            assert (await owner_device.put(f"{pins}/ses_missing")).status_code == 404
+            assert (
+                await owner_device.get(
+                    f"/organizations/{other_org.id}/agents/{agent['id']}/thread-pins"
+                )
+            ).status_code == 404
+            assert (
+                await owner_device.get(f"/organizations/{org.id}/agents/{uuid4()}/thread-pins")
+            ).status_code == 404
+            unpinned = await owner_device.delete(f"{pins}/ses_pin")
+            assert unpinned.status_code == 200 and unpinned.json() == {"session_ids": []}
+
+    asyncio.run(exercise())
+    assert any(path.endswith("/opencode/session/ses_pin") for path in requested)
+    assert second.user_id != owner.id

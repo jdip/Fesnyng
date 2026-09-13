@@ -64,6 +64,18 @@ CREATE TABLE IF NOT EXISTS agents (
     FOREIGN KEY (organization_id, reports_to_agent_id)
         REFERENCES agents(organization_id, id)
 );
+CREATE TABLE IF NOT EXISTS thread_pins (
+    organization_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (organization_id, user_id, agent_id, session_id),
+    FOREIGN KEY (organization_id, user_id)
+        REFERENCES organization_memberships(organization_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, agent_id)
+        REFERENCES agents(organization_id, id)
+);
 CREATE TABLE IF NOT EXISTS agent_configurations (
     agent_id TEXT NOT NULL REFERENCES agents(id),
     version INTEGER NOT NULL,
