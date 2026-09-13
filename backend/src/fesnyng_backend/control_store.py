@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import BoundedSemaphore
+from typing import Literal
 from uuid import uuid4
 
 from fesnyng_backend.agent_storage import AGENT_SCHEMA
@@ -54,6 +55,8 @@ class Organization:
     id: str
     name: str
     created_by_user_id: str
+    icon_kind: Literal["emoji", "image"] | None = None
+    icon_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,15 @@ class ControlPlaneStore:
                     role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY (organization_id, user_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS organization_branding (
+                    organization_id TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+                    icon_kind TEXT NOT NULL CHECK (icon_kind IN ('emoji', 'image')),
+                    icon_value TEXT NOT NULL
                 )
                 """
             )
@@ -436,31 +448,46 @@ class ControlPlaneStore:
     def list_organizations(self, user_id: str) -> list[Organization]:
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT organizations.id, organizations.name, organizations.created_by_user_id
+                """SELECT organizations.id, organizations.name, organizations.created_by_user_id,
+                organization_branding.icon_kind, organization_branding.icon_value
                 FROM organizations JOIN organization_memberships
                 ON organization_memberships.organization_id = organizations.id
+                LEFT JOIN organization_branding ON organization_branding.organization_id = organizations.id
                 WHERE organization_memberships.user_id = ? ORDER BY organizations.name""",
                 (user_id,),
             ).fetchall()
-        return [
-            Organization(
-                id=row["id"], name=row["name"], created_by_user_id=row["created_by_user_id"]
-            )
-            for row in rows
-        ]
+        return [_organization_from_row(row) for row in rows]
 
     def organization_for_member(self, user_id: str, organization_id: str) -> Organization:
         self.membership_for(user_id, organization_id)
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT id, name, created_by_user_id FROM organizations WHERE id = ?",
+                """SELECT organizations.id, organizations.name, organizations.created_by_user_id,
+                organization_branding.icon_kind, organization_branding.icon_value
+                FROM organizations LEFT JOIN organization_branding
+                ON organization_branding.organization_id = organizations.id WHERE organizations.id = ?""",
                 (organization_id,),
             ).fetchone()
         if row is None:
             raise LookupError("Organization does not exist.")
-        return Organization(
-            id=row["id"], name=row["name"], created_by_user_id=row["created_by_user_id"]
-        )
+        return _organization_from_row(row)
+
+    def set_organization_icon(
+        self, organization_id: str, icon_kind: str | None, icon_value: str | None
+    ) -> None:
+        with self.connect() as connection:
+            if icon_kind is None:
+                connection.execute(
+                    "DELETE FROM organization_branding WHERE organization_id = ?",
+                    (organization_id,),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO organization_branding(organization_id,icon_kind,icon_value)
+                    VALUES(?,?,?) ON CONFLICT(organization_id) DO UPDATE SET
+                    icon_kind=excluded.icon_kind,icon_value=excluded.icon_value""",
+                    (organization_id, icon_kind, icon_value),
+                )
 
     def add_member(
         self,
@@ -591,6 +618,16 @@ def _issue_session(
         (_digest(token), _digest(csrf_token), user_id, expires_at),
     )
     return SessionCredentials(token=token, csrf_token=csrf_token, expires_at=expires_at)
+
+
+def _organization_from_row(row: sqlite3.Row) -> Organization:
+    return Organization(
+        id=row["id"],
+        name=row["name"],
+        created_by_user_id=row["created_by_user_id"],
+        icon_kind=row["icon_kind"],
+        icon_value=row["icon_value"],
+    )
 
 
 def _normalize_login(login: str) -> str:

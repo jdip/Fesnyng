@@ -41,9 +41,11 @@ test('switches organization scope and removes the previous agents immediately', 
   render(<App />);
   expect(await screen.findByRole('button', { name: /First researcher/, pressed: false })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Organization settings' })).toBeNull();
-  fireEvent.change(screen.getByLabelText('Organization'), { target: { value: 'two' } });
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Switch organization: First organization' }), { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Second organization' }));
   expect(screen.queryByRole('button', { name: /First researcher/ })).toBeNull();
   expect(await screen.findByRole('button', { name: /Second researcher/, pressed: false })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Reporting chart', level: 1 }));
 });
 
 test('uses the reporting chart as the default overview with compact settings navigation', async () => {
@@ -100,11 +102,13 @@ test('lets an existing member create another organization without losing the ori
     return new Response(JSON.stringify(body));
   }));
   render(<App />);
-  fireEvent.change(await screen.findByLabelText('Organization'), { target: { value: '__new__' } });
+  fireEvent.keyDown(await screen.findByRole('button', { name: 'Switch organization: First organization' }), { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Create organization' }));
   fireEvent.change(await screen.findByLabelText('Organization name'), { target: { value: 'Second organization' } });
   fireEvent.click(screen.getByRole('button', { name: 'Create organization' }));
-  expect(await screen.findByRole('option', { name: 'First organization' })).toBeTruthy();
-  expect(screen.getByRole('option', { name: 'Second organization' })).toBeTruthy();
+  fireEvent.keyDown(await screen.findByRole('button', { name: 'Switch organization: Second organization' }), { key: 'ArrowDown' });
+  expect(await screen.findByRole('menuitemradio', { name: 'First organization' })).toBeTruthy();
+  expect(screen.getByRole('menuitemradio', { name: 'Second organization' })).toBeTruthy();
 });
 
 test('shows an unread result on its agent without a standalone Activity view', async () => {
