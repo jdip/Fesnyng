@@ -50,16 +50,17 @@ class BlockingHostStream:
 class EventHostClient:
     """The remote host boundary for a controlled, long-lived event response."""
 
-    def __init__(self, agents, stream: BlockingHostStream) -> None:
+    def __init__(self, agents, stream: BlockingHostStream, resource: str = "event") -> None:
         self.agents = agents
         self._stream = stream
+        self.resource = resource
 
     async def stream(self, organization_id, host_id, path, *, headers=None, params=None):
-        assert path.endswith("/opencode/event")
+        assert path.endswith(f"/opencode/{self.resource}")
         return self._stream
 
 
-async def _open_event_route(app: FastAPI, path: str, token: str):
+async def _open_event_route(app: FastAPI, path: str, token: str, query: bytes = b""):
     """Start the public HTTP stream without buffering its response body."""
 
     messages = []
@@ -90,7 +91,7 @@ async def _open_event_route(app: FastAPI, path: str, token: str):
                 "scheme": "https",
                 "path": path,
                 "raw_path": path.encode(),
-                "query_string": b"",
+                "query_string": query,
                 "headers": [(b"cookie", f"fesnyng_session={token}".encode())],
                 "client": ("testclient", 50000),
                 "server": ("workspace.example", 443),
@@ -103,7 +104,7 @@ async def _open_event_route(app: FastAPI, path: str, token: str):
     return task, messages
 
 
-def _event_context(organization, monkeypatch):
+def _event_context(organization, monkeypatch, resource="event"):
     settings, _, owner, org, agents, host_id = organization
     agents.set_host_credential(org.id, host_id, secrets.token_urlsafe(32))
     agent = agents.create_agent(org.id, owner.id, {"name": "Workspace", "host_id": host_id})
@@ -123,7 +124,7 @@ def _event_context(organization, monkeypatch):
     assert user.id == membership.user_id
     stream = BlockingHostStream()
     monkeypatch.setattr(
-        control_workspace_routes, "host_client", lambda _: EventHostClient(agents, stream)
+        control_workspace_routes, "host_client", lambda _: EventHostClient(agents, stream, resource)
     )
     return app, store, owner, org, agent, user, credentials.token, stream
 
@@ -148,6 +149,16 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
         if request.url.path.endswith("/file/content"):
             assert dict(request.url.params) == {"sessionID": "ses_main", "path": "notes/result.txt"}
             return httpx.Response(200, content=b"artifact")
+        if request.url.path.endswith("/file/download"):
+            assert dict(request.url.params) == {"sessionID": "ses_main", "path": "notes/result.txt"}
+            return httpx.Response(
+                200,
+                content=b"  exact bytes\n\x00\xff\n",
+                headers={
+                    "content-type": "application/octet-stream",
+                    "content-disposition": 'attachment; filename="result.txt"',
+                },
+            )
         return httpx.Response(200, json=[{"id": "ses_main", "title": "Main"}])
 
     monkeypatch.setattr(
@@ -161,6 +172,9 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
         ) as client:
+            download_path = f"/organizations/{org.id}/agents/{agent['id']}/opencode/file/download"
+            file_params = {"sessionID": "ses_main", "path": "notes/result.txt"}
+            assert (await client.get(download_path, params=file_params)).status_code == 401
             assert (
                 await client.get(
                     f"/organizations/{org.id}/agents/{agent['id']}/opencode/experimental/session"
@@ -196,6 +210,22 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
                 params={"sessionID": "ses_main", "path": "notes/result.txt"},
             )
             assert artifact.content == b"artifact"
+            download = await client.get(download_path, params=file_params)
+            assert download.content == b"  exact bytes\n\x00\xff\n"
+            assert download.headers["content-type"] == "application/octet-stream"
+            assert download.headers["content-disposition"] == 'attachment; filename="result.txt"'
+            assert download.headers["cache-control"] == "no-store"
+            assert (
+                await client.get(
+                    download_path, params={"sessionID": "ses_main", "path": "../outside"}
+                )
+            ).status_code == 422
+            assert (
+                await client.get(
+                    f"/organizations/{uuid4()}/agents/{agent['id']}/opencode/file/download",
+                    params=file_params,
+                )
+            ).status_code == 404
             assert (
                 await client.get(
                     f"/organizations/{org.id}/agents/{agent['id']}/opencode/file/content",
@@ -222,7 +252,7 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
             ).status_code == 404
 
     asyncio.run(exercise())
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert all(request.headers["authorization"].startswith("Bearer ") for request in calls)
 
 
@@ -301,16 +331,20 @@ def test_workspace_facade_forwards_attributed_prompt_with_stable_idempotency_and
 
 
 @pytest.mark.parametrize(("revocation", "expected_status"), [("membership", 404), ("session", 401)])
-def test_workspace_event_route_drops_events_after_access_revocation(
-    organization, monkeypatch, revocation, expected_status
+@pytest.mark.parametrize("resource", ["event", "file/download"])
+def test_workspace_stream_drops_bytes_after_access_revocation(
+    organization, monkeypatch, revocation, expected_status, resource
 ):
-    app, store, owner, org, agent, user, token, stream = _event_context(organization, monkeypatch)
+    app, store, owner, org, agent, user, token, stream = _event_context(
+        organization, monkeypatch, resource
+    )
 
     async def exercise():
         task, messages = await _open_event_route(
             app,
-            f"/organizations/{org.id}/agents/{agent['id']}/opencode/event",
+            f"/organizations/{org.id}/agents/{agent['id']}/opencode/{resource}",
             token,
+            b"sessionID=ses_main&path=notes.txt" if resource == "file/download" else b"",
         )
         if revocation == "membership":
             store.remove_member(org.id, user.id, actor_id=owner.id)

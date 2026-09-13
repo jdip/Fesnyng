@@ -27,7 +27,7 @@ _SESSION_MUTATION = re.compile(
     rf"^session/{_NATIVE_ID}/(?:prompt_async|abort|revert|unrevert|fork)$"
 )
 _INTERACTION_REPLY = re.compile(rf"^(?:question|permission)/{_NATIVE_ID}/(?:reply|reject)$")
-_ARTIFACT_PATHS = {"file", "file/content"}
+_ARTIFACT_PATHS = {"file", "file/content", "file/download"}
 _READ_PATHS = {
     "experimental/session",
     "session",
@@ -75,9 +75,13 @@ def _artifact_params(request: Request, resource_path: str) -> None:
     if not session_id or not re.fullmatch(_NATIVE_ID, session_id):
         raise HTTPException(422, "Artifact request requires a valid sessionID")
     if (
-        not relative_path
+        relative_path is None
         or relative_path.startswith("/")
-        or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+        or (
+            relative_path.rstrip("/")
+            and any(part in {"", ".", ".."} for part in relative_path.rstrip("/").split("/"))
+        )
+        or (resource_path != "file" and not relative_path.rstrip("/"))
         or "directory" in request.query_params
     ):
         raise HTTPException(422, "Artifact request requires a relative path")
@@ -161,6 +165,8 @@ async def facade(
         if resource_path in {"session", "experimental/session"}:
             user = auth.current_user(request)
     _artifact_params(request, resource_path)
+    if resource_path == "file/download":
+        return await _download(request, organization, agent)
     body = await _body(request) if mutation else None
     idempotency_key = None
     headers: dict[str, str] = {}
@@ -189,6 +195,40 @@ async def facade(
             reply, auth.get_store(request).list_thread_pins(organization, user.id, agent)
         )
     return _response(reply, idempotency_key)
+
+
+async def _download(request: Request, organization_id: str, agent_id: str) -> Response:
+    settings = auth.get_session_settings(request)
+    session_token = request.cookies.get(settings.cookie_name)
+    user = auth.current_user(request)
+    client = host_client(request)
+    with host_errors():
+        assigned = client.agents.get_agent(organization_id, agent_id)
+        stream = await client.stream(
+            organization_id,
+            assigned["host_id"],
+            _native_path(agent_id, "file/download"),
+            params=dict(request.query_params),
+        )
+    if not 200 <= stream.response.status_code < 300:
+        try:
+            reply = HostResponse(
+                stream.response.status_code,
+                await stream.response.aread(),
+                stream.response.headers.get("content-type"),
+            )
+        finally:
+            await stream.close()
+        return _response(reply)
+    headers = {"Cache-Control": "no-store"}
+    disposition = stream.response.headers.get("content-disposition")
+    if disposition:
+        headers["Content-Disposition"] = disposition
+    return StreamingResponse(
+        _relay_download(stream, request, session_token, user.id, organization_id),
+        media_type=stream.response.headers.get("content-type", "application/octet-stream"),
+        headers=headers,
+    )
 
 
 async def _events(request: Request, organization_id: str, agent_id: str) -> Response:
@@ -239,6 +279,21 @@ async def _relay_events(
     except httpx.TransportError:
         # Finish the response so the maintained client reconnects and refreshes history.
         return
+    finally:
+        await stream.close()
+
+
+async def _relay_download(
+    stream: HostStream,
+    request: Request,
+    session_token: str | None,
+    user_id: str,
+    organization_id: str,
+) -> AsyncIterator[bytes]:
+    try:
+        async for chunk in stream.response.aiter_bytes():
+            _still_authorized(request, session_token, user_id, organization_id)
+            yield chunk
     finally:
         await stream.close()
 

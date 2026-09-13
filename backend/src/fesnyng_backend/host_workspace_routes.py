@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, Response
@@ -414,12 +415,12 @@ async def artifact_list(
     organization_id: UUID,
     agent_id: UUID,
     session_id: Annotated[NativeID, Query(alias="sessionID")],
-    path: Annotated[str, Query(min_length=1, max_length=240)],
+    path: Annotated[str, Query(max_length=240)],
 ):
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
     with host_errors():
-        return await _workspace(request).artifact(org, agent, session_id, path, content=False)
+        return await _workspace(request).files(org, agent, session_id, path)
 
 
 @router.get("/agents/{agent_id}/opencode/file/content")
@@ -433,4 +434,40 @@ async def artifact_content(
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
     with host_errors():
-        return await _workspace(request).artifact(org, agent, session_id, path, content=True)
+        return await _workspace(request).preview(org, agent, session_id, path)
+
+
+@router.get("/agents/{agent_id}/opencode/file/download")
+async def artifact_download(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+    session_id: Annotated[NativeID, Query(alias="sessionID")],
+    path: Annotated[str, Query(min_length=1, max_length=240)],
+):
+    org, agent = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    workspace = _workspace(request)
+    with host_errors():
+        context = workspace.download(org, agent, session_id, path)
+        _metadata, stream = await context.__aenter__()
+    filename = path.rsplit("/", 1)[-1]
+    fallback = "".join(
+        char if 32 <= ord(char) < 127 and char not in '\\"' else "_" for char in filename
+    )
+    encoded = quote(filename, safe="")
+
+    async def body():
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await context.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        body(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{fallback or 'download'}\"; filename*=UTF-8''{encoded}"
+        },
+    )

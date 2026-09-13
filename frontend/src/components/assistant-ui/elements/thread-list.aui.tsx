@@ -17,6 +17,7 @@ import {
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  FolderOpenIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -35,15 +36,17 @@ import {
   type FC,
 } from "react";
 
-const ThreadNavigationContext = createContext<(() => void) | undefined>(undefined);
+export type ThreadFileTarget = { id: string; title: string };
+type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadFileTarget, trigger: HTMLButtonElement | null) => void };
+const ThreadNavigationContext = createContext<ThreadNavigation>({});
 
-export const ThreadList: FC<{ pageSize?: number; onSelect?: () => void }> = ({ pageSize = 6, onSelect }) => {
+export const ThreadList: FC<ThreadNavigation & { pageSize?: number }> = ({ pageSize = 6, onSelect, onOpenFiles }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
-    <ThreadNavigationContext.Provider value={onSelect}><ThreadListRoot>
+    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles }}><ThreadListRoot>
       <ThreadListNew onClick={onSelect} />
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
@@ -168,7 +171,7 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const onSelect = useContext(ThreadNavigationContext);
+  const { onSelect } = useContext(ThreadNavigationContext);
   const pins = useThreadPins();
   const session = useAuiState((s) => s.threadListItem.remoteId);
   const pinned = !!session && !!pins?.ids?.has(session);
@@ -298,12 +301,17 @@ const ThreadListItemMore: FC<{
   onRename: () => void;
 }> = ({ archived, onRename }) => {
   const pins = useThreadPins();
+  const { onOpenFiles } = useContext(ThreadNavigationContext);
   const session = useAuiState((s) => s.threadListItem.remoteId);
+  const title = useAuiState((s) => s.threadListItem.title) ?? 'New thread';
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const openedFiles = useRef(false);
   const pinned = !!session && !!pins?.ids?.has(session);
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
         <Button
+          ref={menuTrigger}
           variant="ghost"
           size="icon"
           data-slot="aui_thread-list-item-more"
@@ -314,12 +322,17 @@ const ThreadListItemMore: FC<{
         </Button>
       </ThreadListItemMorePrimitive.Trigger>
       <ThreadListItemMorePrimitive.Content
+        onCloseAutoFocus={(event) => { if (openedFiles.current) { event.preventDefault(); openedFiles.current = false; } }}
         side="right"
         align="start"
         sideOffset={6}
         data-slot="aui_thread-list-item-more-content"
         className="bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-32 overflow-hidden rounded-xl border p-1.5"
       >
+        {session && onOpenFiles && <ThreadListItemMorePrimitive.Item
+          className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"
+          onSelect={() => { openedFiles.current = true; onOpenFiles({ id: session, title }, menuTrigger.current); }}
+        ><FolderOpenIcon aria-hidden className="size-4" />Files</ThreadListItemMorePrimitive.Item>}
         {pins && session && !archived && <ThreadListItemMorePrimitive.Item
           disabled={!pins.ids || pins.saving}
           className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"

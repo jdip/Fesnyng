@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import secrets
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ class Native:
         self.children: dict[str, list[dict[str, object]]] = {}
         self.questions = [{"id": "q_main", "sessionID": "ses_main", "questions": []}]
         self.moves: list[dict[str, object]] = []
+        self.download_content = b"artifact"
 
     def lock(self, agent_id):
         return asyncio.Lock()
@@ -38,7 +40,29 @@ class Native:
 
     async def request_with_query(self, organization_id, agent_id, path, query, *, directory):
         self.calls.append((organization_id, agent_id, path, "GET", query, directory))
+        if path == "/file":
+            return [{"name": "src", "type": "directory"}, {"name": "notes.txt", "type": "file"}]
         return {"type": "text", "content": "artifact"}
+
+    async def workspace_metadata_many(self, organization_id, agent_id, directory, paths):
+        return {
+            path: {
+                "type": "directory" if path.endswith("src") else "file",
+                "size": 0 if path.endswith("src") else 12,
+                "modifiedAt": 1_700_000_000_000,
+            }
+            for path in paths
+        }
+
+    @asynccontextmanager
+    async def workspace_download(self, organization_id, agent_id, directory, path):
+        async def stream():
+            yield self.download_content
+
+        yield (
+            {"type": "file", "size": len(self.download_content), "modifiedAt": 1_700_000_000_000},
+            stream(),
+        )
 
     async def create_session(self, organization_id, agent_id, title, workspace):
         return {"id": "ses_created", "title": title, "directory": f"/workspace/{workspace}/created"}
@@ -856,3 +880,100 @@ def test_composer_lists_applied_workflows_and_durably_submits_command_only(tmp_p
                 assert invalid.status_code == 422
 
     asyncio.run(check())
+
+
+def test_workspace_file_listing_preserves_child_and_root_context(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    store = HostStore(settings)
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(org, agent, "ses_main", "/workspace/default/main", "Main")
+    native = Native()
+    native.children["/session/ses_main/children"] = [
+        {"id": "ses_child", "parentID": "ses_main", "directory": "/workspace/default/child"}
+    ]
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    listing = asyncio.run(workspace.files(org, agent, "ses_child", ""))
+
+    assert listing == {
+        "rootSessionID": "ses_main",
+        "sessionID": "ses_child",
+        "path": "",
+        "entries": [
+            {
+                "name": "src",
+                "path": "src",
+                "type": "directory",
+                "size": 0,
+                "modifiedAt": 1_700_000_000_000,
+            },
+            {
+                "name": "notes.txt",
+                "path": "notes.txt",
+                "type": "file",
+                "size": 12,
+                "modifiedAt": 1_700_000_000_000,
+            },
+        ],
+    }
+    assert (
+        native.calls[-3:]
+        == [
+            (org, agent, "/session/ses_main/children", "GET", None, "/workspace/default/main"),
+            (org, agent, "/file", "GET", {"path": ""}, "/workspace/default/child"),
+        ][-2:]
+    )
+
+
+def test_workspace_preview_caps_binary_bytes_without_changing_download(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    store = HostStore(settings)
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(org, agent, "ses_main", "/workspace/default/main", "Main")
+    native = Native()
+    native.download_content = b"\x89PNG\r\n\x1a\n" + b"x" * (128 * 1024 + 1)
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    preview = asyncio.run(workspace.preview(org, agent, "ses_main", "image.png"))
+    downloaded = asyncio.run(_read_download(workspace, org, agent))
+
+    assert preview["type"] == "binary"
+    assert preview["contentType"] == "image/png"
+    assert preview["truncated"] is True
+    assert len(base64.b64decode(preview["content"])) == 128 * 1024
+    assert downloaded == native.download_content
+
+
+async def _read_download(workspace, org, agent):
+    async with workspace.download(org, agent, "ses_main", "image.png") as (_, stream):
+        return b"".join([chunk async for chunk in stream])

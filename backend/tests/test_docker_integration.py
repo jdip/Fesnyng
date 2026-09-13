@@ -1,6 +1,7 @@
 """Real native-runtime gate; opt in after building agent-runtime/Dockerfile."""
 
 import asyncio
+import base64
 import os
 import secrets
 import shutil
@@ -11,9 +12,12 @@ from uuid import uuid4
 import pytest
 
 from fesnyng_backend.agent_models import AgentConfiguration, NativeSkill
+from fesnyng_backend.host_dispatch import DispatchStore
+from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import HostAgentConfiguration, permission_rules
 from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.host_workspace import Workspace
 from fesnyng_backend.settings import ServiceSettings
 
 
@@ -141,6 +145,111 @@ def test_native_configuration_and_replacement_preserve_agent_state():
             "volume", "rm", runtime.name(agent) + "-home", runtime.name(agent) + "-workspace"
         )
         await runtime.docker("image", "rm", store.agent(org, agent)["snapshot_image"])
+        shutil.rmtree(tmp_path)
+
+    asyncio.run(check())
+
+
+@pytest.mark.skipif(
+    os.environ.get("FESNYNG_DOCKER_TESTS") != "true",
+    reason="Requires the real built Docker runtime",
+)
+def test_workspace_file_reads_are_scoped_and_byte_exact():
+    tmp_path = Path(tempfile.mkdtemp(prefix="fesnyng-docker-files-"))
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state" / "host.sqlite3",
+        )
+    )
+    store.initialize()
+    org, agent = str(uuid4()), str(uuid4())
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="File integration agent",
+    )
+    store.stage_agent(envelope)
+
+    async def read_download(workspace, session_id, path="sub/bytes.bin"):
+        async with workspace.download(org, agent, session_id, path) as (_, stream):
+            return b"".join([chunk async for chunk in stream])
+
+    async def check():
+        runtime = DockerRuntime(store, "http://127.0.0.1:1")
+        await runtime.configure(envelope)
+        store.mark_applied(envelope)
+        session = await runtime.create_session(org, agent, "Files", "default")
+        saved = store.session(org, agent, session["id"])
+        directory = saved["directory"]
+        await runtime.docker(
+            "exec",
+            runtime.name(agent),
+            "sh",
+            "-c",
+            'mkdir -p "$1/sub"; printf "  exact\\n\\tbytes\\0" > "$1/sub/bytes.bin"; printf x > "$1/root.txt"; ln -s /etc/passwd "$1/outside"; ln -s "$1/sub" "$1/internal"',
+            "files",
+            directory,
+        )
+        dispatches = DispatchStore(store)
+        dispatches.initialize()
+        workspace = Workspace(store, runtime, dispatches, Interactions(store, runtime))
+        listing = await workspace.files(org, agent, session["id"], "")
+        assert {entry["name"] for entry in listing["entries"]} >= {"sub", "root.txt"}
+        assert "outside" not in {entry["name"] for entry in listing["entries"]}
+        sub = await workspace.files(org, agent, session["id"], "sub/")
+        assert sub["path"] == "sub" and sub["entries"][0]["name"] == "bytes.bin"
+        internal = await workspace.files(org, agent, session["id"], "internal")
+        assert internal["entries"][0]["name"] == "bytes.bin"
+        assert await read_download(workspace, session["id"]) == b"  exact\n\tbytes\0"
+        assert (
+            await read_download(workspace, session["id"], "internal/bytes.bin")
+            == b"  exact\n\tbytes\0"
+        )
+        preview = await workspace.preview(org, agent, session["id"], "sub/bytes.bin")
+        assert preview["type"] == "binary" and preview["truncated"] is False
+        with pytest.raises(RuntimeUnavailable):
+            await workspace.preview(org, agent, session["id"], "outside")
+        with pytest.raises(RuntimeUnavailable):
+            await read_download(workspace, session["id"], "outside")
+        await runtime.docker("exec", runtime.name(agent), "mkfifo", f"{directory}/pipe")
+        with pytest.raises(RuntimeUnavailable):
+            await asyncio.wait_for(workspace.preview(org, agent, session["id"], "pipe"), timeout=10)
+        await runtime.docker(
+            "exec",
+            runtime.name(agent),
+            "sh",
+            "-c",
+            'dd if=/dev/zero of="$1/sub/large.bin" bs=1024 count=129 status=none',
+            "large-preview",
+            directory,
+        )
+        large = await asyncio.wait_for(
+            workspace.preview(org, agent, session["id"], "sub/large.bin"), timeout=15
+        )
+        assert large["truncated"] is True
+        assert len(base64.b64decode(large["content"])) == 128 * 1024
+        await runtime.docker(
+            "exec",
+            runtime.name(agent),
+            "sh",
+            "-c",
+            'rm -rf "$1"; ln -s /etc "$1"',
+            "replace-root",
+            directory,
+        )
+        with pytest.raises(RuntimeUnavailable):
+            await workspace.files(org, agent, session["id"], "")
+        await runtime.inspect(org, agent)
+        await runtime.docker("stop", runtime.name(agent))
+        await runtime.docker("rm", runtime.name(agent))
+        await runtime.docker(
+            "volume", "rm", runtime.name(agent) + "-home", runtime.name(agent) + "-workspace"
+        )
         shutil.rmtree(tmp_path)
 
     asyncio.run(check())

@@ -4,9 +4,9 @@ import { ThreadContext } from './ThreadContext';
 
 afterEach(cleanup);
 
-test('has only the remaining files and permissions controls', () => {
+test('has only the remaining permissions control', () => {
   render(<ThreadContext organization="org" agent="junior" session="thread" csrf="csrf-example" />);
   expect(screen.queryByRole('button', { name: 'Thread activity' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Thread permissions' })).toBeTruthy();
-  expect(screen.getByRole('button', { name: 'Files' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
 });
