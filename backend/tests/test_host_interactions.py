@@ -415,6 +415,39 @@ def test_thread_policy_disposes_a_quiet_native_instance_before_applying(tmp_path
     ]
 
 
+def test_thread_policy_rejects_a_malformed_native_status_entry(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+
+    class MalformedStatusNative(PolicyNative):
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            if path == "/session/status":
+                return {self.session_id: {}}
+            return await super().request(
+                organization_id, agent_id, path, method=method, body=body, directory=directory
+            )
+
+    native = MalformedStatusNative(session_id)
+    interactions = Interactions(host, native)
+    interactions.initialize()
+    interactions.put_policy(
+        organization_id,
+        agent_id,
+        session_id,
+        0,
+        [PermissionRule(permission="read", action="allow")],
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+
+    with pytest.raises(RuntimeUnavailable, match="status response is invalid"):
+        asyncio.run(interactions.apply_policy(organization_id, agent_id, session_id))
+
+    pending = interactions.get_policy(organization_id, agent_id, session_id)
+    assert pending["desired_revision"] == 1 and pending["applied_revision"] == 0
+    assert not any(method == "PATCH" for _, method in native.calls)
+
+
 def test_policy_quiesces_and_replaces_suffix_for_busy_native_descendants(tmp_path):
     host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
     child_id = "ses_child"

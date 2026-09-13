@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from fesnyng_backend.agent_lifecycle import HostLifecycleRequest
 from fesnyng_backend.host_models import HostAgentConfiguration, SessionCreate
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 
@@ -41,12 +42,17 @@ def host_errors() -> Iterator[None]:
 async def agent_status(request: Request, organization_id: UUID, agent_id: UUID):
     require_binding(request, str(organization_id))
     with host_errors():
-        status = request.app.state.host_store.agent_status(str(organization_id), str(agent_id))
-        container = await request.app.state.host_runtime.inspect(
-            str(organization_id), str(agent_id)
-        )
-        status["container_state"] = container["state"]["Status"] if container else "missing"
-        return status
+        return await request.app.state.agent_lifecycle.status(str(organization_id), str(agent_id))
+
+
+@router.post("/agents/{agent_id}/lifecycle")
+async def lifecycle(
+    request: Request, organization_id: UUID, agent_id: UUID, body: HostLifecycleRequest
+):
+    org, aid = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        return await request.app.state.agent_lifecycle.perform(org, aid, body)
 
 
 @router.put("/agents/{agent_id}")

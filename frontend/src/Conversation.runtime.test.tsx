@@ -619,7 +619,7 @@ test('keeps a replacement workflow when an earlier workflow submission settles',
   await waitFor(() => expect(screen.getByLabelText('Remove workflow fesnyng/replacement')).toBeTruthy());
 });
 
-test('portals the maintained list into the sidebar with pins, pages and the selected thread', async () => {
+test('portals the maintained list into the sidebar with pins, pages and the selected thread without a duplicate new-thread control', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const threads = Array.from({ length: 10 }, (_, index) => ({ id: `session-${index}`, title: `Sidebar thread ${index}`, time: {} }));
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -645,8 +645,7 @@ test('portals the maintained list into the sidebar with pins, pages and the sele
   expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep sidebar draft');
   fireEvent.click(screen.getByRole('button', { name: 'Sidebar thread 9' }));
   expect(selected).toHaveBeenCalledTimes(1);
-  fireEvent.click(screen.getByRole('button', { name: 'New Thread' }));
-  expect(selected).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: 'New Thread' })).toBeNull();
   target.remove();
 });
 

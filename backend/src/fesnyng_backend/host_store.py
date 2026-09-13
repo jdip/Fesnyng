@@ -52,7 +52,16 @@ class HostStore:
                     runtime_password TEXT NOT NULL, agent_token TEXT NOT NULL,
                     runtime_state TEXT NOT NULL DEFAULT 'pending', error TEXT,
                     snapshot_image TEXT,
+                    desired_state TEXT NOT NULL DEFAULT 'running',
+                    lifecycle_state TEXT NOT NULL DEFAULT 'pending',
                     UNIQUE(organization_id,agent_id)
+                );
+                CREATE TABLE IF NOT EXISTS host_lifecycle_confirmations (
+                    code_digest TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    FOREIGN KEY(organization_id,agent_id)
+                        REFERENCES host_agents(organization_id,agent_id)
                 );
                 CREATE TABLE IF NOT EXISTS host_sessions (
                     session_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
@@ -70,6 +79,17 @@ class HostStore:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN deleted_at INTEGER")
             if "archived_at" not in columns:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN archived_at INTEGER")
+            agent_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(host_agents)")
+            }
+            if "desired_state" not in agent_columns:
+                connection.execute(
+                    "ALTER TABLE host_agents ADD COLUMN desired_state TEXT NOT NULL DEFAULT 'running'"
+                )
+            if "lifecycle_state" not in agent_columns:
+                connection.execute(
+                    "ALTER TABLE host_agents ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'running'"
+                )
             if connection.execute("SELECT version FROM host_schema").fetchone()[0] != 1:
                 raise RuntimeError("Unsupported host schema version")
 
@@ -181,13 +201,15 @@ class HostStore:
             "applied_version": applied["version"] if applied else None,
             "applied_policy_version": applied["policy_version"] if applied else None,
             "runtime_state": agent["runtime_state"],
+            "desired_state": agent["desired_state"],
+            "lifecycle_state": agent["lifecycle_state"],
             "error": agent["error"],
         }
 
     def mark_applied(self, envelope: HostAgentConfiguration) -> None:
         with self.connect() as connection:
             changed = connection.execute(
-                "UPDATE host_agents SET applied_envelope=?,runtime_state='running',error=NULL WHERE agent_id=? AND organization_id=? AND desired_envelope=?",
+                "UPDATE host_agents SET applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=? AND desired_envelope=?",
                 (
                     envelope.model_dump_json(),
                     str(envelope.agent_id),
@@ -207,6 +229,69 @@ class HostStore:
                 "UPDATE host_agents SET runtime_state=?,error=? WHERE organization_id=? AND agent_id=?",
                 (state, error, organization_id, agent_id),
             )
+
+    def set_lifecycle_state(
+        self,
+        organization_id: str,
+        agent_id: str,
+        *,
+        desired: str | None = None,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        if desired is not None and desired not in {"running", "stopped"}:
+            raise ValueError("Unknown desired lifecycle state")
+        self.agent(organization_id, agent_id)
+        with self.connect() as connection:
+            if desired is None:
+                connection.execute(
+                    "UPDATE host_agents SET lifecycle_state=?,error=? WHERE organization_id=? AND agent_id=?",
+                    (state, error, organization_id, agent_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE host_agents SET desired_state=?,lifecycle_state=?,error=? WHERE organization_id=? AND agent_id=?",
+                    (desired, state, error, organization_id, agent_id),
+                )
+
+    def save_lifecycle_confirmation(
+        self,
+        organization_id: str,
+        agent_id: str,
+        actor_id: str,
+        action: str,
+        digest: str,
+        expires: int,
+    ) -> None:
+        self.agent(organization_id, agent_id)
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM host_lifecycle_confirmations WHERE expires_at<?", (expires - 300,)
+            )
+            connection.execute(
+                "DELETE FROM host_lifecycle_confirmations WHERE organization_id=? AND agent_id=? AND actor_id=? AND action=?",
+                (organization_id, agent_id, actor_id, action),
+            )
+            connection.execute(
+                "INSERT INTO host_lifecycle_confirmations VALUES(?,?,?,?,?,?)",
+                (digest, organization_id, agent_id, actor_id, action, expires),
+            )
+
+    def consume_lifecycle_confirmation(
+        self, organization_id: str, agent_id: str, actor_id: str, action: str, digest: str, now: int
+    ) -> bool:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT 1 FROM host_lifecycle_confirmations WHERE code_digest=? AND organization_id=? AND agent_id=? AND actor_id=? AND action=? AND expires_at>=?",
+                (digest, organization_id, agent_id, actor_id, action, now),
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                "DELETE FROM host_lifecycle_confirmations WHERE code_digest=?", (digest,)
+            )
+        return True
 
     def save_session(
         self, organization_id: str, agent_id: str, session_id: str, directory: str, title: str

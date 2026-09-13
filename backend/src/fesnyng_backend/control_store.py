@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fesnyng_backend.agent_storage import AGENT_SCHEMA
 
-CONTROL_PLANE_SCHEMA_VERSION = 1
+CONTROL_PLANE_SCHEMA_VERSION = 2
 PASSWORD_MAX_BYTES = 256
 PASSWORD_MIN_BYTES = 12
 SCRYPT_N = 2**17
@@ -110,7 +110,7 @@ class ControlPlaneStore:
             schema_version = connection.execute(
                 "SELECT schema_version FROM control_plane_schema WHERE singleton = 1"
             ).fetchone()[0]
-            if schema_version != CONTROL_PLANE_SCHEMA_VERSION:
+            if schema_version not in {1, CONTROL_PLANE_SCHEMA_VERSION}:
                 raise RuntimeError(
                     "Unsupported control-plane schema version "
                     f"{schema_version}; expected {CONTROL_PLANE_SCHEMA_VERSION}."
@@ -180,6 +180,14 @@ class ControlPlaneStore:
             for statement in AGENT_SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
+            agent_columns = {row["name"] for row in connection.execute("PRAGMA table_info(agents)")}
+            if "department_id" not in agent_columns:
+                connection.execute("ALTER TABLE agents ADD COLUMN department_id TEXT")
+            if schema_version != CONTROL_PLANE_SCHEMA_VERSION:
+                connection.execute(
+                    "UPDATE control_plane_schema SET schema_version=? WHERE singleton=1",
+                    (CONTROL_PLANE_SCHEMA_VERSION,),
+                )
 
     def bootstrap_owner(self, login: str, display_name: str, password: str) -> User:
         """Create the offline installation owner once, never from an HTTP request."""

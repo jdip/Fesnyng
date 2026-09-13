@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 
 from fesnyng_backend import auth
+from fesnyng_backend.agent_lifecycle import HostLifecycleRequest, LifecycleRequest
 from fesnyng_backend.agent_storage import AgentStore
 from fesnyng_backend.host_client import HostClient, HostRejected, HostUnavailable
 from fesnyng_backend.host_models import SessionCreate
@@ -47,6 +48,29 @@ async def runtime_status(request: Request, organization_id: UUID, agent_id: UUID
     with host_errors():
         agent = client.agents.get_agent(org, aid)
         return await client.request(org, agent["host_id"], f"/agents/{aid}")
+
+
+@router.post("/agents/{agent_id}/lifecycle")
+async def lifecycle(
+    request: Request, organization_id: UUID, agent_id: UUID, body: LifecycleRequest
+):
+    org, aid = str(organization_id), str(agent_id)
+    user = auth.require_unsafe_request(request)
+    auth.require_manager(request, org)
+    client = host_client(request)
+    with host_errors():
+        agent = client.agents.get_agent(org, aid)
+        forwarded = HostLifecycleRequest(
+            **body.model_dump(),
+            author={"kind": "human", "id": user.id, "name": user.display_name},
+        )
+        return await client.request(
+            org,
+            agent["host_id"],
+            f"/agents/{aid}/lifecycle",
+            method="POST",
+            body=forwarded.model_dump(mode="json"),
+        )
 
 
 @router.get("/agents/{agent_id}/sessions")

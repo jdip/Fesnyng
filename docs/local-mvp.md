@@ -258,7 +258,17 @@ A host restart marks interrupted device-login or refresh work uncertain. Start a
 fresh **Sign in on this host** flow for that host when needed. Do not copy a
 refresh credential between Host A and Host B to repair it.
 
-An applied agent’s container can be deliberately replaced only through its
+Use **Agent settings → Agent lifecycle** to start, stop, restart, or rebuild an
+agent container. Stop persists until Start, including when settings are saved.
+Stop/Restart require confirmation, with a typed random code when work is active.
+Rebuild additionally warns that the container writable layer is replaced; retained
+home/workspace volumes, identity, and host OAuth configuration are preserved.
+Rebuild is the explicit recovery path for a missing container. Inspect any
+**Recovery required** result through the affected thread's Investigate and
+Reconcile actions; an uncertain external effect still needs a human finding.
+Keep new submissions gated until that outcome is resolved.
+
+The separate checkpoint replacement operation remains available through the
 organization-bound host API. It waits for native sessions to be quiet and for
 delivery effects to be reconciled, checkpoints the container image, retains the
 labeled home and workspace volumes, and starts the replacement from that

@@ -10,12 +10,12 @@ import {
   useOpenCodeThreadState,
 } from '@assistant-ui/react-opencode';
 import { createPortal } from 'react-dom';
-import { GitForkIcon, PlusIcon } from 'lucide-react';
+import { GitForkIcon } from 'lucide-react';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { ThreadPinsProvider } from './ThreadPins';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
-import { ThreadList, ThreadListNew, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
 import { ThreadPolicyDialog } from './ThreadPolicyDialog';
 import { ThreadInformation } from './ThreadInformation';
@@ -30,7 +30,6 @@ import {
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
-import './assistant.css';
 
 export type ConversationProps = {
   /** Absolute `/api/organizations/{org}/agents/{agent}/opencode` facade URL. */
@@ -48,7 +47,10 @@ export type ConversationProps = {
   /** Reloads the maintained thread inventory without remounting the composer. */
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
-  newThreadTarget?: HTMLElement | null;
+  /** Monotonic shell request that starts a maintained native new thread. */
+  newThreadRequest?: number;
+  /** Acknowledges the request only after the runtime accepts its transition. */
+  onNewThreadStarted?: (request: number) => void;
   threadPageSize?: number;
   onThreadSelect?: () => void;
 };
@@ -75,7 +77,8 @@ export function Conversation({
   showThreadList = true,
   refreshKey = 0,
   threadListTarget,
-  newThreadTarget,
+  newThreadRequest,
+  onNewThreadStarted,
   threadPageSize = 6,
   onThreadSelect,
 }: ConversationProps) {
@@ -129,6 +132,18 @@ export function Conversation({
     previousRefresh.current = refreshKey;
     void runtime.threads.reload().catch((error: unknown) => onError?.(error));
   }, [refreshKey, runtime, onError]);
+  const completedNewThreadRequest = useRef<number | undefined>(undefined);
+  const inFlightNewThreadRequest = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (newThreadRequest === undefined || completedNewThreadRequest.current === newThreadRequest || inFlightNewThreadRequest.current === newThreadRequest) return;
+    inFlightNewThreadRequest.current = newThreadRequest;
+    void runtime.threads.switchToNewThread().then(() => {
+      completedNewThreadRequest.current = newThreadRequest;
+      onNewThreadStarted?.(newThreadRequest);
+    }).catch((error: unknown) => onError?.(error)).finally(() => {
+      if (inFlightNewThreadRequest.current === newThreadRequest) inFlightNewThreadRequest.current = undefined;
+    });
+  }, [newThreadRequest, onError, onNewThreadStarted, runtime]);
   const components = useMemo(() => ({
     Composer: ConversationComposer,
     ToolFallback: OpenCodeToolFallback,
@@ -144,8 +159,7 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {newThreadTarget && createPortal(<ThreadListNew className="agent-new-thread" aria-label="New thread" title="New thread" onClick={(event) => { event.stopPropagation(); onThreadSelect?.(); }}><PlusIcon aria-hidden="true" size={16} /></ThreadListNew>, newThreadTarget)}
-          {threadListTarget ? createPortal(<ThreadList showNew={!newThreadTarget} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} />, threadListTarget) : showThreadList && <aside><ThreadList showNew={!newThreadTarget} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} /></aside>}
+          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} /></aside>}
           <div className="fesnyng-thread-pane"><ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} /><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
           {files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}

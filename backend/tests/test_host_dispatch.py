@@ -42,7 +42,17 @@ def test_dispatch_receipts_are_durable_ordered_and_reject_conflicting_retries(tm
     assert receipt["sequence"] == 1
     assert receipt["state"] == "queued"
     assert receipt["author"]["id"] == str(author.id)
+    host.set_lifecycle_state(org, agent, state="transitioning")
     assert deliveries.enqueue(org, agent, "ses_thread", first, author) == receipt
+    with pytest.raises(RuntimeUnavailable, match="lifecycle transition"):
+        deliveries.enqueue(
+            org,
+            agent,
+            "ses_thread",
+            Submission(id=uuid4(), text="New work during transition"),
+            author,
+        )
+    host.set_lifecycle_state(org, agent, state="running")
     second = deliveries.enqueue(
         org, agent, "ses_thread", Submission(id=uuid4(), text="Report the result"), author
     )
@@ -107,6 +117,122 @@ def test_native_delivery_is_fifo_per_thread_but_threads_run_concurrently(tmp_pat
             assert store.get(org, agent, other["id"])["state"] in {"submitting", "active"}
 
     asyncio.run(check())
+
+
+def test_agent_activity_detects_unmapped_default_work_and_refuses_unattributed_abort(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization, agent = str(uuid4()), str(uuid4())
+    host.bind_organization(organization, "test organization binding with enough characters")
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization,
+        agent_id=agent,
+        version=1,
+        name="Engineer",
+    )
+    host.stage_agent(envelope)
+    host.mark_applied(envelope)
+    store = DispatchStore(host)
+    store.initialize()
+
+    class UnmappedNative:
+        def lock(self, agent_id):
+            return asyncio.Lock()
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            assert path == "/session/status" and directory is None
+            return {"ses_unmapped": {"type": "busy"}}
+
+    dispatcher = Dispatcher(store, UnmappedNative())
+    activity = asyncio.run(dispatcher.agent_activity(organization, agent))
+    assert activity == "<default>:ses_unmapped:busy"
+    with pytest.raises(RuntimeUnavailable, match="no mapped Fesnyng thread"):
+        asyncio.run(
+            dispatcher.quiesce_agent(
+                organization,
+                agent,
+                Actor(kind="human", id=uuid4(), name="Owner"),
+            )
+        )
+
+
+def test_lifecycle_quiesce_records_actor_and_aborts_verified_native_descendants(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization, agent = str(uuid4()), str(uuid4())
+    host.bind_organization(organization, "test organization binding with enough characters")
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization,
+        agent_id=agent,
+        version=1,
+        name="Engineer",
+    )
+    host.stage_agent(envelope)
+    host.mark_applied(envelope)
+    host.save_session(organization, agent, "ses_root", "/workspace/root", "Root")
+    store = DispatchStore(host)
+    store.initialize()
+
+    class DescendantNative:
+        def __init__(self):
+            self.statuses = {
+                "ses_root": {"type": "busy"},
+                "ses_child": {"type": "busy"},
+            }
+            self.aborted = []
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            if path == "/session/ses_root/children":
+                return [
+                    {
+                        "id": "ses_child",
+                        "parentID": "ses_root",
+                        "directory": "/workspace/root",
+                    }
+                ]
+            if path == "/session/ses_child/children":
+                return []
+            if path == "/session/status":
+                return self.statuses
+            if path == "/session/ses_root/message":
+                return []
+            if path.endswith("/abort") and method == "POST":
+                native_id = path.removeprefix("/session/").removesuffix("/abort")
+                self.aborted.append(native_id)
+                self.statuses[native_id] = {"type": "idle"}
+                return True
+            raise AssertionError((path, method, directory))
+
+    native = DescendantNative()
+    dispatcher = Dispatcher(store, native)
+    owner = Actor(kind="human", id=uuid4(), name="Owner")
+
+    asyncio.run(dispatcher.quiesce_agent(organization, agent, owner))
+
+    assert native.aborted == ["ses_root", "ses_child"]
+    [receipt] = store.for_thread(organization, agent, "ses_root")
+    assert receipt["payload"]["mode"] == "stop"
+    assert receipt["author"] == owner.model_dump(mode="json")
+    assert receipt["state"] == "completed"
+    assert receipt["outcome"]["kind"] == "abort_acknowledged"
 
 
 def test_stalled_thread_probe_does_not_block_healthy_thread_fifo(tmp_path):

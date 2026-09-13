@@ -176,78 +176,154 @@ class DockerRuntime:
                 raise RuntimeUnavailable(
                     "Agent container is missing without a checkpoint; inspect retained state before replacement"
                 )
-            name = self.name(agent_id)
-            for suffix in ("home", "workspace"):
-                volume = f"{name}-{suffix}"
-                present = (
-                    (
-                        await self.docker(
-                            "volume", "ls", "--filter", f"name=^{volume}$", "--format", "{{.Name}}"
-                        )
-                    )
-                    .decode()
-                    .splitlines()
-                )
-                if volume in present:
-                    labels = (
-                        json.loads(
-                            await self.docker(
-                                "volume", "inspect", "--format", "{{json .Labels}}", volume
-                            )
-                        )
-                        or {}
-                    )
-                    if labels.get("fesnyng.agent") != agent_id or labels.get("fesnyng.host") != str(
-                        self.store.instance_id
-                    ):
-                        raise RuntimeUnavailable("Volume ownership mismatch; resource retained")
-                else:
-                    await self.docker(
-                        "volume",
-                        "create",
-                        "--label",
-                        f"fesnyng.agent={agent_id}",
-                        "--label",
-                        f"fesnyng.host={self.store.instance_id}",
-                        volume,
-                    )
-            await self.docker(
-                "run",
-                "-d",
-                "--name",
-                name,
-                "--label",
-                f"fesnyng.host={self.store.instance_id}",
-                "--label",
-                f"fesnyng.organization={organization_id}",
-                "--label",
-                f"fesnyng.agent={agent_id}",
-                "--security-opt",
-                "no-new-privileges",
-                "--memory",
-                "1g",
-                "--cpus",
-                "2",
-                "--pids-limit",
-                "512",
-                "--restart",
-                "unless-stopped",
-                "-p",
-                "127.0.0.1::4096",
-                "-v",
-                f"{name}-home:/home/agent",
-                "-v",
-                f"{name}-workspace:/workspace",
-                "-e",
-                f"OPENCODE_SERVER_PASSWORD={agent['runtime_password']}",
-                "-e",
-                "FESNYNG_AGENT_AUTH=/home/agent/host-auth.json",
-                "-e",
-                'OPENCODE_AUTH_CONTENT={"openai":{"type":"oauth","access":"","refresh":"","expires":0}}',
+            await self._create_container(
+                organization_id,
+                agent_id,
                 agent["snapshot_image"] or self.image,
+                require_volumes=False,
             )
         elif not info["state"]["Running"]:
             await self.docker("start", self.name(agent_id))
+        await self._wait_healthy(organization_id, agent_id)
+
+    async def start(self, organization_id: str, agent_id: str) -> None:
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is missing; rebuild is required")
+        if not info["state"]["Running"]:
+            await self.docker("start", self.name(agent_id))
+        await self._wait_healthy(organization_id, agent_id)
+
+    async def stop(self, organization_id: str, agent_id: str) -> None:
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is missing; rebuild is required")
+        if info["state"]["Running"]:
+            await self.docker("stop", "--time", "30", self.name(agent_id))
+
+    async def restart(self, organization_id: str, agent_id: str) -> None:
+        await self.stop(organization_id, agent_id)
+        await self.start(organization_id, agent_id)
+
+    async def rebuild(self, organization_id: str, agent_id: str) -> None:
+        await self._require_retained_volumes(agent_id)
+        info = await self.inspect(organization_id, agent_id)
+        if info is not None:
+            if info["state"]["Running"]:
+                await self.docker("stop", "--time", "30", self.name(agent_id))
+            await self.docker("rm", self.name(agent_id))
+        await self._create_container(organization_id, agent_id, self.image, require_volumes=True)
+        await self._wait_healthy(organization_id, agent_id)
+
+    async def _require_retained_volumes(self, agent_id: str) -> None:
+        name = self.name(agent_id)
+        for suffix in ("home", "workspace"):
+            volume = f"{name}-{suffix}"
+            present = (
+                (
+                    await self.docker(
+                        "volume", "ls", "--filter", f"name=^{volume}$", "--format", "{{.Name}}"
+                    )
+                )
+                .decode()
+                .splitlines()
+            )
+            if volume not in present:
+                raise RuntimeUnavailable("Retained agent volume is missing; resource retained")
+            labels = (
+                json.loads(
+                    await self.docker("volume", "inspect", "--format", "{{json .Labels}}", volume)
+                )
+                or {}
+            )
+            if labels.get("fesnyng.agent") != agent_id or labels.get("fesnyng.host") != str(
+                self.store.instance_id
+            ):
+                raise RuntimeUnavailable("Volume ownership mismatch; resource retained")
+
+    async def _create_container(
+        self,
+        organization_id: str,
+        agent_id: str,
+        image: str,
+        *,
+        require_volumes: bool,
+    ) -> None:
+        agent = self.store.agent(organization_id, agent_id)
+        name = self.name(agent_id)
+        for suffix in ("home", "workspace"):
+            volume = f"{name}-{suffix}"
+            present = (
+                (
+                    await self.docker(
+                        "volume", "ls", "--filter", f"name=^{volume}$", "--format", "{{.Name}}"
+                    )
+                )
+                .decode()
+                .splitlines()
+            )
+            if volume in present:
+                labels = (
+                    json.loads(
+                        await self.docker(
+                            "volume", "inspect", "--format", "{{json .Labels}}", volume
+                        )
+                    )
+                    or {}
+                )
+                if labels.get("fesnyng.agent") != agent_id or labels.get("fesnyng.host") != str(
+                    self.store.instance_id
+                ):
+                    raise RuntimeUnavailable("Volume ownership mismatch; resource retained")
+            elif require_volumes:
+                raise RuntimeUnavailable("Retained agent volume is missing; resource retained")
+            else:
+                await self.docker(
+                    "volume",
+                    "create",
+                    "--label",
+                    f"fesnyng.agent={agent_id}",
+                    "--label",
+                    f"fesnyng.host={self.store.instance_id}",
+                    volume,
+                )
+        await self.docker(
+            "run",
+            "-d",
+            "--name",
+            name,
+            "--label",
+            f"fesnyng.host={self.store.instance_id}",
+            "--label",
+            f"fesnyng.organization={organization_id}",
+            "--label",
+            f"fesnyng.agent={agent_id}",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "1g",
+            "--cpus",
+            "2",
+            "--pids-limit",
+            "512",
+            "--restart",
+            "unless-stopped",
+            "-p",
+            "127.0.0.1::4096",
+            "-v",
+            f"{name}-home:/home/agent",
+            "-v",
+            f"{name}-workspace:/workspace",
+            "-e",
+            f"OPENCODE_SERVER_PASSWORD={agent['runtime_password']}",
+            "-e",
+            "FESNYNG_AGENT_AUTH=/home/agent/host-auth.json",
+            "-e",
+            'OPENCODE_AUTH_CONTENT={"openai":{"type":"oauth","access":"","refresh":"","expires":0}}',
+            image,
+        )
+
+    async def _wait_healthy(self, organization_id: str, agent_id: str) -> None:
         for _ in range(120):
             try:
                 await self.request(organization_id, agent_id, "/global/health")
@@ -751,6 +827,11 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
 
     async def replace(self, organization_id: str, agent_id: str) -> None:
         async with self.lock(agent_id):
+            agent = self.store.agent(organization_id, agent_id)
+            if agent["desired_state"] != "running" or agent["lifecycle_state"] != "running":
+                raise RuntimeUnavailable(
+                    "Container replacement is unavailable during a lifecycle transition or stop"
+                )
             info = await self.inspect(organization_id, agent_id)
             if info is None:
                 raise RuntimeUnavailable(

@@ -119,7 +119,7 @@ test('uses the reporting chart as the default overview with compact settings nav
   render(<App />);
 
   expect(await screen.findByRole('heading', { name: 'Reporting chart' })).toBeTruthy();
-  expect(await screen.findByText('Create your first agent to get started.')).toBeTruthy();
+  expect(await screen.findByText('Create an agent or department to start your organization chart.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Overview' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
   const switcher = screen.getByRole('button', { name: 'Switch organization: First organization' });
@@ -251,4 +251,26 @@ test('expands only the selected agent and searches titles beyond the sidebar pag
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Reporting chart for Organization' }));
   fireEvent.click(screen.getByRole('button', { name: 'Create sidebar thread' }));
   expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
+});
+
+test('starts a new native thread from every agent card without selecting the card button first', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+
+  render(<App />);
+  const alpha = await screen.findByRole('button', { name: /Alpha/, pressed: false });
+  const beta = screen.getByRole('button', { name: /Beta/, pressed: false });
+  expect(screen.getByRole('button', { name: 'New thread for Alpha' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Beta' }));
+  expect(alpha.getAttribute('aria-pressed')).toBe('false');
+  expect(beta.getAttribute('aria-pressed')).toBe('true');
+  expect(await screen.findByRole('textbox', { name: 'Composer draft' })).toBeTruthy();
 });

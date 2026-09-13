@@ -40,6 +40,15 @@ class HostConfiguration:
         changed = self.host.stage_agent(envelope)
         if not changed:
             return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
+        lifecycle = self.host.agent(str(envelope.organization_id), str(envelope.agent_id))
+        if lifecycle["desired_state"] == "stopped" or lifecycle["lifecycle_state"] in {
+            "transitioning",
+            "recovering",
+            "recovery_required",
+            "failed",
+        }:
+            self._mark_pending(str(envelope.organization_id), str(envelope.agent_id))
+            return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
         try:
             await self._apply_staged(envelope)
         except (PermissionError, RuntimeUnavailable, ValueError):
@@ -51,7 +60,9 @@ class HostConfiguration:
         with self.host.connect() as connection:
             rows = connection.execute(
                 """SELECT desired_envelope FROM host_agents
-                WHERE applied_envelope IS NULL OR desired_envelope != applied_envelope"""
+                WHERE desired_state='running'
+                  AND lifecycle_state IN ('running','pending')
+                  AND (applied_envelope IS NULL OR desired_envelope != applied_envelope)"""
             ).fetchall()
         reconciled = await asyncio.gather(
             *(
@@ -63,16 +74,25 @@ class HostConfiguration:
         )
         return dict(reconciled)
 
-    async def _reconcile_agent(self, envelope: HostAgentConfiguration) -> tuple[str, str]:
+    async def apply_agent(self, organization_id: str, agent_id: str) -> str:
+        current = self.host.agent(organization_id, agent_id)
+        envelope = HostAgentConfiguration.model_validate_json(current["desired_envelope"])
+        return (await self._reconcile_agent(envelope, lifecycle_operation=True))[1]
+
+    async def _reconcile_agent(
+        self, envelope: HostAgentConfiguration, *, lifecycle_operation: bool = False
+    ) -> tuple[str, str]:
         organization_id, agent_id = str(envelope.organization_id), str(envelope.agent_id)
         try:
-            await self._apply_staged(envelope)
+            await self._apply_staged(envelope, lifecycle_operation=lifecycle_operation)
         except (PermissionError, RuntimeUnavailable, ValueError):
             self._mark_pending(organization_id, agent_id)
             return agent_id, "pending"
         return agent_id, "applied"
 
-    async def _apply_staged(self, envelope: HostAgentConfiguration) -> None:
+    async def _apply_staged(
+        self, envelope: HostAgentConfiguration, *, lifecycle_operation: bool = False
+    ) -> None:
         organization_id, agent_id = str(envelope.organization_id), str(envelope.agent_id)
         current = self.host.agent(organization_id, agent_id)
         previous = (
@@ -89,6 +109,14 @@ class HostConfiguration:
             current = self.host.agent(organization_id, agent_id)
             if current["desired_envelope"] != envelope.model_dump_json():
                 raise RuntimeUnavailable("Configuration changed during application")
+            lifecycle_allowed = (
+                current["lifecycle_state"] in {"pending", "recovering"}
+                if lifecycle_operation
+                else current["desired_state"] == "running"
+                and current["lifecycle_state"] in {"running", "pending"}
+            )
+            if not lifecycle_allowed:
+                raise RuntimeUnavailable("Configuration is waiting for the lifecycle transition")
             self._require_safe_delivery_effects(organization_id, agent_id)
             await self.runtime.assert_quiet(organization_id, agent_id)
             profile_id = envelope.configuration.profile_id

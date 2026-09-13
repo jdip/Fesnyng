@@ -49,6 +49,18 @@ CREATE TABLE IF NOT EXISTS credential_profiles (
     created_by TEXT NOT NULL REFERENCES users(id),
     UNIQUE (organization_id, id)
 );
+CREATE TABLE IF NOT EXISTS departments (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    head_agent_id TEXT,
+    UNIQUE (organization_id, id),
+    FOREIGN KEY (organization_id, parent_id)
+        REFERENCES departments(organization_id, id),
+    FOREIGN KEY (organization_id, head_agent_id)
+        REFERENCES agents(organization_id, id)
+);
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL REFERENCES organizations(id),
@@ -56,13 +68,16 @@ CREATE TABLE IF NOT EXISTS agents (
     title TEXT NOT NULL DEFAULT '',
     host_id TEXT NOT NULL,
     reports_to_agent_id TEXT,
+    department_id TEXT,
     desired_version INTEGER NOT NULL,
     applied_version INTEGER,
     UNIQUE (organization_id, id),
     FOREIGN KEY (organization_id, host_id)
         REFERENCES organization_hosts(organization_id, host_id),
     FOREIGN KEY (organization_id, reports_to_agent_id)
-        REFERENCES agents(organization_id, id)
+        REFERENCES agents(organization_id, id),
+    FOREIGN KEY (organization_id, department_id)
+        REFERENCES departments(organization_id, id)
 );
 CREATE TABLE IF NOT EXISTS workspace_preferences (
     organization_id TEXT NOT NULL,
@@ -176,6 +191,7 @@ class AgentStore:
         values = AgentCreate.model_validate(values).model_dump(mode="json")
         agent_id = str(uuid4())
         with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             if not connection.execute(
                 "SELECT 1 FROM organization_hosts WHERE organization_id=? AND host_id=?",
                 (organization_id, values["host_id"]),
@@ -184,9 +200,11 @@ class AgentStore:
             _validate_profile(connection, organization_id, values["configuration"])
             reporting = values.get("reports_to_agent_id")
             _validate_reporting(connection, organization_id, agent_id, reporting)
+            department = values.get("department_id")
+            _validate_department(connection, organization_id, department)
             connection.execute(
-                "INSERT INTO agents(id,organization_id,name,title,host_id,reports_to_agent_id,desired_version) "
-                "VALUES(?,?,?,?,?,?,1)",
+                "INSERT INTO agents(id,organization_id,name,title,host_id,reports_to_agent_id,department_id,desired_version) "
+                "VALUES(?,?,?,?,?,?,?,1)",
                 (
                     agent_id,
                     organization_id,
@@ -194,6 +212,7 @@ class AgentStore:
                     values.get("title", ""),
                     values["host_id"],
                     reporting,
+                    department,
                 ),
             )
             connection.execute(
@@ -243,12 +262,15 @@ class AgentStore:
             _validate_profile(connection, organization_id, configuration)
             reporting = values.get("reports_to_agent_id", current["reports_to_agent_id"])
             _validate_reporting(connection, organization_id, agent_id, reporting)
+            department = values.get("department_id", current["department_id"])
+            _validate_department(connection, organization_id, department)
             connection.execute(
-                "UPDATE agents SET name=?,title=?,reports_to_agent_id=?,desired_version=? WHERE id=?",
+                "UPDATE agents SET name=?,title=?,reports_to_agent_id=?,department_id=?,desired_version=? WHERE id=?",
                 (
                     values.get("name", current["name"]),
                     values.get("title", current["title"]),
                     reporting,
+                    department,
                     version,
                     agent_id,
                 ),
@@ -361,6 +383,19 @@ def _validate_reporting(
         if row is None:
             raise ValueError("Reporting agent not found in this organization")
         reporting = row[0]
+
+
+def _validate_department(
+    connection: sqlite3.Connection, organization_id: str, department_id: str | None
+) -> None:
+    if (
+        department_id is not None
+        and not connection.execute(
+            "SELECT 1 FROM departments WHERE organization_id=? AND id=?",
+            (organization_id, department_id),
+        ).fetchone()
+    ):
+        raise ValueError("Department not found in this organization")
 
 
 def _validate_profile(

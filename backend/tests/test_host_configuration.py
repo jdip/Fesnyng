@@ -149,6 +149,69 @@ def test_queued_delivery_does_not_block_instruction_reconfiguration(tmp_path):
     assert status["desired_version"] == status["applied_version"] == 2
 
 
+def test_stopped_agent_retains_pending_configuration_until_started(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    baseline = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+    )
+    asyncio.run(configuration.apply(baseline))
+    host.set_lifecycle_state(organization_id, agent_id, desired="stopped", state="stopped")
+    runtime.events.clear()
+    updated = baseline.model_copy(
+        update={
+            "version": 2,
+            "configuration": AgentConfiguration(instructions="Apply after Start"),
+        }
+    )
+
+    status = asyncio.run(configuration.apply(updated))
+
+    assert status["desired_version"] == 2 and status["applied_version"] == 1
+    assert status["desired_state"] == status["lifecycle_state"] == "stopped"
+    assert runtime.events == []
+    assert asyncio.run(configuration.reconcile_once()) == {}
+
+
+def test_apply_waiting_for_runtime_lock_cannot_restart_an_agent_stopped_in_the_race(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    baseline = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+    )
+    asyncio.run(configuration.apply(baseline))
+    updated = baseline.model_copy(update={"version": 2})
+    runtime.events.clear()
+
+    async def race():
+        lock = runtime.lock(agent_id)
+        await lock.acquire()
+        applying = asyncio.create_task(configuration.apply(updated))
+        for _ in range(100):
+            if host.agent_status(organization_id, agent_id)["desired_version"] == 2:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("Configuration was not staged")
+        host.set_lifecycle_state(organization_id, agent_id, desired="stopped", state="stopped")
+        lock.release()
+        with pytest.raises(RuntimeUnavailable, match="lifecycle transition"):
+            await applying
+
+    asyncio.run(race())
+
+    assert "configure" not in runtime.events
+    status = host.agent_status(organization_id, agent_id)
+    assert status["desired_state"] == status["lifecycle_state"] == "stopped"
+    assert status["desired_version"] == 2 and status["applied_version"] == 1
+
+
 def test_apply_rechecks_desired_envelope_after_thread_policy_work(tmp_path):
     host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
     baseline = HostAgentConfiguration(
