@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS thread_pins (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (organization_id, user_id, agent_id, session_id),
     FOREIGN KEY (organization_id, user_id)
-        REFERENCES organization_memberships(organization_id, user_id),
+        REFERENCES organization_memberships(organization_id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (organization_id, agent_id)
         REFERENCES agents(organization_id, id)
 );

@@ -55,7 +55,10 @@ export function ThreadPinsProvider({ baseUrl, csrfToken, refreshKey, onError, ch
     return () => { controller.abort(); };
   }, [load, refreshKey]);
   const refresh = useCallback(async () => {
-    await Promise.all([load(), aui.threads.reload()]);
+    await load();
+    await aui.threads.reload().catch((cause: unknown) => {
+      setError(errorMessage(cause));
+    });
   }, [aui, load]);
   useEffect(() => {
     let refreshing = false;
