@@ -52,7 +52,7 @@ Only allocated hosts appear through organization APIs. One host can be allocated
 
 The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/organizations/{id}`. Credential profiles are metadata here; each host owns the local login and refresh state for its assigned profiles. Agent creation assigns one home host. Configuration edits carry `expected_version`; stale updates return 409. When supplied in a patch, `configuration` replaces the complete configuration object. Host assignment and applied status are not client-writable. Desired state remains pending until the assigned host acknowledges the exact configuration version.
 
-Agent workspaces are logical names, not arbitrary filesystem paths. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
+Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
 ## Install an agent host
 

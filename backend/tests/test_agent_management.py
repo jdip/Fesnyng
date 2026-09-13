@@ -82,7 +82,7 @@ def test_agent_defaults_and_configuration_input_limits(organization):
     _, _, owner, org, agents, host_id = organization
     agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
     assert agent["configuration"]["execution_type"] == "docker"
-    assert agent["configuration"]["model"] == "gpt-5.6-luna"
+    assert agent["configuration"]["model"] == "gpt-6-astra"
     with pytest.raises(ValueError):
         agents.create_agent(
             org.id,

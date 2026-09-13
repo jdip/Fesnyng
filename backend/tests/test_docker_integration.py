@@ -68,7 +68,7 @@ def test_native_configuration_and_replacement_preserve_agent_state():
         )
         assert managed_instructions.endswith(envelope.configuration.instructions)
         native = await runtime.request(org, agent, "/config")
-        assert native.get("model") == "openai/gpt-5.6-luna", (
+        assert native.get("model") == "openai/gpt-6-astra", (
             "Native global configuration was not loaded"
         )
         assert "file:///opt/fesnyng/host-auth.mjs" in native.get("plugin", [])

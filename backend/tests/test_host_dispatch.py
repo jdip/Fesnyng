@@ -358,7 +358,7 @@ def test_native_prompt_context_is_session_scoped_without_changing_user_text_or_c
         "messageID": command_call[2]["messageID"],
         "command": "native",
         "arguments": "native arguments",
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-astra",
     }
 
 

@@ -14,6 +14,10 @@ The native OpenCode adapter owns session attachment and event reconciliation.
 Fesnyng supplies organization navigation, reporting relationships, settings,
 explicit memory, attributable delivery history, and the authorized connection.
 
+New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
+model until an authorized configuration change. An agent is persistent identity,
+rules, tools, skills, and memory that can own multiple threads.
+
 Owners and admins manage agents, organization permissions, membership, and named
 credential profiles. Host registration and networking remain installation/ops
 work. A profile is independently authorized on each host; the UI receives device

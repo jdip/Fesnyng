@@ -18,3 +18,24 @@ test('saves the expected configuration version and applies only after a successf
   const patch = request.mock.calls.find(([, options]) => options.method === 'PATCH');
   expect(JSON.parse(patch![1].body as string)).toMatchObject({ expected_version: 4, configuration: { instructions: 'Investigate thoroughly.' } });
 });
+
+test('submits Astra as the default model for a new agent without resetting existing agents', async () => {
+  const created = { ...agent, id: 'new-agent', name: 'New agent', desired_version: 1, configuration: { ...agent.configuration, model: 'gpt-6-astra' } };
+  const request = vi.fn().mockImplementation(async (url: string, options: RequestInit = {}) => {
+    if (options.method === 'POST' && String(url).endsWith('/agents')) return new Response(JSON.stringify(created));
+    if (String(url).endsWith('/apply')) return new Response(JSON.stringify({}));
+    if (String(url).endsWith('/new-agent')) return new Response(JSON.stringify(created));
+    return new Response(JSON.stringify(String(url).endsWith('/hosts') ? [{ id: 'host', name: 'Local host' }] : String(url).endsWith('/profiles') ? [] : []));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+
+  fireEvent.change(await screen.findByLabelText('Agent name'), { target: { value: 'New agent' } });
+  fireEvent.change(screen.getByLabelText('Home host'), { target: { value: 'host' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save and apply' }));
+
+  await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST')).toBe(true));
+  const create = request.mock.calls.find(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST');
+  expect(JSON.parse(create![1].body as string)).toMatchObject({ configuration: { model: 'gpt-6-astra' } });
+  expect(agent.configuration.model).toBe('gpt-5.6-luna');
+});
