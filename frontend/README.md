@@ -13,6 +13,9 @@ Markdown, composer, actions, branches, scrolling, reasoning, and generic tools.
 The native OpenCode adapter owns session attachment and event reconciliation.
 Fesnyng supplies organization navigation, reporting relationships, settings,
 explicit memory, attributable delivery history, and the authorized connection.
+The reporting chart is the organization overview. Its compact icon and the
+manager-only organization settings icon sit above the signed-in user in the
+sidebar.
 
 New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
 model until an authorized configuration change. An agent is persistent identity,

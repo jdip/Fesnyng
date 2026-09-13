@@ -21,7 +21,14 @@ button:disabled { cursor: default; opacity: .5; }
 .agent-choice { display: flex; align-items: center; gap: 10px; width: 100%; }
 .agent-avatar { display: grid; place-items: center; background: #e6ebe1; color: #4d654f; border: 1px solid #d7dfd1; width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0; font-size: 12px; font-weight: 650; }
 .agent-choice small { display: block; font-size: 11px; color: #75816e; font-weight: 400; margin-top: 2px; }
-.sidebar-footer { margin-top: auto; border-top: 1px solid #dde3d8; padding-top: 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.sidebar-utilities { position: relative; margin-top: auto; display: flex; gap: 4px; }
+.sidebar-icon-button { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #566151; }
+.sidebar-icon-button svg { width: 17px; height: 17px; }
+.sidebar-icon-button:hover { background: #e9ede5; }
+.sidebar-icon-button[aria-current='page'] { color: #24402b; background: #e1e9dc; border-color: #cedcc8; }
+.sidebar-icon-tooltip { position: absolute; z-index: 10; left: 0; bottom: calc(100% + 6px); width: max-content; max-width: 180px; padding: 5px 8px; border-radius: 5px; background: #25332c; color: #fff; font-size: 11px; line-height: 1.2; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.sidebar-icon-button:is(:hover,:focus-visible) .sidebar-icon-tooltip { opacity: 1; }
+.sidebar-footer { border-top: 1px solid #dde3d8; padding-top: 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; }
 .app-workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .workspace-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 28px; border-bottom: 1px solid #e7eae3; min-height: 88px; }
 .workspace-header h1 { font-size: 19px; margin: 0; font-weight: 600; letter-spacing: -.03em; }
