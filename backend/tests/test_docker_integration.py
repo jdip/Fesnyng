@@ -3,12 +3,15 @@
 import asyncio
 import os
 import secrets
+import shutil
+import tempfile
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from fesnyng_backend.agent_models import AgentConfiguration, NativeSkill
-from fesnyng_backend.host_models import HostAgentConfiguration
+from fesnyng_backend.host_models import HostAgentConfiguration, permission_rules
 from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.settings import ServiceSettings
@@ -18,7 +21,9 @@ from fesnyng_backend.settings import ServiceSettings
     os.environ.get("FESNYNG_DOCKER_TESTS") != "true",
     reason="Requires the real built Docker runtime",
 )
-def test_native_configuration_and_replacement_preserve_agent_state(tmp_path):
+def test_native_configuration_and_replacement_preserve_agent_state():
+    # A failed real-runtime proof must outlive pytest's rotating temporary directories.
+    tmp_path = Path(tempfile.mkdtemp(prefix="fesnyng-docker-"))
     store = HostStore(
         ServiceSettings(
             service="agent-host",
@@ -95,6 +100,9 @@ def test_native_configuration_and_replacement_preserve_agent_state(tmp_path):
         assert "run" not in skills
         session = await runtime.create_session(org, agent, "Retained thread", "default")
         saved = store.session(org, agent, session["id"])
+        assert session["permission"] == permission_rules(updated)
+        assert (await runtime.request(org, agent, "/global/config"))["permission"] == {"*": "allow"}
+
         await runtime.write_file(
             org, agent, "/usr/local/bin/integration-tool", "#!/bin/sh\necho retained\n"
         )
@@ -125,5 +133,6 @@ def test_native_configuration_and_replacement_preserve_agent_state(tmp_path):
             "volume", "rm", runtime.name(agent) + "-home", runtime.name(agent) + "-workspace"
         )
         await runtime.docker("image", "rm", store.agent(org, agent)["snapshot_image"])
+        shutil.rmtree(tmp_path)
 
     asyncio.run(check())

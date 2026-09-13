@@ -235,6 +235,19 @@ class CredentialStore:
                 (_REFRESH_UNCERTAIN, organization_id, profile_id, operation),
             )
 
+    def recover_interrupted(self) -> None:
+        """Fail closed after this host restarts during a non-durable OAuth exchange.
+
+        The caller owns exclusive host lifetime; initialization deliberately does not
+        alter a database which may still belong to a live host process.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE credential_profiles SET state=?,operation='' "
+                "WHERE state IN ('login_pending','refreshing')",
+                (_REFRESH_UNCERTAIN,),
+            )
+
     def assigned_credential(self, key: str) -> sqlite3.Row | None:
         """Look up the one assigned profile for a host-issued agent key."""
         with self.connect() as connection:
@@ -342,6 +355,9 @@ class CredentialService:
                 if not isinstance(tokens, Mapping):
                     raise TypeError("OAuth token response is invalid")
                 self.store.save_tokens(organization_id, profile_id, tokens, operation)
+            except asyncio.CancelledError:
+                self.store.mark_uncertain(organization_id, profile_id, operation)
+                raise
             except (httpx.HTTPError, PermissionError, RuntimeError, TypeError, ValueError):
                 self.store.mark_uncertain(organization_id, profile_id, operation)
                 raise PermissionError("Credential refresh needs reconciliation") from None

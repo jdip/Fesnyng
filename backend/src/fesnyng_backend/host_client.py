@@ -12,6 +12,12 @@ class HostUnavailable(RuntimeError):
     pass
 
 
+class HostRejected(HostUnavailable):
+    def __init__(self, status_code: int):
+        super().__init__("Agent host rejected the request")
+        self.status_code = status_code
+
+
 class HostClient:
     def __init__(self, agents: AgentStore, transport: httpx.AsyncBaseTransport | None = None):
         self.agents = agents
@@ -41,6 +47,8 @@ class HostClient:
         except httpx.HTTPError:
             raise HostUnavailable("Agent host is unreachable") from None
         if not response.is_success:
+            if response.status_code in {400, 403, 404, 409, 422}:
+                raise HostRejected(response.status_code)
             raise HostUnavailable(f"Agent host operation failed (HTTP {response.status_code})")
         if not response.content:
             return None

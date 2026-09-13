@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from fesnyng_backend import auth
 from fesnyng_backend.agent_storage import AgentStore
-from fesnyng_backend.host_client import HostClient, HostUnavailable
+from fesnyng_backend.host_client import HostClient, HostRejected, HostUnavailable
 from fesnyng_backend.host_models import SessionCreate
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["runtime"])
@@ -20,6 +20,8 @@ def host_errors() -> Iterator[None]:
         yield
     except LookupError as error:
         raise HTTPException(404, str(error)) from None
+    except HostRejected as error:
+        raise HTTPException(error.status_code, str(error)) from None
     except HostUnavailable as error:
         raise HTTPException(503, str(error)) from None
 
