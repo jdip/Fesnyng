@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+import sqlite3
 from uuid import uuid4
 
 import httpx
@@ -594,6 +595,63 @@ def test_legacy_pending_outbox_is_conservatively_uncertain_after_recovery(tmp_pa
     receipt = asyncio.run(wait_for_uncertainty())
     assert receipt["attempts"] == 2
     assert "outcome is uncertain" in receipt["error"]
+
+
+def test_legacy_outbox_schema_and_conservative_backfill_rollback_together(tmp_path):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Protect the atomic migration")
+    envelope = PeerEnvelope(
+        **request.model_dump(),
+        organization_id=organization_id,
+        source_host=service.store.instance_id,
+        source_agent=source_agent,
+        source_session="ses_source",
+    )
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    with service.store.connect() as connection:
+        connection.execute("DROP TABLE peer_outbox")
+        connection.execute(
+            """CREATE TABLE peer_outbox (
+                id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_agent TEXT NOT NULL,
+                source_session TEXT NOT NULL, target_host TEXT NOT NULL, envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                str(request.id),
+                organization_id,
+                str(source_agent),
+                "ses_source",
+                target_host,
+                envelope.model_dump_json(),
+            ),
+        )
+        connection.execute(
+            """CREATE TRIGGER fail_peer_outbox_backfill
+            BEFORE UPDATE OF attempts ON peer_outbox
+            WHEN OLD.attempts = 0 AND NEW.attempts = 1
+            BEGIN SELECT RAISE(ABORT, 'forced legacy backfill failure'); END"""
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced legacy backfill failure"):
+        service.initialize()
+
+    with service.store.connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(peer_outbox)")}
+        attempts = connection.execute(
+            "SELECT attempts FROM peer_outbox WHERE id=?", (str(request.id),)
+        ).fetchone()["attempts"]
+        connection.execute("DROP TRIGGER fail_peer_outbox_backfill")
+    assert "result_id" not in columns
+    assert attempts == 0
+
+    service.initialize()
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
 
 
 def test_direct_send_and_retry_worker_share_one_outbound_delivery_attempt(tmp_path):

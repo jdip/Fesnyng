@@ -115,6 +115,7 @@ class PeerDeliveryService:
                 );
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
             outbox_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(peer_outbox)")
             }
