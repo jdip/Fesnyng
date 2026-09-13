@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +18,14 @@ from fesnyng_backend.host_store import HostStore
 
 class RuntimeUnavailable(RuntimeError):
     pass
+
+
+_WORKSPACE_GUIDANCE = (
+    "Use the working directory in the current native environment as this thread's workspace. "
+    "Historical absolute paths and tool workdirs may refer to a parent; resolve this thread's work "
+    "under the current working directory and pass it to tools unless the current task explicitly "
+    "requires another location."
+)
 
 
 class DockerRuntime:
@@ -188,7 +198,10 @@ class DockerRuntime:
         ) as client:
             try:
                 response = await client.request(
-                    method, path, json=body, params={"directory": directory} if directory else None
+                    method,
+                    path,
+                    json=body,
+                    params={"directory": directory} if directory else None,
                 )
             except httpx.HTTPError:
                 raise RuntimeUnavailable("Native runtime connection unavailable") from None
@@ -200,6 +213,112 @@ class DockerRuntime:
                 return response.json() if response.content else None
             except ValueError:
                 raise RuntimeUnavailable("Native runtime returned an invalid response") from None
+
+    async def request_with_query(
+        self,
+        organization_id: str,
+        agent_id: str,
+        path: str,
+        query: dict[str, str],
+        *,
+        directory: str,
+    ) -> Any:
+        """Native GET with a finite caller-owned query contract."""
+        agent = self.store.agent(organization_id, agent_id)
+        info = await self.inspect(organization_id, agent_id)
+        if info is None or not info["state"]["Running"]:
+            raise RuntimeUnavailable("Agent container is not running")
+        ports = info["ports"].get("4096/tcp") or []
+        if not ports or ports[0]["HostIp"] != "127.0.0.1":
+            raise RuntimeUnavailable("Unexpected native runtime port binding")
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{int(ports[0]['HostPort'])}",
+            auth=("opencode", agent["runtime_password"]),
+            timeout=120,
+        ) as client:
+            try:
+                response = await client.get(path, params={**query, "directory": directory})
+            except httpx.HTTPError:
+                raise RuntimeUnavailable("Native runtime connection unavailable") from None
+            if not response.is_success:
+                raise RuntimeUnavailable(
+                    f"Native runtime request failed (HTTP {response.status_code})"
+                )
+            try:
+                return response.json() if response.content else None
+            except ValueError:
+                raise RuntimeUnavailable("Native runtime returned an invalid response") from None
+
+    @asynccontextmanager
+    async def event_stream(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> AsyncIterator[AsyncIterator[str]]:
+        """Open one authenticated native SSE stream for an already-mapped workspace."""
+        agent = self.store.agent(organization_id, agent_id)
+        info = await self.inspect(organization_id, agent_id)
+        if info is None or not info["state"]["Running"]:
+            raise RuntimeUnavailable("Agent container is not running")
+        ports = info["ports"].get("4096/tcp") or []
+        if not ports or ports[0]["HostIp"] != "127.0.0.1":
+            raise RuntimeUnavailable("Unexpected native runtime port binding")
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{int(ports[0]['HostPort'])}",
+            auth=("opencode", agent["runtime_password"]),
+            timeout=None,
+        ) as client:
+            try:
+                async with client.stream(
+                    "GET", "/event", params={"directory": directory}
+                ) as response:
+                    if not response.is_success or not response.headers.get(
+                        "content-type", ""
+                    ).startswith("text/event-stream"):
+                        raise RuntimeUnavailable("Native event stream is unavailable")
+                    yield response.aiter_lines()
+            except httpx.HTTPError:
+                raise RuntimeUnavailable("Native runtime connection unavailable") from None
+
+    async def workspace_path(
+        self, organization_id: str, agent_id: str, directory: str, path: str
+    ) -> str:
+        """Resolve an artifact path in-container and reject symlink/workspace escapes."""
+        if path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
+            raise ValueError("Artifact path must be relative to its mapped workspace")
+        await self.inspect(organization_id, agent_id)
+        target = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "sh",
+            "-c",
+            'base="$(realpath -- "$1")" || exit 1; target="$(realpath -- "$base/$2")" || exit 1; case "$target" in "$base"/*) printf %s "$target";; *) exit 1;; esac',
+            "workspace-path",
+            directory,
+            path,
+        )
+        resolved = target.decode()
+        if not resolved:
+            raise RuntimeUnavailable("Artifact path is unavailable")
+        return resolved
+
+    async def fork_workspace(
+        self, organization_id: str, agent_id: str, source_directory: str
+    ) -> str:
+        """Copy one mapped checkout into an isolated writable native fork directory."""
+        if not source_directory.startswith("/workspace/"):
+            raise ValueError("Native session workspace is not managed by this agent")
+        destination = f"{source_directory}-fork-{uuid4().hex}"
+        await self.inspect(organization_id, agent_id)
+        await self.docker(
+            "exec",
+            self.name(agent_id),
+            "sh",
+            "-c",
+            r'test -d "$1" && test ! -L "$1" && ! find "$1" -name .git \( -type f -o -type l \) -print -quit | grep -q . && ! find "$1" -type l -print -quit | grep -q . && test ! -e "$2" && mkdir -p "$2" && cp -a "$1/." "$2/"',
+            "fork-workspace",
+            source_directory,
+            destination,
+        )
+        return destination
 
     async def write_file(
         self, organization_id: str, agent_id: str, path: str, content: str
@@ -276,7 +395,10 @@ class DockerRuntime:
             "enabled_providers": ["openai"],
         }
         await self.write_file(org, agent_id, "/home/agent/host-auth.json", json.dumps(auth))
-        await self.write_file(org, agent_id, "/home/agent/AGENTS.md", configuration.instructions)
+        managed_instructions = _WORKSPACE_GUIDANCE
+        if configuration.instructions:
+            managed_instructions += f"\n\n{configuration.instructions}"
+        await self.write_file(org, agent_id, "/home/agent/AGENTS.md", managed_instructions)
         # Only this directory contains Fesnyng-managed native skill assignments.
         await self.docker("exec", self.name(agent_id), "rm", "-rf", "/home/agent/fesnyng-skills")
         await self.docker(

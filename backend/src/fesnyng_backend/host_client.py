@@ -1,5 +1,6 @@
 """Control-plane calls to installation-bound host origins."""
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -16,6 +17,27 @@ class HostRejected(HostUnavailable):
     def __init__(self, status_code: int):
         super().__init__("Agent host rejected the request")
         self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class HostResponse:
+    """An opaque host-facade response whose native body must remain intact."""
+
+    status_code: int
+    content: bytes
+    content_type: str | None
+
+
+class HostStream:
+    """A live host response closed by the control-plane relay when its client leaves."""
+
+    def __init__(self, client: httpx.AsyncClient, response: httpx.Response):
+        self.client = client
+        self.response = response
+
+    async def close(self) -> None:
+        await self.response.aclose()
+        await self.client.aclose()
 
 
 class HostClient:
@@ -56,6 +78,68 @@ class HostClient:
             return response.json()
         except ValueError:
             raise HostUnavailable("Agent host returned invalid JSON") from None
+
+    async def raw_request(
+        self,
+        organization_id: str,
+        host_id: str,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> HostResponse:
+        """Forward one allowlisted facade operation without rewriting native errors."""
+        origin, token = self.agents.host_connection(organization_id, host_id)
+        request_headers = {"Authorization": f"Bearer {token}", **(headers or {})}
+        try:
+            async with httpx.AsyncClient(
+                base_url=origin,
+                headers=request_headers,
+                timeout=180,
+                follow_redirects=False,
+                transport=self.transport,
+            ) as client:
+                response = await client.request(
+                    method, f"/organizations/{organization_id}{path}", json=body, params=params
+                )
+        except httpx.HTTPError:
+            raise HostUnavailable("Agent host is unreachable") from None
+        return HostResponse(
+            response.status_code, response.content, response.headers.get("content-type")
+        )
+
+    async def stream(
+        self,
+        organization_id: str,
+        host_id: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> HostStream:
+        """Open a host event stream; the caller must close the returned stream."""
+        origin, token = self.agents.host_connection(organization_id, host_id)
+        request_headers = {"Authorization": f"Bearer {token}", **(headers or {})}
+        client = httpx.AsyncClient(
+            base_url=origin,
+            headers=request_headers,
+            timeout=None,
+            follow_redirects=False,
+            transport=self.transport,
+        )
+        try:
+            response = await client.send(
+                client.build_request(
+                    "GET", f"/organizations/{organization_id}{path}", params=params
+                ),
+                stream=True,
+            )
+        except httpx.HTTPError:
+            await client.aclose()
+            raise HostUnavailable("Agent host is unreachable") from None
+        return HostStream(client, response)
 
     async def apply(self, organization_id: str, agent_id: str) -> dict[str, Any]:
         agent = self.agents.get_agent(organization_id, agent_id)

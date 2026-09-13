@@ -41,6 +41,7 @@ def test_native_configuration_and_replacement_preserve_agent_state():
         version=1,
         name="Integration agent",
         configuration=AgentConfiguration(
+            instructions="Continue only in the assigned thread workspace.",
             skills=[
                 NativeSkill(name="retained", content="Retained reusable instruction"),
                 NativeSkill(name="removed", content="Removed reusable instruction"),
@@ -50,7 +51,7 @@ def test_native_configuration_and_replacement_preserve_agent_state():
                 NativeSkill(
                     name="obsolete", content="Removed explicit instruction", explicit_only=True
                 ),
-            ]
+            ],
         ),
     )
     store.stage_agent(envelope)
@@ -59,8 +60,15 @@ def test_native_configuration_and_replacement_preserve_agent_state():
         runtime = DockerRuntime(store, "http://127.0.0.1:1")
         await runtime.configure(envelope)
         store.mark_applied(envelope)
+        managed_instructions = (
+            await runtime.docker("exec", runtime.name(agent), "cat", "/home/agent/AGENTS.md")
+        ).decode()
+        assert managed_instructions.startswith(
+            "Use the working directory in the current native environment as this thread's workspace."
+        )
+        assert managed_instructions.endswith(envelope.configuration.instructions)
         native = await runtime.request(org, agent, "/config")
-        assert native.get("model") == "openai/gpt-5.6-luna", (
+        assert native.get("model") == "openai/gpt-6-astra", (
             "Native global configuration was not loaded"
         )
         assert "file:///opt/fesnyng/host-auth.mjs" in native.get("plugin", [])

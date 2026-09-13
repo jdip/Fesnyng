@@ -28,7 +28,7 @@ class PermissionRule(Contract):
 class AgentConfiguration(Contract):
     execution_type: Literal["docker"] = "docker"
     provider: Literal["openai"] = "openai"
-    model: str = Field(default="gpt-5.6-luna", min_length=1, max_length=120)
+    model: str = Field(default="gpt-6-astra", min_length=1, max_length=120)
     profile_id: UUID | None = None
     instructions: str = Field(default="", max_length=200_000)
     workspace: Slug = "default"

@@ -11,6 +11,7 @@ from fesnyng_backend.control_interaction_routes import router as interaction_rou
 from fesnyng_backend.control_memory_routes import router as memory_router
 from fesnyng_backend.control_peer_routes import router as peer_router
 from fesnyng_backend.control_store import ControlPlaneStore
+from fesnyng_backend.control_workspace_routes import router as workspace_router
 from fesnyng_backend.organizations import router as organizations_router
 from fesnyng_backend.settings import (
     ControlPlaneSessionSettings,
@@ -44,4 +45,5 @@ def create_app(
     app.include_router(dispatch_router)
     app.include_router(interaction_router)
     app.include_router(peer_router)
+    app.include_router(workspace_router)
     return app

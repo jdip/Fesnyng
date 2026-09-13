@@ -292,6 +292,178 @@ async def eventually(predicate):
     assert predicate(), "Expected native delivery state did not arrive"
 
 
+def test_native_prompt_context_is_session_scoped_without_changing_user_text_or_commands(tmp_path):
+    org, agent, store, _, author = interaction_system(tmp_path)
+    store.host.save_session(org, agent, "ses_two", "/workspace/other-thread", "Other thread")
+
+    class CapturingNative:
+        def __init__(self):
+            self.calls = []
+            self.locks = {}
+
+        def lock(self, agent_id):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            self.calls.append((path, method, body, directory))
+            if path == "/command":
+                return [{"name": "native"}]
+            return None
+
+    async def check():
+        native = CapturingNative()
+        runner = Dispatcher(store, native)
+        first = store.enqueue(
+            org, agent, "ses_one", Submission(id=uuid4(), text="Keep exact text"), author
+        )
+        second = store.enqueue(
+            org, agent, "ses_two", Submission(id=uuid4(), text="Other exact text"), author
+        )
+        command = store.enqueue(
+            org,
+            agent,
+            "ses_one",
+            Submission(id=uuid4(), text="native arguments", command="native"),
+            author,
+        )
+        await runner._submit(first, store.host.session(org, agent, "ses_one"), [])
+        await runner._submit(second, store.host.session(org, agent, "ses_two"), [])
+        await runner._submit(command, store.host.session(org, agent, "ses_one"), [])
+        return native.calls
+
+    calls = asyncio.run(check())
+    prompts = [call for call in calls if call[0].endswith("/message") and call[1] == "POST"]
+    assert [call[2]["parts"][0]["text"] for call in prompts] == [
+        "Keep exact text",
+        "Other exact text",
+    ]
+    assert [call[2]["system"] for call in prompts] == [
+        (
+            'Current thread workspace: "/workspace/ses_one". Use this directory for this thread '
+            "file work and tool workdir; parent-history paths are historical unless the current task "
+            "explicitly requires another location."
+        ),
+        (
+            'Current thread workspace: "/workspace/other-thread". Use this directory for this '
+            "thread file work and tool workdir; parent-history paths are historical unless the "
+            "current task explicitly requires another location."
+        ),
+    ]
+    command_call = next(
+        call for call in calls if call[0].endswith("/command") and call[1] == "POST"
+    )
+    assert command_call[2] == {
+        "messageID": command_call[2]["messageID"],
+        "command": "native",
+        "arguments": "native arguments",
+        "model": "openai/gpt-6-astra",
+    }
+
+
+def test_existing_thread_submissions_use_the_current_applied_model(tmp_path):
+    org, agent, store, _, author = interaction_system(tmp_path)
+    current = HostAgentConfiguration.model_validate_json(
+        store.host.agent(org, agent)["applied_envelope"]
+    )
+    applied = current.model_copy(
+        update={
+            "version": 2,
+            "configuration": current.configuration.model_copy(update={"model": "gpt-5.6-astra"}),
+        }
+    )
+    store.host.stage_agent(applied)
+    store.host.mark_applied(applied)
+
+    class CapturingNative:
+        def __init__(self):
+            self.calls = []
+            self.locks = {}
+
+        def lock(self, agent_id):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            self.calls.append((path, method, body, directory))
+            if path == "/command":
+                return [{"name": "native"}]
+            return None
+
+    async def check():
+        native = CapturingNative()
+        runner = Dispatcher(store, native)
+        prompt = store.enqueue(
+            org, agent, "ses_one", Submission(id=uuid4(), text="Continue"), author
+        )
+        command = store.enqueue(
+            org,
+            agent,
+            "ses_one",
+            Submission(id=uuid4(), text="arguments", command="native"),
+            author,
+        )
+        session = store.host.session(org, agent, "ses_one")
+        await runner._submit(prompt, session, [])
+        await runner._submit(command, session, [])
+        return native.calls
+
+    calls = asyncio.run(check())
+    prompt_call = next(call for call in calls if call[0].endswith("/message") and call[1] == "POST")
+    command_call = next(
+        call for call in calls if call[0].endswith("/command") and call[1] == "POST"
+    )
+    assert prompt_call[2]["model"] == {"providerID": "openai", "modelID": "gpt-5.6-astra"}
+    assert command_call[2]["model"] == "openai/gpt-5.6-astra"
+
+
+def test_pending_configuration_blocks_native_model_submission(tmp_path):
+    org, agent, store, _, author = interaction_system(tmp_path)
+    current = HostAgentConfiguration.model_validate_json(
+        store.host.agent(org, agent)["applied_envelope"]
+    )
+    store.host.stage_agent(
+        current.model_copy(
+            update={
+                "version": 2,
+                "configuration": current.configuration.model_copy(
+                    update={"model": "gpt-5.6-astra"}
+                ),
+            }
+        )
+    )
+
+    class NoNativeSubmission:
+        def __init__(self):
+            self.locks = {}
+            self.calls = 0
+
+        def lock(self, agent_id):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            self.calls += 1
+            raise AssertionError("Pending configuration must block native admission")
+
+    async def check():
+        native = NoNativeSubmission()
+        runner = Dispatcher(store, native)
+        receipt = store.enqueue(
+            org, agent, "ses_one", Submission(id=uuid4(), text="Continue"), author
+        )
+        await runner._submit(receipt, store.host.session(org, agent, "ses_one"), [])
+        return native.calls, store.get(org, agent, receipt["id"])
+
+    calls, receipt = asyncio.run(check())
+    assert calls == 0
+    assert receipt["state"] == "queued"
+    assert receipt["native_message_id"] is None
+
+
 def test_steering_joins_native_run_without_claiming_separate_fulfillment(tmp_path):
     org, agent, store, native, author = interaction_system(tmp_path)
     first = store.enqueue(org, agent, "ses_one", Submission(id=uuid4(), text="First"), author)

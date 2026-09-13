@@ -1,0 +1,34 @@
+import { createOpencodeClient, type OpencodeClient } from '@assistant-ui/react-opencode';
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const WRITE_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
+
+/**
+ * Browser transport for the Fesnyng-owned OpenCode facade.
+ *
+ * The facade accepts the browser session cookie and rejects mutations without
+ * a control-plane CSRF token. A separate idempotency key for each SDK write
+ * lets the host-owned dispatch service deduplicate retrying browser requests.
+ */
+export function createFesnyngOpenCodeFetch(csrfToken: string, fetchImpl: FetchLike = fetch): FetchLike {
+  return (input, init = {}) => {
+    const method = (init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+
+    if (WRITE_METHODS.has(method)) {
+      headers.set('X-CSRF-Token', csrfToken);
+      headers.set('Idempotency-Key', crypto.randomUUID());
+    }
+
+    return fetchImpl(input, { ...init, credentials: 'include', headers });
+  };
+}
+
+export function createFesnyngOpenCodeClient(baseUrl: string, csrfToken: string): OpencodeClient {
+  return createOpencodeClient({
+    baseUrl,
+    fetch: createFesnyngOpenCodeFetch(csrfToken),
+  });
+}

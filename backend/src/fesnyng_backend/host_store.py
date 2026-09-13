@@ -57,10 +57,19 @@ class HostStore:
                 CREATE TABLE IF NOT EXISTS host_sessions (
                     session_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL,
+                    deleted_at INTEGER,
+                    archived_at INTEGER,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                     FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
                 );
             """)
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(host_sessions)")
+            }
+            if "deleted_at" not in columns:
+                connection.execute("ALTER TABLE host_sessions ADD COLUMN deleted_at INTEGER")
+            if "archived_at" not in columns:
+                connection.execute("ALTER TABLE host_sessions ADD COLUMN archived_at INTEGER")
             if connection.execute("SELECT version FROM host_schema").fetchone()[0] != 1:
                 raise RuntimeError("Unsupported host schema version")
 
@@ -212,18 +221,71 @@ class HostStore:
     def session(self, organization_id: str, agent_id: str, session_id: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM host_sessions WHERE organization_id=? AND agent_id=? AND session_id=?",
+                """SELECT * FROM host_sessions
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
                 (organization_id, agent_id, session_id),
             ).fetchone()
         if row is None:
             raise LookupError("Thread not found")
         return dict(row)
 
-    def sessions(self, organization_id: str, agent_id: str) -> list[dict[str, Any]]:
+    def sessions(
+        self, organization_id: str, agent_id: str, *, archived: bool | None = None
+    ) -> list[dict[str, Any]]:
         self.agent(organization_id, agent_id)
+        query = (
+            """SELECT * FROM host_sessions
+            WHERE organization_id=? AND agent_id=? AND deleted_at IS NULL
+              AND archived_at IS NOT NULL
+            ORDER BY created_at,session_id"""
+            if archived is True
+            else """SELECT * FROM host_sessions
+            WHERE organization_id=? AND agent_id=? AND deleted_at IS NULL
+              AND archived_at IS NULL
+            ORDER BY created_at,session_id"""
+            if archived is False
+            else """SELECT * FROM host_sessions
+            WHERE organization_id=? AND agent_id=? AND deleted_at IS NULL
+            ORDER BY created_at,session_id"""
+        )
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM host_sessions WHERE organization_id=? AND agent_id=? ORDER BY created_at,session_id",
+                query,
                 (organization_id, agent_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def rename_session(
+        self, organization_id: str, agent_id: str, session_id: str, title: str
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_sessions SET title=?
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (title, organization_id, agent_id, session_id),
+            ).rowcount
+        if changed != 1:
+            raise LookupError("Thread not found")
+
+    def delete_session(self, organization_id: str, agent_id: str, session_id: str) -> None:
+        """Hide a deleted native session without destroying durable receipts."""
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_sessions SET deleted_at=unixepoch()
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (organization_id, agent_id, session_id),
+            ).rowcount
+        if changed != 1:
+            raise LookupError("Thread not found")
+
+    def archive_session(
+        self, organization_id: str, agent_id: str, session_id: str, archived_at: int | None
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_sessions SET archived_at=?
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (archived_at, organization_id, agent_id, session_id),
+            ).rowcount
+        if changed != 1:
+            raise LookupError("Thread not found")

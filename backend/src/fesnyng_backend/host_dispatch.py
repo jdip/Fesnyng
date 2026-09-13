@@ -410,16 +410,33 @@ class Dispatcher:
                     or configured["applied_envelope"] != configured["desired_envelope"]
                 ):
                     raise RuntimeUnavailable("Agent configuration changed before native submission")
+                envelope = HostAgentConfiguration.model_validate_json(
+                    configured["applied_envelope"]
+                )
+                native_model = {
+                    "providerID": envelope.configuration.provider,
+                    "modelID": envelope.configuration.model,
+                }
                 if not self.store.change(row, "submitting", message_id=message_id):
                     return
             path = f"/session/{session['session_id']}/message"
-            body = {"messageID": message_id, "parts": [{"type": "text", "text": payload["text"]}]}
+            body = {
+                "messageID": message_id,
+                "parts": [{"type": "text", "text": payload["text"]}],
+                "model": native_model,
+                "system": (
+                    f"Current thread workspace: {json.dumps(session['directory'])}. "
+                    "Use this directory for this thread file work and tool workdir; parent-history "
+                    "paths are historical unless the current task explicitly requires another location."
+                ),
+            }
             if payload["command"]:
                 path = f"/session/{session['session_id']}/command"
                 body = {
                     "messageID": message_id,
                     "command": payload["command"],
                     "arguments": payload["text"],
+                    "model": f"{native_model['providerID']}/{native_model['modelID']}",
                 }
             await self.runtime.request(
                 org, agent, path, method="POST", body=body, directory=session["directory"]

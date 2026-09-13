@@ -1,0 +1,2 @@
+# patch-package preserves upstream tab indentation in its unified diff context.
+frontend/patches/@assistant-ui+react-opencode+0.2.23.patch whitespace=-space-before-tab

@@ -73,6 +73,24 @@ def test_question_reply_is_durable_idempotent_and_attributed(tmp_path):
         asyncio.run(conflict())
 
 
+def test_question_rejection_is_durable_and_uses_native_reject_endpoint(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+    native = Native(session_id)
+    interactions = Interactions(host, native)
+    interactions.initialize()
+    _mark_thread_policy_applied(interactions, organization_id, agent_id, session_id)
+    author = Actor(kind="human", id=uuid4(), name="Owner")
+
+    receipt = asyncio.run(
+        interactions.reject_question(
+            organization_id, agent_id, session_id, uuid4(), "question-1", author
+        )
+    )
+
+    assert receipt["state"] == "completed"
+    assert native.replies == [("/question/question-1/reject", {})]
+
+
 def test_replies_require_matching_native_thread_and_allow_only_safe_permission_choices(tmp_path):
     host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
     native = Native(session_id)

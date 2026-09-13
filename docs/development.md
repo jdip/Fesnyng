@@ -2,7 +2,7 @@
 
 Fesnyng has separate Python/FastAPI control-plane and agent-host services in `backend/`, and a React/TypeScript/Vite application in `frontend/`. The Python package shares contracts while each service owns its SQLite database and schema. Product code and contracts are **Application Code**; setup and delivery scripts are **Tooling**.
 
-The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace and retained full-system verification remain later children of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10); backend execution alone is not the complete MVP.
+The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace is described in [frontend/README.md](../frontend/README.md). Retained full-system verification remains the final child of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10); backend execution alone is not the complete MVP.
 
 ## Install and check
 

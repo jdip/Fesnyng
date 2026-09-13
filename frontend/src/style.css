@@ -1,11 +1,73 @@
-:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #22332b; background: #f6f7f3; font-synthesis: none; text-rendering: optimizeLegibility; }
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #25332c; background: #f7f8f5; font-synthesis: none; text-rendering: optimizeLegibility; }
 * { box-sizing: border-box; }
 body { margin: 0; }
-main { max-width: 900px; margin: 15vh auto; padding: 32px; }
-.eyebrow { color: #5b7063; font-size: 12px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
-h1 { font-size: clamp(48px, 8vw, 80px); font-weight: 550; letter-spacing: -.06em; margin: 20px 0; }
-.intro { font-size: 21px; color: #5b7063; margin-bottom: 48px; }
-section { display: flex; align-items: center; gap: 18px; border-top: 1px solid #cdd7cf; padding: 24px 0; }
-section p { margin: 4px 0; }
-.status-icon { font-size: 24px; }
-.detail { color: #5b7063; font-size: 13px; }
+button,input,select,textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+:is(button,a,input,textarea,select):focus-visible:not(.fesnyng-conversation *) { outline: 2px solid #537a5f; outline-offset: 3px; }
+.app-shell { height: 100dvh; display: flex; overflow: hidden; background: #fff; }
+.app-sidebar { width: 244px; flex-shrink: 0; background: #f3f5f0; border-right: 1px solid #e0e5dd; padding: 24px 16px 16px; display: flex; flex-direction: column; gap: 18px; overflow: auto; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 21px; letter-spacing: -.04em; }
+.brand-mark { background: #355642; color: #f3f5f0; display: inline-grid; place-items: center; border-radius: 9px; width: 30px; height: 30px; font-size: 18px; }
+.app-label,.app-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #526052; font-weight: 550; }
+.app-input,.app-select,.app-textarea { padding: 9px 10px; border: 1px solid #d8dfd5; border-radius: 7px; background: #fff; color: #25332c; width: 100%; font-size: 14px; min-width: 0; }
+.app-textarea { min-height: 108px; resize: vertical; line-height: 1.5; }
+.app-nav { display: flex; flex-direction: column; gap: 4px; }
+.app-nav button,.agent-choice { background: transparent; border: 0; text-align: left; padding: 10px; border-radius: 7px; color: #566151; }
+.app-nav button[aria-current='page'],.agent-choice[aria-pressed='true'] { color: #24402b; background: #e1e9dc; font-weight: 600; }
+.app-nav button:hover,.agent-choice:hover { background: #e9ede5; }
+.sidebar-heading { display: flex; justify-content: space-between; align-items: center; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #75816e; }
+.agent-list { display: flex; flex-direction: column; gap: 4px; }
+.agent-choice { display: flex; align-items: center; gap: 10px; width: 100%; }
+.agent-avatar { display: grid; place-items: center; background: #e6ebe1; color: #4d654f; border: 1px solid #d7dfd1; width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0; font-size: 12px; font-weight: 650; }
+.agent-choice small { display: block; font-size: 11px; color: #75816e; font-weight: 400; margin-top: 2px; }
+.sidebar-footer { margin-top: auto; border-top: 1px solid #dde3d8; padding-top: 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.app-workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.workspace-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 28px; border-bottom: 1px solid #e7eae3; min-height: 88px; }
+.workspace-header h1 { font-size: 19px; margin: 0; font-weight: 600; letter-spacing: -.03em; }
+.muted { color: #73806e; font-size: 12px; }
+.workspace-header p { margin: 4px 0 0; }
+.header-actions,.app-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.app-button { border: 1px solid #d8dfd5; border-radius: 7px; padding: 8px 12px; background: white; font-size: 12px; color: #394b38; }
+.app-button:hover { background: #f1f5ed; }
+.app-button.primary { background: #355642; color: #fff; border-color: #355642; }
+.app-button.danger { color: #9c4639; }
+.app-button.quiet { border-color: transparent; background: transparent; }
+.workspace-content { flex: 1; min-height: 0; overflow: auto; }
+.workspace-content:has(.conversation-region) { display: flex; flex-direction: column; overflow: hidden; }
+.workspace-page { padding: 30px; max-width: 1060px; margin: 0 auto; }
+.workspace-page h2 { font-size: 21px; font-weight: 550; margin: 0 0 8px; letter-spacing: -.03em; }
+.workspace-page h3 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
+.page-intro { color: #73806e; font-size: 14px; line-height: 1.6; margin: 0 0 24px; }
+.app-panel { border: 1px solid #e0e6dc; border-radius: 10px; padding: 22px; background: #fff; margin-bottom: 20px; }
+.app-form { display: flex; flex-direction: column; gap: 16px; }
+.form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.app-form .checkbox-label { flex-direction: row; align-items: center; font-weight: 400; font-size: 13px; }
+.app-form input[type='checkbox'] { accent-color: #355642; }
+.app-form fieldset { border: 1px solid #e0e6dc; border-radius: 8px; padding: 16px; }
+.app-form legend { font-size: 13px; padding: 0 6px; }
+.app-error { color: #913e32; background: #fcf0eb; border: 1px solid #edcec2; border-radius: 7px; padding: 10px 14px; font-size: 13px; margin: 12px 0; overflow-wrap: anywhere; }
+.app-notice { color: #355642; background: #edf4e8; border-radius: 7px; padding: 10px 14px; font-size: 13px; margin: 10px 0; }
+.app-badge { font-size: 10px; border-radius: 5px; padding: 3px 6px; background: #edf1e8; color: #5a7055; white-space: nowrap; }
+.app-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.app-table th { text-align: left; font-size: 11px; color: #75816e; font-weight: 500; }
+.app-table th,.app-table td { border-bottom: 1px solid #e8ece4; padding: 12px 8px; vertical-align: top; }
+.app-empty { display: grid; place-items: center; min-height: 280px; color: #73806e; text-align: center; padding: 30px; }
+.sign-in { min-height: 100dvh; display: grid; place-items: center; background: #f3f5ef; padding: 24px; }
+.sign-in-card { width: min(410px,100%); padding: 36px; border: 1px solid #dce3d6; background: #fff; border-radius: 16px; box-shadow: 0 12px 50px #24371a07; }
+.sign-in-card h1 { font-size: 25px; font-weight: 550; letter-spacing: -.04em; margin: 28px 0 8px; }
+.sign-in-card .app-form { margin-top: 28px; }
+.memory-layout { display: grid; grid-template-columns: 200px minmax(0,1fr); gap: 22px; }
+.memory-list { display: flex; flex-direction: column; gap: 6px; }
+.memory-list button { text-align: left; }
+.chart-list { list-style: none; padding-left: 24px; border-left: 1px solid #dce4d5; }
+.chart-list:first-child { padding: 0; border: 0; }
+.chart-node { margin: 12px 0; border: 1px solid #dce4d5; border-radius: 9px; padding: 12px 16px; display: inline-flex; align-items: center; gap: 10px; background: #fff; text-align: left; min-width: 200px; }
+.chart-node small { display: block; font-size: 11px; color: #75816e; margin-top: 3px; }
+.conversation-region { flex: 1; min-height: 0; }
+.thread-context { flex-shrink: 0; max-height: 50%; overflow: auto; padding: 10px 22px; border-bottom: 1px solid #e7eae3; font-size: 12px; }
+.activity-item { padding: 16px 0; border-bottom: 1px solid #e8ece4; font-size: 13px; }
+.activity-item p { margin: 5px 0; line-height: 1.5; }
+.mobile-menu { display: none; }
+@media(max-width:900px) { .app-sidebar { width: 205px; padding: 20px 12px; }.workspace-header { padding: 16px; }.workspace-page { padding: 20px; }.form-grid { grid-template-columns: 1fr; } }
+@media(max-width:640px) { .app-sidebar { display: none; position: absolute; z-index: 30; inset: 0 auto 0 0; width: 245px; box-shadow: 10px 0 50px #0002; }.app-sidebar.is-open { display: flex; }.mobile-menu { display: inline-block; }.workspace-header { gap: 8px; flex-wrap: wrap; }.workspace-header h1 { font-size: 16px; }.workspace-page { padding: 16px; }.memory-layout { grid-template-columns: 1fr; }.app-table { display: block; overflow: auto; } }

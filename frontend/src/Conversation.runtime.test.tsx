@@ -1,0 +1,210 @@
+import { afterEach, expect, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { Conversation } from './Conversation';
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+HTMLElement.prototype.scrollTo ??= () => {};
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+test('mounts the maintained thread before an OpenCode-backed session exists', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([]), {
+    headers: { 'content-type': 'application/json' },
+  })));
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      showThreadList={false}
+    />,
+  );
+
+  expect(await screen.findByRole('heading', { name: 'How can I help you today?' })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toBeTruthy();
+});
+
+test('uses the maintained archived thread collection so an archived thread can be restored', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'archived-session', title: 'Archived proof', time: { archived: 1 } }]
+      : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }));
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+    />,
+  );
+
+  const archived = await screen.findByRole('button', { name: 'Archived (1)' });
+  fireEvent.click(archived);
+
+  expect(await screen.findByRole('button', { name: 'Archived proof' })).toBeTruthy();
+});
+
+test('sends a first message without invoking OpenCode history compaction for a title', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    const method = request?.method ?? 'GET';
+    const body = url.includes('/experimental/session')
+      ? []
+      : method === 'POST' && url.endsWith('/session')
+        ? { id: 'session-one', title: 'New session', time: {} }
+        : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      showThreadList={false}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Message input' }), {
+    target: { value: 'Start the work.' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      return url.includes('/prompt_async');
+    })).toBe(true);
+  });
+  await Promise.resolve();
+
+  expect(fetchMock.mock.calls.some(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/summarize');
+  })).toBe(false);
+});
+
+test('forks an assistant message through native extras and selects the returned session', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const onSessionChange = vi.fn();
+  const assistantMessage = [{
+    info: {
+      id: 'assistant-one', role: 'assistant', sessionID: 'session-one', parentID: 'user-one',
+      modelID: 'model', providerID: 'provider', mode: 'primary', path: { cwd: '/', root: '/' },
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 }, finish: 'stop',
+    },
+    parts: [{ id: 'text-one', sessionID: 'session-one', messageID: 'assistant-one', type: 'text', text: 'Ready.' }],
+  }];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Source', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? assistantMessage
+      : url.includes('/session/forked-session/message')
+          ? []
+          : url.includes('/session/forked-session')
+            ? { id: 'forked-session', title: 'Forked', time: {} }
+            : url.includes('/session/session-one/fork')
+              ? { id: 'forked-session', title: 'Forked', time: {} }
+            : url.includes('/session/session-one')
+              ? { id: 'session-one', title: 'Source', time: {} }
+              : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      sessionId="session-one"
+      onSessionChange={onSessionChange}
+      showThreadList={false}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Fork conversation' }));
+
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      return url.includes('/session/session-one/fork');
+    })).toBe(true);
+    expect(onSessionChange).toHaveBeenLastCalledWith('forked-session');
+  });
+});
+
+test('renders native question controls without generic Allow or Deny actions', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const assistantMessage = [{
+    info: {
+      id: 'assistant-question', role: 'assistant', sessionID: 'session-one', parentID: 'user-one',
+      modelID: 'model', providerID: 'provider', mode: 'primary', path: { cwd: '/', root: '/' },
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 }, finish: 'stop',
+    },
+    parts: [{
+      id: 'tool-question', callID: 'question-call', sessionID: 'session-one', messageID: 'assistant-question',
+      type: 'tool', tool: 'request_user_input', state: { status: 'pending', input: {}, raw: '' },
+    }],
+  }];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Question', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? assistantMessage
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Question', time: {} }
+          : url.endsWith('/question')
+            ? [{
+              id: 'question-one', sessionID: 'session-one',
+              tool: { messageID: 'assistant-question', callID: 'question-call' },
+              questions: [{
+                header: 'Direction', question: 'Which path?', multiple: false, custom: false,
+                options: [{ label: 'Continue', description: 'Proceed with the plan' }],
+              }],
+            }]
+            : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }));
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      sessionId="session-one"
+      showThreadList={false}
+    />,
+  );
+
+  expect(await screen.findByRole('button', { name: 'Answer' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
+});
