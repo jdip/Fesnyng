@@ -1,7 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
-vi.mock('./Conversation', () => ({ Conversation: ({ sessionId }: { sessionId?: string }) => <p>Native conversation {sessionId}</p> }));
+vi.mock('./Conversation', async () => {
+  const { createPortal } = await import('react-dom');
+  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void }) => <><p>Native conversation {sessionId}</p>{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</> };
+});
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
 
@@ -27,6 +30,7 @@ test('switches organization scope and removes the previous agents immediately', 
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? session
       : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }, { id: 'two', name: 'Second organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
       : input === '/api/organizations/one/agents' ? [{ id: 'agent-one', name: 'First researcher', title: 'Research', configuration: { workspace: 'default' } }]
@@ -46,6 +50,7 @@ test('uses the reporting chart as the default overview with compact settings nav
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? { user: { id: 'owner', display_name: 'Owner' }, csrf_token: 'csrf-example' }
       : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{ user_id: 'owner', role: 'owner' }]
       : input.endsWith('/policy') ? { desired_version: 1, configuration: { default_permission: 'allow', mandatory_permissions: [], allow_thread_overrides: true } }
@@ -74,6 +79,7 @@ test('restores a selected native thread after reloading an authorized organizati
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
     const body = input === '/api/auth/session' ? {user: {id: 'human', display_name: 'Member'}, csrf_token: 'csrf-example'}
       : input === '/api/organizations' ? [{id: 'one', name: 'First organization'}]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{user_id: 'human', role: 'member'}]
       : input.endsWith('/agents') ? [{id: 'agent-one', name: 'Researcher', title: 'Research', configuration: {workspace: 'default'}}]
@@ -88,6 +94,7 @@ test('lets an existing member create another organization without losing the ori
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string, options: RequestInit) => {
     const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
       : input === '/api/organizations' ? options.method === 'POST' ? {id: 'two', name: 'Second organization'} : [{id: 'one', name: 'First organization'}]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{user_id: 'human', role: 'member'}] : [];
     return new Response(JSON.stringify(body));
@@ -106,6 +113,7 @@ test('shows an unread result on its agent without a standalone Activity view', a
       : input === '/api/organizations' ? [{ id: 'one', name: 'Organization' }]
       : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
       : input.endsWith('/agents') ? [{ id: 'agent', name: 'Researcher', configuration: { workspace: 'default' } }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/sessions') ? [{ session_id: 'thread', title: 'Result' }]
       : input.endsWith('/dispatches') ? [{ id: 'delivery', session_id: 'thread', state: 'completed', updated_at: 1, author: { name: 'Member' }, payload: { mode: 'queued', text: 'Research' }, outcome: { kind: 'native_run_completed', message_id: 'result' } }]
@@ -116,4 +124,34 @@ test('shows an unread result on its agent without a standalone Activity view', a
   const pip = await screen.findByRole('img', { name: 'Unread result' });
   expect(pip.closest('button')?.textContent).toContain('Researcher');
   expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
+});
+
+test('expands only the selected agent and searches titles beyond the sidebar page', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input.endsWith('/agents/beta/sessions') ? Array.from({ length: 9 }, (_, i) => ({ session_id: `thread-${i}`, title: `Investigation ${i}` })) : [];
+    return new Response(JSON.stringify(body));
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: /Alpha/, pressed: false }));
+  expect(await screen.findByRole('region', { name: 'Alpha threads' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Beta threads' })).toBeNull();
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search organization threads' }), { target: { value: 'Investigation 8' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Investigation 8/ }));
+  expect(await screen.findByText('Native conversation thread-8')).toBeTruthy();
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search organization threads' }), { target: { value: '' } });
+  expect(await screen.findByRole('region', { name: 'Beta threads' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Alpha threads' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Open sidebar thread' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Create sidebar thread' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
 });

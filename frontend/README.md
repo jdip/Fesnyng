@@ -28,6 +28,13 @@ visible and when returning to it, preserving the selected conversation and draft
 Use a thread's menu to pin or unpin it. Pinned threads appear above the remaining
 threads, retaining incoming-message recency within each group. Pins belong only
 to the signed-in user and persist across devices and sign-in sessions.
+Only the selected agent expands its maintained thread list in the page sidebar.
+All pins and the selected thread remain visible alongside the first six recent
+unpinned threads. Show more adds another page; Thread list settings saves a
+personal page size across devices. One organization-wide title search finds
+threads beyond the visible page and groups them by agent. Navigation preserves
+unsent text, selected workflows and retry identity within the current workspace;
+drafts are not stored on the server.
 
 Owners and admins manage agents, organization permissions, membership, and named
 credential profiles. Host registration and networking remain installation/ops
