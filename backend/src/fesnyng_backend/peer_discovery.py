@@ -105,12 +105,17 @@ class PeerDiscovery:
                         ):
                             continue
                     threads.append(
-                        {
-                            **session,
-                            "host_id": str(self.host.instance_id),
-                            "workspace": workspace,
-                            "active": active,
-                        }
+                        PeerThread(
+                            session_id=session["session_id"],
+                            organization_id=session["organization_id"],
+                            agent_id=session["agent_id"],
+                            host_id=self.host.instance_id,
+                            directory=session["directory"],
+                            title=session["title"],
+                            created_at=session["created_at"],
+                            workspace=workspace,
+                            active=active,
+                        ).model_dump(mode="json")
                     )
             except (LookupError, RuntimeUnavailable):
                 unavailable.append(
