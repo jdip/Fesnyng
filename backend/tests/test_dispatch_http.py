@@ -8,9 +8,9 @@ from fesnyng_backend import control_dispatch_routes
 from fesnyng_backend.agent_host import create_app as create_host_app
 from fesnyng_backend.control_plane import create_app as create_control_app
 from fesnyng_backend.host_client import HostClient
-from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore
+from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_dispatch_routes import router as host_dispatch_router
-from fesnyng_backend.host_models import HostAgentConfiguration
+from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.settings import ControlPlaneSessionSettings, ServiceSettings
 
 ORIGIN = "https://control.example"
@@ -147,8 +147,6 @@ def test_dispatch_routes_persist_attributed_receipts_and_keep_them_scoped(
             assert stopped.json()["payload"]["cancel_queued"] is True
             assert stopped.json()["author"]["id"] == owner_user["id"]
 
-            reconciled = await owner_client.post(f"{path}/{delivery_id}/reconcile")
-            assert reconciled.status_code == 200 and reconciled.json() == receipt
             assert (
                 await member_client.get(
                     f"/organizations/{other.id}/agents/{agent['id']}/sessions/ses_primary/dispatches"
@@ -161,6 +159,114 @@ def test_dispatch_routes_persist_attributed_receipts_and_keep_them_scoped(
             ).status_code == 422
 
     asyncio.run(check())
+
+
+def test_explicit_reconcile_reads_recovery_history_without_admitting_queued_work(tmp_path):
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "host-state",
+    )
+    app = create_host_app(settings)
+    store = app.state.host_store
+    organization_id, agent_id = str(uuid4()), str(uuid4())
+    binding = secrets.token_urlsafe(32)
+    store.bind_organization(organization_id, binding)
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Recovery agent",
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(organization_id, agent_id, "ses_recovery", "/workspace/recovery", "Recovery")
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    owner = Actor(kind="human", id=uuid4(), name="Recovery owner")
+    delivered = dispatches.enqueue(
+        organization_id,
+        agent_id,
+        "ses_recovery",
+        Submission(id=uuid4(), text="Already admitted"),
+        owner,
+    )
+    assert dispatches.change(delivered, "submitting", message_id="msg_admitted")
+    admitted = dispatches.get(organization_id, agent_id, delivered["id"])
+    assert dispatches.change(admitted, "uncertain", error="Response unavailable")
+    queued = dispatches.enqueue(
+        organization_id,
+        agent_id,
+        "ses_recovery",
+        Submission(id=uuid4(), text="Must remain queued"),
+        owner,
+    )
+    store.set_lifecycle_state(organization_id, agent_id, state="recovery_required")
+
+    class RecoveryNative:
+        def __init__(self):
+            self.locks = {}
+
+        def lock(self, agent_id):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            assert method == "GET"
+            if path == "/session/status":
+                return {}
+            if path == "/session/ses_recovery/message":
+                return [
+                    {
+                        "info": {
+                            "id": "msg_admitted",
+                            "sessionID": "ses_recovery",
+                            "role": "user",
+                        },
+                        "parts": [{"type": "text", "text": "Already admitted"}],
+                    },
+                    {
+                        "info": {
+                            "id": "msg_result",
+                            "sessionID": "ses_recovery",
+                            "role": "assistant",
+                            "parentID": "msg_admitted",
+                            "finish": "stop",
+                            "time": {"completed": 1},
+                        },
+                        "parts": [{"type": "text", "text": "Completed"}],
+                    },
+                ]
+            raise AssertionError((path, method, directory))
+
+    native = RecoveryNative()
+    app.state.dispatch_store = dispatches
+    app.state.dispatcher = Dispatcher(dispatches, native)
+
+    async def reconcile():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://host",
+            headers={"Authorization": f"Bearer {binding}"},
+        ) as client:
+            path = (
+                f"/organizations/{organization_id}/agents/{agent_id}/sessions/ses_recovery/"
+                f"dispatches/{delivered['id']}/reconcile"
+            )
+            response = await client.post(path)
+            assert response.status_code == 200
+            return response.json()
+
+    reconciled = asyncio.run(reconcile())
+
+    assert reconciled["state"] == "completed"
+    assert reconciled["receipt_validated"] is True
+    preserved = dispatches.get(organization_id, agent_id, queued["id"])
+    assert preserved["state"] == "queued"
+    assert preserved["native_message_id"] is None
+    assert store.agent_status(organization_id, agent_id)["lifecycle_state"] == ("recovery_required")
 
 
 async def _sign_in(client: httpx.AsyncClient, login: str, password: str) -> dict[str, str]:

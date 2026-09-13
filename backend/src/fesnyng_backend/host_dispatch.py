@@ -860,27 +860,28 @@ class Dispatcher:
         return family
 
     async def reconcile_agent_effects(self, organization_id: str, agent_id: str) -> None:
-        rows = [
-            row
-            for row in self.store.pending()
-            if row["organization_id"] == organization_id and row["agent_id"] == agent_id
-        ]
-        for session_id in {row["session_id"] for row in rows}:
-            session = self.store.host.session(organization_id, agent_id, session_id)
-            statuses = await self.runtime.request(
-                organization_id, agent_id, "/session/status", directory=session["directory"]
-            )
-            busy = self._thread_busy(statuses, session_id)
-            history = await self.runtime.request(
-                organization_id,
-                agent_id,
-                f"/session/{session_id}/message",
-                directory=session["directory"],
-            )
-            self._validate_history(history)
-            for row in rows:
-                if row["session_id"] == session_id and row["native_message_id"]:
-                    await self._reconcile(row, history, busy, session["directory"])
+        async with self.runtime.lock(agent_id):
+            rows = [
+                row
+                for row in self.store.pending()
+                if row["organization_id"] == organization_id and row["agent_id"] == agent_id
+            ]
+            for session_id in {row["session_id"] for row in rows}:
+                session = self.store.host.session(organization_id, agent_id, session_id)
+                statuses = await self.runtime.request(
+                    organization_id, agent_id, "/session/status", directory=session["directory"]
+                )
+                busy = self._thread_busy(statuses, session_id)
+                history = await self.runtime.request(
+                    organization_id,
+                    agent_id,
+                    f"/session/{session_id}/message",
+                    directory=session["directory"],
+                )
+                self._validate_history(history)
+                for row in rows:
+                    if row["session_id"] == session_id and row["native_message_id"]:
+                        await self._reconcile(row, history, busy, session["directory"])
 
     def agent_effects_settled(self, organization_id: str, agent_id: str) -> bool:
         unsettled = [
