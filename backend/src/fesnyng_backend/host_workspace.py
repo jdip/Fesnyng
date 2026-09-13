@@ -437,7 +437,7 @@ class Workspace:
         pending: list[dict[str, Any]] = []
         for session in await self._scoped_sessions(org, agent):
             for item in await self._pending_native(org, agent, session, kind):
-                item = dict(item)
+                item = {**item, "rootSessionID": session["root_session_id"]}
                 if kind == "permission" and isinstance(item.get("always"), list):
                     item["always"] = []
                 pending.append(item)

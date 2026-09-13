@@ -186,3 +186,34 @@ test('reports malformed acknowledgements without losing the existing dispatch re
   expect((await screen.findByRole('alert')).textContent).toContain('Could not read thread acknowledgements.');
   expect(screen.getByTestId('status').textContent).toContain('"unread":true');
 });
+
+test('aggregates descendant questions under their verified visible root thread', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.endsWith('/thread-acknowledgements')) return response({ acknowledgements: [] });
+    if (url.endsWith('/opencode/question')) return response([{ id: 'question', sessionID: 'child', rootSessionID: 'thread' }]);
+    if (url.endsWith('/opencode/permission')) return response([]);
+    if (url.endsWith('/sessions')) return response([{ session_id: 'thread' }]);
+    return response([]);
+  }));
+  renderProvider();
+  await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('{"unread":false,"attention":true}'));
+});
+
+test('ignores an older empty refresh that finishes after a newer completed result', async () => {
+  let finishOld: (value: Response) => void = () => { throw new Error('Old request not started'); };
+  let dispatchReads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.endsWith('/thread-acknowledgements')) return response({ acknowledgements: [] });
+    if (url.endsWith('/opencode/question') || url.endsWith('/opencode/permission')) return response([]);
+    if (url.endsWith('/sessions')) return response([{ session_id: 'thread' }]);
+    dispatchReads += 1;
+    if (dispatchReads === 1) return new Promise<Response>((resolve) => { finishOld = resolve; });
+    return response([completed()]);
+  }));
+  renderProvider();
+  await waitFor(() => expect(dispatchReads).toBe(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  await waitFor(() => expect(screen.getByTestId('status').textContent).toContain('"unread":true'));
+  await act(async () => { finishOld(response([])); });
+  expect(screen.getByTestId('status').textContent).toContain('"unread":true');
+});

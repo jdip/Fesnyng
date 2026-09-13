@@ -80,18 +80,21 @@ function acknowledgementRows(value: unknown): ThreadAcknowledgement[] {
   return value.acknowledgements as ThreadAcknowledgement[];
 }
 
-function pendingRows(value: unknown): { sessionID: string }[] {
-  if (!Array.isArray(value) || !value.every((request) => request && typeof request === 'object' && typeof request.sessionID === 'string')) {
+type PendingRequest = { sessionID: string; rootSessionID?: string };
+
+function pendingRows(value: unknown): PendingRequest[] {
+  if (!Array.isArray(value) || !value.every((request) => request && typeof request === 'object' && typeof request.sessionID === 'string' && (request.rootSessionID === undefined || typeof request.rootSessionID === 'string'))) {
     throw new Error('Could not read pending thread input.');
   }
-  return value as { sessionID: string }[];
+  return value as PendingRequest[];
 }
 
-function replacePendingKind(previous: Record<string, PendingKind[]>, kind: PendingKind, requests: { sessionID: string }[]) {
+function replacePendingKind(previous: Record<string, PendingKind[]>, kind: PendingKind, requests: PendingRequest[]) {
   const next = Object.fromEntries(Object.entries(previous)
     .map(([session, kinds]) => [session, kinds.filter((current) => current !== kind)] as const)
     .filter(([, kinds]) => kinds.length));
-  requests.forEach(({ sessionID }) => {
+  requests.forEach((request) => {
+    const sessionID = request.rootSessionID ?? request.sessionID;
     const kinds = next[sessionID] ?? [];
     if (!kinds.includes(kind)) next[sessionID] = [...kinds, kind];
   });
@@ -142,13 +145,15 @@ export function ThreadNotificationsProvider({
   const rosterKey = roster.join(':');
   const scopeKey = `${organization}:${rosterKey}`;
   const scope = useRef('');
+  const refreshGeneration = useRef(0);
   useEffect(() => {
     scope.current = scopeKey;
     return () => { if (scope.current === scopeKey) scope.current = ''; };
   }, [scopeKey]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
+    const generation = ++refreshGeneration.current;
     const failures: string[] = [];
-    const current = () => !signal?.aborted && scope.current === scopeKey;
+    const current = () => !signal?.aborted && scope.current === scopeKey && generation === refreshGeneration.current;
     await Promise.all(roster.map(async (agent) => {
       const path = agentPath(organization, agent);
       const acknowledgementRequest = api<{ acknowledgements: ThreadAcknowledgement[] }>(`${path}/thread-acknowledgements`, { signal });

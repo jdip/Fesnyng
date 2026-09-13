@@ -634,7 +634,7 @@ def test_workspace_child_pending_and_reply_use_verified_child_directory_but_root
 
     async def check():
         pending = await workspace.pending_all(org, agent, "question")
-        assert pending == native.questions
+        assert pending == [{**native.questions[0], "rootSessionID": "ses_main"}]
         return await workspace.reply_question(
             org,
             agent,
