@@ -12,9 +12,21 @@ import pytest
 
 from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_models import HostAgentConfiguration
-from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
+from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable, _workspace_context
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.settings import ServiceSettings
+
+
+def test_workspace_context_receipt_preserves_known_repository_when_git_filters_are_configured():
+    context = _workspace_context(
+        b"available\0example-project\0available\0main\0unavailable\0\0\0\0\0configured_filter\0"
+    )
+
+    assert context == {
+        "repository": {"state": "available", "name": "example-project"},
+        "branch": {"state": "available", "name": "main"},
+        "changes": {"state": "unavailable", "reason": "configured_filter"},
+    }
 
 
 @pytest.mark.skipif(
@@ -66,10 +78,17 @@ git -C "$1" config user.email test@example.invalid
 git -C "$1" config user.name "Context test"
 git -C "$1" remote add origin https://github.com/example-org/context-origin.git
 printf "*.bin binary\\n" > "$1/.gitattributes"
+printf "filtered.txt filter=marker\\n" >> "$1/.gitattributes"
 printf "one\\n" > "$1/added.txt"
 printf "remove\\nkeep\\n" > "$1/deleted.txt"
 printf "old" > "$1/change.bin"
+printf "original\\n" > "$1/filtered.txt"
+old_name="$(printf '7\\t9')"
+printf "rename\\n" > "$1/$old_name"
 git -C "$1" add . && git -C "$1" commit -qm initial
+new_name="$(printf -- '-\\t-')"
+git -C "$1" mv "$old_name" "$new_name"
+git -C "$1" config diff.renames true
 printf "one\\ntwo\\n" > "$1/added.txt"
 git -C "$1" add added.txt
 printf "three\\n" >> "$1/added.txt"
@@ -91,6 +110,26 @@ printf two > "$1/untracked-two"''',
             "binaryFiles": 1,
             "untracked": 2,
         }
+        await runtime.docker(
+            "exec",
+            runtime.name(agent),
+            "sh",
+            "-c",
+            """printf "changed\\n" > "$1/filtered.txt"
+git -C "$1" config filter.marker.clean 'sh -c "touch /tmp/fesnyng-context-filter-marker; cat"'""",
+            "workspace-context-filter",
+            directory,
+        )
+        filtered = await runtime.workspace_context(org, agent, directory)
+        assert filtered["changes"] == {"state": "unavailable", "reason": "configured_filter"}
+        await runtime.docker(
+            "exec",
+            runtime.name(agent),
+            "test",
+            "!",
+            "-e",
+            "/tmp/fesnyng-context-filter-marker",
+        )
         await runtime.docker(
             "exec",
             runtime.name(agent),

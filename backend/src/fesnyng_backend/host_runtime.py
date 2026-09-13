@@ -75,13 +75,13 @@ def _workspace_context(result: bytes) -> dict[str, dict[str, int | str | None]]:
         "state": "available",
         "name": branch_name or None,
     }
-    if changes_state == "unavailable" and reason == "unborn":
+    if changes_state == "unavailable" and reason in {"unborn", "configured_filter"}:
         if any((added, deleted, binary_files, untracked)):
             raise RuntimeUnavailable("Workspace context is unavailable")
         return {
             "repository": repository,
             "branch": branch,
-            "changes": {"state": "unavailable", "reason": "unborn"},
+            "changes": {"state": "unavailable", "reason": reason},
         }
     if (
         changes_state != "available"
@@ -432,10 +432,37 @@ if ! git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --veri
 fi
 receipt="$(mktemp)" || exit 1
 trap 'rm -f "$receipt"' EXIT HUP INT TERM
+if git --no-optional-locks -c core.fsmonitor=false -C "$base" config --get-regexp '^filter\.' > "$receipt" 2>/dev/null; then
+    if awk 'tolower($1) ~ /\.(clean|process)$/ { found=1 } END { exit !found }' "$receipt"; then
+        printf "available\0%s\0available\0%s\0unavailable\0\0\0\0\0configured_filter\0" "$name" "$branch"
+        exit 0
+    fi
+else
+    status=$?
+    test "$status" = 1 || exit "$status"
+fi
 git --no-optional-locks -c core.fsmonitor=false -c diff.external= -C "$base" diff --no-ext-diff --no-textconv --numstat -z HEAD -- > "$receipt" || exit 1
-stats="$(awk -v RS="\0" -F "\t" '$1 == "-" || $2 == "-" { binary += 1; next }
-    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { added += $1; deleted += $2 }
-    END { printf "%d %d %d", added, deleted, binary }' "$receipt")" || exit 1
+stats="$(awk -v RS="\0" '
+    skip { skip -= 1; next }
+    {
+        first = index($0, "\t")
+        rest = substr($0, first + 1)
+        second = index(rest, "\t")
+        if (!first || !second) { invalid = 1; next }
+        added_value = substr($0, 1, first - 1)
+        deleted_value = substr(rest, 1, second - 1)
+        path = substr(rest, second + 1)
+        if (added_value == "-" || deleted_value == "-") binary += 1
+        else if (added_value ~ /^[0-9]+$/ && deleted_value ~ /^[0-9]+$/) {
+            added += added_value
+            deleted += deleted_value
+        } else invalid = 1
+        if (path == "") skip = 2
+    }
+    END {
+        if (invalid || skip) exit 1
+        printf "%d %d %d", added, deleted, binary
+    }' "$receipt")" || exit 1
 set -- $stats
 test "$#" = 3 || exit 1
 git --no-optional-locks -c core.fsmonitor=false -C "$base" ls-files --others --exclude-standard -z > "$receipt" || exit 1

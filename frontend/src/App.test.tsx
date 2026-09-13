@@ -3,7 +3,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { App } from './App';
 vi.mock('./Conversation', async () => {
   const { createPortal } = await import('react-dom');
-  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void }) => <><p>Native conversation {sessionId}</p>{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</> };
+  const { useState } = await import('react');
+  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void }) => {
+    const [draft, setDraft] = useState('');
+    return <><p>Native conversation {sessionId}</p><textarea aria-label="Composer draft" value={draft} onChange={(event) => setDraft(event.target.value)} />{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</>;
+  } };
 });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
@@ -46,6 +50,58 @@ test('switches organization scope and removes the previous agents immediately', 
   expect(screen.queryByRole('button', { name: /First researcher/ })).toBeNull();
   expect(await screen.findByRole('button', { name: /Second researcher/, pressed: false })).toBeTruthy();
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Reporting chart', level: 1 }));
+});
+
+test('keeps an unsent draft when the current organization is selected again', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }, { id: 'two', name: 'Second organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input === '/api/organizations/one/agents' ? []
+      : input === '/api/organizations/two/agents' ? [{ id: 'agent-two', name: 'Second researcher', title: 'Research', configuration: { workspace: 'default' } }]
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+  render(<App />);
+  const firstSwitcher = await screen.findByRole('button', { name: 'Switch organization: First organization' });
+  fireEvent.keyDown(firstSwitcher, { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Reporting chart for Second organization' }));
+  fireEvent.click(await screen.findByRole('button', { name: /Second researcher/, pressed: false }));
+  const draft = await screen.findByLabelText('Composer draft');
+  fireEvent.change(draft, { target: { value: 'Keep this draft' } });
+  const secondSwitcher = screen.getByRole('button', { name: 'Switch organization: Second organization' });
+  fireEvent.keyDown(secondSwitcher, { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Second organization' }));
+  expect(await screen.findByLabelText('Composer draft')).toHaveProperty('value', 'Keep this draft');
+});
+
+test('retries an unavailable organization role lookup when the workspace refreshes', async () => {
+  let membershipRequests = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/members') && membershipRequests++ < 2) {
+      return new Response(JSON.stringify({ detail: 'Temporary lookup failure.' }), { status: 500 });
+    }
+    const body = input === '/api/auth/session' ? { user: { id: 'owner', display_name: 'Owner' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'owner', role: 'owner' }]
+      : input.endsWith('/agents') ? []
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+
+  render(<App />);
+  const switcher = await screen.findByRole('button', { name: 'Switch organization: First organization' });
+  fireEvent.keyDown(switcher, { key: 'ArrowDown' });
+  expect(screen.queryByRole('menuitem', { name: 'Organization settings for First organization' })).toBeNull();
+  fireEvent.keyDown(switcher, { key: 'Escape' });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh workspace' }));
+  await waitFor(() => expect(membershipRequests).toBeGreaterThan(2));
+  fireEvent.keyDown(switcher, { key: 'ArrowDown' });
+  expect(await screen.findByRole('menuitem', { name: 'Organization settings for First organization' })).toBeTruthy();
 });
 
 test('uses the reporting chart as the default overview with compact settings navigation', async () => {

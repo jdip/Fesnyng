@@ -38,11 +38,12 @@ button:disabled { cursor: default; opacity: .5; }
 .agent-entry { padding: 2px 0; }
 .agent-choice { display: grid; grid-template-columns: 32px minmax(0,1fr); align-items: center; gap: 10px; width: 100%; }
 .agent-avatar { display: grid; place-items: center; background: #e6ebe1; color: #4d654f; border: 1px solid #d7dfd1; width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0; font-size: 12px; font-weight: 650; }
-.agent-name-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
-.agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-name-row { min-width: 0; width: 100%; display: flex; align-items: center; gap: 6px; }
+.agent-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-name-row .thread-notifications { margin-left: auto; }
 .agent-role-row { min-height: 18px; display: flex; align-items: center; gap: 6px; margin: -2px 0 0 42px; padding: 0 10px 2px; }
-.agent-role-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #75816e; font-weight: 400; }
-.agent-new-thread-target { display: inline-flex; min-width: 0; }
+.agent-role-row small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #75816e; font-weight: 400; }
+.agent-new-thread-target { display: inline-flex; flex-shrink: 0; margin-left: auto; min-width: 0; }
 .sidebar-utilities { position: relative; margin-top: auto; display: flex; gap: 4px; }
 .sidebar-icon-button { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #566151; }
 .sidebar-icon-button svg { width: 17px; height: 17px; }

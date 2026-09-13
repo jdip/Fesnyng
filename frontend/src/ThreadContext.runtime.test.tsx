@@ -10,13 +10,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const baseUrl = 'http://localhost/api/organizations/org/agents/agent/opencode';
 const metadata = { repository: { state: 'available', name: 'sample-project' }, branch: { state: 'available', name: 'feature' }, changes: { state: 'available', added: 7, deleted: 3, untracked: 2, binaryFiles: 0 }, subagents: { state: 'available', count: 0 }, backgroundProcesses: { state: 'unavailable' } };
 
-function serve(withOther = false) {
+function serve(withOther = false, events?: ReadableStream<Uint8Array>) {
   let title = 'Layout work';
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const requests = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : undefined;
     const url = new URL(request?.url ?? input.toString());
     const method = init?.method ?? request?.method ?? 'GET';
+    if (events && url.pathname.endsWith('/event')) return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
     if (method === 'PATCH' && url.pathname.endsWith('/session/one')) {
       const body = init?.body ? JSON.parse(String(init.body)) : await request?.json();
       title = body.title;
@@ -71,6 +72,23 @@ test('explicit refresh reloads the active workspace context without remounting t
   await waitFor(() => expect(contextCalls()).toBeGreaterThan(before));
   expect(screen.getByRole('textbox', { name: 'Message input' })).toBe(composer);
   expect((composer as HTMLTextAreaElement).value).toBe('Keep through refresh');
+});
+
+test('a scoped workspace event refreshes context through the native event stream', async () => {
+  let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const events = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } });
+  const requests = serve(false, events);
+  const view = render(<Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="one" />);
+  await within(await screen.findByRole('region', { name: 'Thread information' })).findByText('sample-project');
+  const count = () => requests.mock.calls.filter(([input]) => (input instanceof Request ? input.url : input.toString()).endsWith('/context')).length;
+  const before = count();
+  stream!.enqueue(new TextEncoder().encode('data: {"type":"fesnyng.context.updated","properties":{"sessionID":"one"}}\n\n'));
+  try {
+    await waitFor(() => expect(count()).toBeGreaterThan(before));
+  } finally {
+    view.unmount();
+    stream!.close();
+  }
 });
 
 test('the role-row plus uses maintained new-thread navigation without activating the surrounding row', async () => {

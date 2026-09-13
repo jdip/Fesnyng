@@ -868,6 +868,18 @@ def test_workspace_events_use_native_identity_shapes_sse_framing_and_new_directo
             await second
             == 'event: message\ndata: {"type":"part.updated","properties":{"part":{"sessionID":"ses_later"}}}\n\n'
         )
+        # Native workspace events have no session id. Only the known stream
+        # directory identifies which mapped thread should invalidate context.
+        for event in (
+            '{"type":"vcs.branch.updated","properties":{"branch":"feature"}}',
+            '{"type":"file.edited","properties":{"file":"/private/never-forward"}}',
+        ):
+            invalidation = asyncio.create_task(anext(iterator))
+            await app.state.host_runtime.events["/workspace/default/main"].put(f"data: {event}")
+            assert await asyncio.wait_for(invalidation, timeout=1) == (
+                'event: message\ndata: {"type":"fesnyng.context.updated",'
+                '"properties":{"sessionID":"ses_main"}}\n\n'
+            )
         await app.state.host_runtime.events["/workspace/default/main"].put(None)
         with pytest.raises(StopAsyncIteration):
             await anext(iterator)

@@ -49,7 +49,8 @@ function Workspace({ session, onLogout }: { session: LoginSession; onLogout: () 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [organization, setOrganization] = useState('');
   const [organizationView, setOrganizationView] = useState<'chart' | 'organization'>();
-  const [managerOrganizationIds, setManagerOrganizationIds] = useState<string[]>([]);
+  const [organizationRoles, setOrganizationRoles] = useState<Record<string, 'manager' | 'member' | 'unavailable'>>({});
+  const [roleLookupVersion, setRoleLookupVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [focusIdentity, setFocusIdentity] = useState(false);
@@ -67,24 +68,25 @@ function Workspace({ session, onLogout }: { session: LoginSession; onLogout: () 
     void Promise.all(organizations.map(async (item) => {
       try {
         const members = await api<Member[]>(`/organizations/${item.id}/members`, { signal: controller.signal });
-        return ['owner', 'admin'].includes(members.find((member) => member.user_id === session.user.id)?.role ?? '') ? item.id : undefined;
-      } catch {
-        return undefined;
+        return [item.id, ['owner', 'admin'].includes(members.find((member) => member.user_id === session.user.id)?.role ?? '') ? 'manager' : 'member'] as const;
+      } catch (cause) {
+        return [item.id, cause instanceof ApiError && cause.status === 403 ? 'member' : 'unavailable'] as const;
       }
     })).then((items) => {
-      if (!controller.signal.aborted) setManagerOrganizationIds(items.filter((item): item is string => Boolean(item)));
+      if (!controller.signal.aborted) setOrganizationRoles(Object.fromEntries(items));
     });
     return () => controller.abort();
-  }, [organizations, session.user.id]);
+  }, [organizations, roleLookupVersion, session.user.id]);
   if (error) return <main className="workspace-page"><p className="app-error" role="alert">{error}</p><button className="app-button" onClick={onLogout}>Sign in again</button></main>;
   if (loading) return <div className="app-empty" role="status">Loading organizations…</div>;
   if (!organization) return <main className="sign-in"><div className="sign-in-card"><Brand /><h1>Create your organization</h1><p className="page-intro">Bring your persistent agents together.</p><form className="app-form" onSubmit={(event) => {
     event.preventDefault(); const name = new FormData(event.currentTarget).get('name'); setCreating(true);
     void api<Organization>('/organizations', { method: 'POST', csrf: session.csrf_token, body: { name } }).then((created) => { setOrganizations((items) => [...items, created]); saveWorkspaceLocation(created.id); setOrganization(created.id); }).catch((cause: unknown) => setError(errorMessage(cause)));
   }}><label>Organization name<input className="app-input" name="name" required maxLength={120} /></label><button className="app-button primary" disabled={creating}>Create organization</button>{organizations.length > 0 && <button className="app-button quiet" type="button" onClick={() => setOrganization(organizations[0].id)}>Cancel</button>}</form></div></main>;
-  return <OrganizationWorkspace key={`${organization}:${organizationView ?? 'default'}`} focusIdentity={focusIdentity} initialView={organizationView} managerOrganizationIds={managerOrganizationIds} organization={organization} organizations={organizations} onIdentityChanged={(updated) => setOrganizations((items) => items.map((item) => item.id === updated.id ? updated : item))} onOrganization={(id, view) => { setOrganizationView(view); setFocusIdentity(true); setCreating(false); saveWorkspaceLocation(id === '__new__' ? '' : id); setOrganization(id === '__new__' ? '' : id); }} session={session} onLogout={onLogout} />;
+  const managerOrganizationIds = organizations.filter((item) => organizationRoles[item.id] === 'manager').map((item) => item.id);
+  return <OrganizationWorkspace key={organization} focusIdentity={focusIdentity} initialView={organizationView} managerOrganizationIds={managerOrganizationIds} organization={organization} organizations={organizations} onIdentityChanged={(updated) => setOrganizations((items) => items.map((item) => item.id === updated.id ? updated : item))} onOrganization={(id, view) => { setOrganizationView(view); setFocusIdentity(true); setCreating(false); saveWorkspaceLocation(id === '__new__' ? '' : id); setOrganization(id === '__new__' ? '' : id); }} onRefreshRoles={() => setRoleLookupVersion((current) => current + 1)} session={session} onLogout={onLogout} />;
 }
-function OrganizationWorkspace({ organization, organizations, managerOrganizationIds, initialView, onOrganization, onIdentityChanged, focusIdentity, session, onLogout }: { focusIdentity: boolean; initialView?: 'chart' | 'organization'; managerOrganizationIds: string[]; organization: string; organizations: Organization[]; onIdentityChanged: (updated: Organization) => void; onOrganization: (id: string, view?: 'chart' | 'organization') => void; session: LoginSession; onLogout: () => void }) {
+function OrganizationWorkspace({ organization, organizations, managerOrganizationIds, initialView, onOrganization, onIdentityChanged, onRefreshRoles, focusIdentity, session, onLogout }: { focusIdentity: boolean; initialView?: 'chart' | 'organization'; managerOrganizationIds: string[]; organization: string; organizations: Organization[]; onIdentityChanged: (updated: Organization) => void; onOrganization: (id: string, view?: 'chart' | 'organization') => void; onRefreshRoles: () => void; session: LoginSession; onLogout: () => void }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (focusIdentity) headingRef.current?.focus(); }, [focusIdentity]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -110,9 +112,10 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
   const manager = ['owner', 'admin'].includes(members.find((member) => member.user_id === session.user.id)?.role ?? '');
   const agent = agents.find((item) => item.id === selected);
   const navigate = (next: string) => { setView(next); setMobile(false); setError(''); };
+  const refreshWorkspace = () => { setVersion((current) => current + 1); onRefreshRoles(); };
   const openAgent = (id: string, nativeSession?: string) => { if (selected) lastThreads.current[selected] = thread; const nextThread = nativeSession ?? (id === selected ? thread : lastThreads.current[id]); saveWorkspaceLocation(organization, id, nextThread); setSelected(id); setThread(nextThread); navigate('conversation'); };
   const openOrganizationView = (id: string, next: 'chart' | 'organization') => { if (id === organization) navigate(next); else onOrganization(id, next); };
-  return <ConversationDraftsProvider organization={organization}><ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><OrganizationSwitcher organizations={organizations} selected={organization} managerOrganizationIds={managerOrganizationIds} onSelect={onOrganization} onOpen={openOrganizationView} />
+  return <ConversationDraftsProvider organization={organization}><ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><OrganizationSwitcher organizations={organizations} selected={organization} managerOrganizationIds={managerOrganizationIds} onSelect={(id) => { if (id !== organization) onOrganization(id); }} onOpen={openOrganizationView} />
     <input type="search" className="app-input" aria-label="Search organization threads" placeholder="Search all threads…" value={search} onChange={(event) => setSearch(event.target.value)} />
     <div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
     <div className="sidebar-thread-navigation">
@@ -125,11 +128,11 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
     </div>
     <div className="sidebar-footer"><span>{session.user.display_name}</span><div className="sidebar-footer-actions"><UserPreferencesPanel organization={organization} csrf={session.csrf_token} onChange={setThreadPageSize} /><button className="sidebar-icon-button" aria-label="Sign out" title="Sign out" onClick={() => { void api('/auth/logout', { method: 'POST', csrf: session.csrf_token }).then(onLogout).catch((cause: unknown) => setError(errorMessage(cause))); }}><LogOutIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Sign out</span></button></div></div>
   </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1 ref={headingRef} tabIndex={-1}>{view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['chart', 'organization'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
-    <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button quiet header-icon-button" aria-label="Memory" title="Memory" onClick={() => navigate('memory')}><BrainCircuitIcon aria-hidden="true" /></button>{manager && <button className="app-button quiet header-icon-button" aria-label="Agent settings" title="Agent settings" onClick={() => navigate('agent-settings')}><PanelsTopLeftIcon aria-hidden="true" /></button>}</>}<button className="app-button quiet header-icon-button" aria-label="Refresh workspace" title="Refresh workspace" onClick={() => setVersion((current) => current + 1)}><RefreshCwIcon aria-hidden="true" /></button></div></header>
+    <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button quiet header-icon-button" aria-label="Memory" title="Memory" onClick={() => navigate('memory')}><BrainCircuitIcon aria-hidden="true" /></button>{manager && <button className="app-button quiet header-icon-button" aria-label="Agent settings" title="Agent settings" onClick={() => navigate('agent-settings')}><PanelsTopLeftIcon aria-hidden="true" /></button>}</>}<button className="app-button quiet header-icon-button" aria-label="Refresh workspace" title="Refresh workspace" onClick={refreshWorkspace}><RefreshCwIcon aria-hidden="true" /></button></div></header>
     {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content"><NotificationErrors />
     {agent && <ConversationDeliveryProvider organization={organization} agent={agent.id} session={thread} csrf={session.csrf_token} onOpen={openAgent}><div className="conversation-region" hidden={view !== 'conversation'}><ConversationBoundary key={agent.id}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}><Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={session.csrf_token} refreshKey={version} sessionId={thread} showThreadList={false} threadListTarget={threadListTarget} newThreadTarget={newThreadTarget} threadPageSize={threadPageSize} onThreadSelect={() => { navigate('conversation'); setMobile(false); }} onSessionChange={(id) => { setMobile(false); setThread(id); lastThreads.current[agent.id] = id; saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} /></Suspense></ConversationBoundary></div></ConversationDeliveryProvider>}
     {view === 'agent-settings' && manager && <AgentSettings key={agent?.id ?? 'new'} organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} onSaved={(saved) => { setAgents((items) => [...items.filter((item) => item.id !== saved.id), saved]); setSelected(saved.id); }} />}
-    {view === 'organization' && manager && <OrganizationSettings onIdentityChanged={onIdentityChanged} organization={organization} csrf={session.csrf_token} agents={agents} onChanged={() => setVersion((current) => current + 1)} />}
+    {view === 'organization' && manager && <OrganizationSettings onIdentityChanged={onIdentityChanged} organization={organization} csrf={session.csrf_token} agents={agents} onChanged={refreshWorkspace} />}
     {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
     {view === 'chart' && <div className="workspace-page"><p className="page-intro">Reporting relationships help agents find the right collaborator.</p><ReportingChart agents={agents} onOpen={openAgent} />{!agents.length && <p className="app-empty">{manager ? 'Create your first agent to get started.' : 'Your organization has no agents yet.'}</p>}</div>}
     </div></main></div></ThreadNotificationsProvider></ConversationDraftsProvider>;

@@ -160,7 +160,7 @@ export function Conversation({
 function ThreadWorkspaceProvider({ baseUrl, csrfToken, refreshKey, children }: PropsWithChildren<{ baseUrl: string; csrfToken: string; refreshKey: number }>) {
   const revision = useOpenCodeThreadState((state) => [
     state.session?.time?.updated, state.runState.type, Object.keys(state.childSessionsById).join(','),
-    state.unhandledEvents.filter((event) => ['session.diff', 'vcs.branch.updated', 'file.edited'].includes(event.type)).at(-1)?.seenAt,
+    state.unhandledEvents.filter((event) => ['session.diff', 'fesnyng.context.updated'].includes(event.type)).at(-1)?.seenAt,
   ].join(':'));
   const value = useMemo(() => ({ baseUrl, csrfToken, refreshKey: `${refreshKey}:${revision}` }), [baseUrl, csrfToken, refreshKey, revision]);
   return <ThreadWorkspaceContext.Provider value={value}>{children}</ThreadWorkspaceContext.Provider>;

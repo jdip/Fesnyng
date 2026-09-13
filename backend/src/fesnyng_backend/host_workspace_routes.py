@@ -405,6 +405,20 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                     data = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(data, dict) and data.get("type") in {
+                    "vcs.branch.updated",
+                    "file.edited",
+                }:
+                    # The native stream itself is scoped to this directory.
+                    # Forward only an invalidation, never its raw path/payload.
+                    for session in request.app.state.host_store.sessions(org, agent):
+                        if session["directory"] == directory:
+                            invalidation = {
+                                "type": "fesnyng.context.updated",
+                                "properties": {"sessionID": session["session_id"]},
+                            }
+                            yield f"event: message\ndata: {json.dumps(invalidation, separators=(',', ':'))}\n\n"
+                    continue
                 session_id = _event_session(data)
                 if session_id and await workspace.event_authorized(
                     org, agent, session_id, directory
