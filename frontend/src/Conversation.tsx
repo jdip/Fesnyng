@@ -8,6 +8,7 @@ import {
   useOpenCodeRuntime,
   useOpenCodeRuntimeExtras,
 } from '@assistant-ui/react-opencode';
+import { createPortal } from 'react-dom';
 import { GitForkIcon } from 'lucide-react';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { ThreadPinsProvider } from './ThreadPins';
@@ -41,6 +42,8 @@ export type ConversationProps = {
   showThreadList?: boolean;
   /** Reloads the maintained thread inventory without remounting the composer. */
   refreshKey?: number;
+  threadListTarget?: HTMLElement | null;
+  threadPageSize?: number;
 };
 
 type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
@@ -64,6 +67,8 @@ export function Conversation({
   onError,
   showThreadList = true,
   refreshKey = 0,
+  threadListTarget,
+  threadPageSize = 6,
 }: ConversationProps) {
   const client = useMemo(
     () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
@@ -75,6 +80,14 @@ export function Conversation({
     onThreadIdChange: onSessionChange,
     onError,
   });
+  const previousSession = useRef(sessionId);
+  useEffect(() => {
+    if (previousSession.current === sessionId) return;
+    previousSession.current = sessionId;
+    if (sessionId && runtime.threads.mainItem.getState().externalId !== sessionId) {
+      void runtime.threads.switchToThread(sessionId).catch((error: unknown) => onError?.(error));
+    }
+  }, [sessionId, runtime, onError]);
   const previousRefresh = useRef(refreshKey);
   useEffect(() => {
     if (previousRefresh.current === refreshKey) return;
@@ -94,7 +107,7 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section className="fesnyng-conversation" aria-label="Agent conversation">
-          {showThreadList && <aside><ThreadList /></aside>}
+          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} /></aside>}
           <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
         </section>
       </InlineComposerConfigurationContext.Provider>

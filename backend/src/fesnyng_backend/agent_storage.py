@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS agents (
     FOREIGN KEY (organization_id, reports_to_agent_id)
         REFERENCES agents(organization_id, id)
 );
+CREATE TABLE IF NOT EXISTS workspace_preferences (
+    organization_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    thread_list_page_size INTEGER NOT NULL CHECK(thread_list_page_size BETWEEN 1 AND 100),
+    PRIMARY KEY (organization_id, user_id),
+    FOREIGN KEY (organization_id, user_id)
+        REFERENCES organization_memberships(organization_id, user_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS thread_pins (
     organization_id TEXT NOT NULL,
     user_id TEXT NOT NULL,

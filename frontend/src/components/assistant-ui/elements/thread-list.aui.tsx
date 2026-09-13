@@ -22,35 +22,27 @@ import {
   PencilIcon,
   PinIcon,
   PlusIcon,
-  SearchIcon,
   TrashIcon,
 } from "lucide-react";
 import {
   forwardRef,
-  Fragment,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
   type FC,
 } from "react";
 
-export const ThreadList: FC = () => {
+export const ThreadList: FC<{ pageSize?: number }> = ({ pageSize = 6 }) => {
   const pins = useThreadPins();
-  const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const hasThreads = useAuiState((s) => s.threads.threadIds.length > 0);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
     <ThreadListRoot>
       <ThreadListNew />
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
-      {hasThreads && (
-        <ThreadListSearch value={search} onValueChange={setSearch} />
-      )}
-      <ThreadListItems searchQuery={hasThreads ? search : ""} />
+      <ThreadListItems key={pageSize} pageSize={pageSize} />
       {archivedCount > 0 && (
         <>
           <Button
@@ -79,35 +71,6 @@ const ArchivedThreadListItems: FC = () => {
   );
 };
 
-export const ThreadListSearch = forwardRef<
-  HTMLInputElement,
-  Omit<ComponentPropsWithoutRef<typeof Input>, "value" | "onChange"> & {
-    value: string;
-    onValueChange: (value: string) => void;
-  }
->(({ className, value, onValueChange, ...props }, ref) => {
-  return (
-    <div data-slot="aui_thread-list-search" className="relative px-0.5 py-1">
-      <SearchIcon
-        data-slot="aui_thread-list-search-icon"
-        className="text-muted-foreground pointer-events-none absolute start-3 top-1/2 size-4 -translate-y-1/2"
-      />
-      <Input
-        ref={ref}
-        type="search"
-        value={value}
-        onChange={(event) => onValueChange(event.target.value)}
-        aria-label="Search threads"
-        placeholder="Search threads"
-        className={cn("h-8 ps-8 text-sm", className)}
-        {...props}
-      />
-    </div>
-  );
-});
-
-ThreadListSearch.displayName = "ThreadListSearch";
-
 export const ThreadListRoot: FC<
   ComponentPropsWithoutRef<typeof ThreadListPrimitive.Root>
 > = ({ className, ...props }) => {
@@ -120,135 +83,26 @@ export const ThreadListRoot: FC<
   );
 };
 
-export const ThreadListItems: FC<
-  ComponentPropsWithoutRef<"div"> & { searchQuery?: string }
-> = ({ className, searchQuery = "", ...props }) => {
-  return (
-    <div
-      data-slot="aui_thread-list-items"
-      className={cn("flex flex-col gap-0.5", className)}
-      {...props}
-    >
-      <AuiIf condition={(s) => s.threads.isLoading && s.threads.threadIds.length === 0}>
-        <ThreadListSkeleton />
-      </AuiIf>
-      <AuiIf condition={(s) => !s.threads.isLoading || s.threads.threadIds.length > 0}>
-        <ThreadListItemGroups searchQuery={searchQuery} />
-      </AuiIf>
-    </div>
-  );
-};
-
-const DAY_IN_MS = 86_400_000;
-
-const dateGroupLabel = (
-  date: Date | undefined,
-  startOfToday: number,
-): string => {
-  if (!date || date.getTime() >= startOfToday) return "Today";
-  if (date.getTime() >= startOfToday - DAY_IN_MS) return "Yesterday";
-  return "Earlier";
-};
-
-export type ThreadListGroup = { label: string; indices: number[] };
-
-/**
- * Filters the thread list by title and buckets the matches by last activity
- * (Today, Yesterday, Earlier). `groups` is null when no thread carries a
- * date, in which case `filteredIndices` keeps the runtime order.
- */
-export const useThreadListGroups = (searchQuery = "") => {
-  const threadIds = useAuiState((s) => s.threads.threadIds);
-  const threadItems = useAuiState((s) => s.threads.threadItems);
-
-  const query = searchQuery.trim().toLowerCase();
-
-  return useMemo(() => {
-    const itemsById = new Map(threadItems.map((item) => [item.id, item]));
-    const dates = threadIds.map((id) => itemsById.get(id)?.lastMessageAt);
-    const filteredIndices = threadIds
-      .map((id, index) => ({ id, index }))
-      .filter(
-        ({ id }) =>
-          !query ||
-          (itemsById.get(id)?.title || "New Chat")
-            .toLowerCase()
-            .includes(query),
-      )
-      .map(({ index }) => index);
-    if (!filteredIndices.some((index) => dates[index])) {
-      return { threadIds, filteredIndices, groups: null };
-    }
-
-    const now = new Date();
-    const startOfToday = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-    ).getTime();
-    const time = (index: number) =>
-      dates[index]?.getTime() ?? Number.MAX_SAFE_INTEGER;
-    const sorted = [...filteredIndices].sort((a, b) => time(b) - time(a));
-
-    const result: ThreadListGroup[] = [];
-    for (const index of sorted) {
-      const label = dateGroupLabel(dates[index], startOfToday);
-      const lastGroup = result[result.length - 1];
-      if (lastGroup?.label === label) {
-        lastGroup.indices.push(index);
-      } else {
-        result.push({ label, indices: [index] });
-      }
-    }
-    return { threadIds, filteredIndices, groups: result };
-  }, [threadIds, threadItems, query]);
-};
-
-const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
-  searchQuery = "",
-}) => {
-  const { threadIds, filteredIndices, groups } =
-    useThreadListGroups(searchQuery);
-  const query = searchQuery.trim();
-
-  if (query && filteredIndices.length === 0) {
-    return (
-      <div
-        data-slot="aui_thread-list-empty"
-        className="text-muted-foreground px-2.5 py-4 text-sm"
-      >
-        No threads found
-      </div>
-    );
-  }
-
-  if (!groups) {
-    return filteredIndices.map((index) => (
-      <ThreadListPrimitive.ItemByIndex
-        key={threadIds[index]}
-        index={index}
-        components={{ ThreadListItem }}
-      />
-    ));
-  }
-
-  return groups.map((group) => (
-    <Fragment key={group.label}>
-      <div
-        data-slot="aui_thread-list-group-label"
-        className="text-muted-foreground px-2.5 pt-3 pb-1 text-xs font-medium"
-      >
-        {group.label}
-      </div>
-      {group.indices.map((index) => (
-        <ThreadListPrimitive.ItemByIndex
-          key={threadIds[index]}
-          index={index}
-          components={{ ThreadListItem }}
-        />
-      ))}
-    </Fragment>
-  ));
+/** Keeps the maintained item/actions in server order while limiting only unpinned rows. */
+export const ThreadListItems: FC<{ pageSize?: number }> = ({ pageSize = 6 }) => {
+  const pins = useThreadPins();
+  const [visibleCount, setVisibleCount] = useState(pageSize);
+  const threadIds = useAuiState((state) => state.threads.threadIds);
+  const threadItems = useAuiState((state) => state.threads.threadItems);
+  const selected = useAuiState((state) => state.threads.mainThreadId);
+  const items = new Map(threadItems.map((item) => [item.id, item]));
+  const isPinned = (id: string) => {
+    const item = items.get(id);
+    return pins?.ids?.has(item?.externalId ?? item?.remoteId ?? '') ?? false;
+  };
+  const unpinnedPage = new Set(threadIds.filter((id) => !isPinned(id)).slice(0, visibleCount));
+  const visible = threadIds.map((id, index) => ({ id, index }))
+    .filter(({ id }) => isPinned(id) || unpinnedPage.has(id) || id === selected);
+  return <div data-slot="aui_thread-list-items" className="flex flex-col gap-0.5">
+    <AuiIf condition={(state) => state.threads.isLoading && state.threads.threadIds.length === 0}><ThreadListSkeleton /></AuiIf>
+    {visible.map(({ id, index }) => <ThreadListPrimitive.ItemByIndex key={id} index={index} components={{ ThreadListItem }} />)}
+    {visible.length < threadIds.length && <Button variant="ghost" aria-label="Show more threads" onClick={() => setVisibleCount((count) => count + pageSize)}>Show more</Button>}
+  </div>;
 };
 
 export const ThreadListNew = forwardRef<

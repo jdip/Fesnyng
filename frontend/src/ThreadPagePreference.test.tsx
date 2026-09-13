@@ -1,0 +1,20 @@
+import { afterEach, expect, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ThreadPagePreference } from './ThreadPagePreference';
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+test('loads and saves the personal page size without applying a failed write', async () => {
+  let fail = false;
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => new Response(JSON.stringify(fail ? { detail: 'Save unavailable' } : { thread_list_page_size: init.method === 'PUT' ? 12 : 6 }), { status: fail ? 503 : 200 })));
+  const changed = vi.fn();
+  render(<ThreadPagePreference organization="org" csrf="csrf-example" onChange={changed} />);
+  await waitFor(() => expect(changed).toHaveBeenCalledWith(6));
+  fireEvent.click(screen.getByText('Thread list settings'));
+  fireEvent.change(screen.getByLabelText('Threads per page'), { target: { value: '12' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save page size' }));
+  await waitFor(() => expect(changed).toHaveBeenCalledWith(12));
+  fail = true;
+  fireEvent.change(screen.getByLabelText('Threads per page'), { target: { value: '24' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save page size' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Save unavailable');
+  expect(changed).not.toHaveBeenCalledWith(24);
+});

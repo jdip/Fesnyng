@@ -233,6 +233,29 @@ class ControlPlaneStore:
             user_id=row["user_id"], organization_id=row["organization_id"], role=row["role"]
         )
 
+    def thread_list_page_size(self, organization_id: str, user_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT thread_list_page_size FROM workspace_preferences
+                WHERE organization_id=? AND user_id=?""",
+                (organization_id, user_id),
+            ).fetchone()
+        return int(row["thread_list_page_size"]) if row is not None else 6
+
+    def set_thread_list_page_size(
+        self, organization_id: str, user_id: str, thread_list_page_size: int
+    ) -> int:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO workspace_preferences(
+                organization_id,user_id,thread_list_page_size
+                ) VALUES(?,?,?)
+                ON CONFLICT(organization_id,user_id) DO UPDATE SET
+                thread_list_page_size=excluded.thread_list_page_size""",
+                (organization_id, user_id, thread_list_page_size),
+            )
+        return self.thread_list_page_size(organization_id, user_id)
+
     def list_thread_pins(self, organization_id: str, user_id: str, agent_id: str) -> list[str]:
         with self.connect() as connection:
             rows = connection.execute(

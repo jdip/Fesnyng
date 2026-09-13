@@ -618,3 +618,49 @@ test('keeps a replacement workflow when an earlier workflow submission settles',
   settleFirst(new Response('{}'));
   await waitFor(() => expect(screen.getByLabelText('Remove workflow fesnyng/replacement')).toBeTruthy());
 });
+
+test('portals the maintained list into the sidebar with pins, pages and the selected thread', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const threads = Array.from({ length: 10 }, (_, index) => ({ id: `session-${index}`, title: `Sidebar thread ${index}`, time: {} }));
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.endsWith('/thread-pins') ? { session_ids: ['session-8'] }
+      : url.includes('/experimental/session') ? [threads[8], ...threads.filter((_, index) => index !== 8)]
+        : url.endsWith('/session/session-9') ? threads[9] : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  const target = document.createElement('aside');
+  target.setAttribute('aria-label', 'Sidebar threads');
+  document.body.append(target);
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-9" threadListTarget={target} threadPageSize={6} />);
+  await screen.findByRole('button', { name: 'Sidebar thread 9' });
+  await screen.findByRole('img', { name: 'Pinned' });
+  expect(target.querySelector('[data-slot="aui_thread-list-root"]')).toBeTruthy();
+  expect(screen.queryByRole('searchbox', { name: 'Search threads' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Sidebar thread 7' })).toBeNull();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Keep sidebar draft' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Show more threads' }));
+  expect(await screen.findByRole('button', { name: 'Sidebar thread 7' })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep sidebar draft');
+  target.remove();
+});
+
+test('opens same-agent search selections through the maintained runtime without losing another draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const threads = [{ id: 'first', title: 'First selection', time: {} }, { id: 'second', title: 'Second selection', time: {} }];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.endsWith('/thread-pins') ? { session_ids: [] }
+      : url.includes('/experimental/session') ? threads
+        : url.endsWith('/session/first') ? threads[0] : url.endsWith('/session/second') ? threads[1] : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  const props = { baseUrl: 'http://localhost/api/organizations/org-one/agents/agent-one/opencode', csrfToken: 'csrf-example' };
+  const { rerender } = render(<Conversation {...props} sessionId="first" />);
+  await screen.findByRole('button', { name: 'First selection' });
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Message input' }), { target: { value: 'Keep first selection draft' } });
+  rerender(<Conversation {...props} sessionId="second" />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Second selection' }).closest('[data-active]')?.getAttribute('data-active')).toBe('true'));
+  rerender(<Conversation {...props} sessionId="first" />);
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep first selection draft'));
+});

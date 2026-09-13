@@ -1,14 +1,15 @@
 import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react';
 import { ArrowUpIcon, ListPlusIcon, SquareIcon } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { ThreadComposerProps } from './components/assistant-ui/elements/thread.aui';
+import { type DraftAdmission, type DraftWorkflow, useConversationDrafts } from './ConversationDrafts';
 import { createFesnyngOpenCodeFetch } from './lib/opencode-client';
 import { errorMessage } from './workspace-api';
 
-type Workflow = { name: string; description: string };
-type DeliveryMode = 'queued' | 'steering';
+type Workflow = DraftWorkflow;
+type DeliveryMode = DraftAdmission['mode'];
 type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: string; sessionId?: string };
-type Admission = { key: string; id: string; sessionId: string; mode: DeliveryMode };
+type Admission = DraftAdmission;
 
 const workflowInventoryUrl = (baseUrl: string) => `${baseUrl.replace(/\/$/, '')}/command`;
 
@@ -21,6 +22,7 @@ async function responseError(response: Response) {
 /** A product slot around the maintained assistant-ui composer primitives. */
 export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken, sessionId }: InlineComposerProps) {
   const aui = useAui();
+  const drafts = useConversationDrafts();
   const text = useAuiState((state) => state.composer.text);
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const threadIdentity = useAuiState((state) => state.threadListItem.id);
@@ -33,10 +35,60 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const submittingRef = useRef(false);
+  const auiRef = useRef(aui);
   const admissionRef = useRef<Admission | undefined>(undefined);
+  const restoredKeyRef = useRef<string | undefined>(undefined);
+  const previousDraftKeyRef = useRef<string | undefined>(undefined);
+  const restoredTextRef = useRef('');
+  const skipFirstDraftWriteRef = useRef(true);
   const requestGenerationRef = useRef(0);
   const isMountedRef = useRef(true);
   const fetchWithFesnyngAuth = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
+
+  useEffect(() => { auiRef.current = aui; }, [aui]);
+
+  // A new assistant-ui thread has a local ID that changes on a runtime remount.
+  // The provider instead uses one stable new-thread slot per agent facade.
+  const draftKey = nativeSessionId || sessionId || 'new';
+  const admissionKey = (instructions: string, workflow?: Workflow) => `${workflow?.name ?? ''}\u0000${instructions}`;
+  const persistDraft = useCallback((nextText: string, nextWorkflow: Workflow | undefined) => {
+    if (!drafts) return;
+    const admission = admissionRef.current?.key === admissionKey(nextText, nextWorkflow)
+      ? admissionRef.current
+      : undefined;
+    drafts.write(baseUrl, draftKey, { text: nextText, workflow: nextWorkflow, admission });
+  }, [baseUrl, draftKey, drafts]);
+
+  useLayoutEffect(() => {
+    if (!drafts) return;
+    let restored = drafts?.read(baseUrl, draftKey);
+    const previousKey = previousDraftKeyRef.current;
+    if (drafts && previousKey === 'new' && draftKey !== 'new') restored = drafts.migrate(baseUrl, previousKey, draftKey);
+    previousDraftKeyRef.current = draftKey;
+    restoredKeyRef.current = draftKey;
+    restoredTextRef.current = restored?.text ?? '';
+    skipFirstDraftWriteRef.current = true;
+    admissionRef.current = restored?.admission;
+    auiRef.current.composer.setText(restoredTextRef.current);
+    setSelectedWorkflow(restored?.workflow);
+  }, [baseUrl, draftKey, drafts]);
+
+  useEffect(() => {
+    if (!drafts || restoredKeyRef.current !== draftKey) return;
+    // assistant-ui initially exposes an empty composer. Do not let that first
+    // render overwrite a saved draft before setText() has taken effect.
+    if (skipFirstDraftWriteRef.current) {
+      if (text === restoredTextRef.current) {
+        skipFirstDraftWriteRef.current = false;
+        return;
+      }
+      // An empty new composer has no delayed restore to wait for. This is a
+      // real first keystroke, so save it instead of leaving the draft frozen.
+      if (restoredTextRef.current) return;
+      skipFirstDraftWriteRef.current = false;
+    }
+    persistDraft(text, selectedWorkflow);
+  }, [draftKey, drafts, persistDraft, selectedWorkflow, text]);
 
   useEffect(() => {
     requestGenerationRef.current += 1;
@@ -96,7 +148,8 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     if (!instructions.trim() && !workflow) return;
     const requestThreadIdentity = threadIdentity;
     const requestGeneration = requestGenerationRef.current;
-    const key = `${requestThreadIdentity}\u0000${workflow?.name ?? ''}\u0000${instructions}`;
+    const key = admissionKey(instructions, workflow);
+    let requestDraftKey = draftKey;
     submittingRef.current = true;
     setIsSubmitting(true);
     setSubmissionError('');
@@ -107,6 +160,13 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         currentAdmission = { key, id: crypto.randomUUID(), sessionId: await resolveSessionId(), mode: requestedMode };
         admissionRef.current = currentAdmission;
       }
+      // Persist the exact admission before sending. A remount can then retry
+      // the same prompt without creating a second delivery.
+      drafts?.write(baseUrl, requestDraftKey, { text: instructions, workflow, admission: currentAdmission });
+      if (requestDraftKey === 'new' && currentAdmission.sessionId) {
+        drafts?.migrate(baseUrl, requestDraftKey, currentAdmission.sessionId);
+        requestDraftKey = currentAdmission.sessionId;
+      }
       const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(currentAdmission.sessionId)}/prompt_async`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
         body: JSON.stringify({
@@ -116,7 +176,8 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         }),
       });
       if (!response.ok) throw new Error(await responseError(response));
-      if (requestGeneration === requestGenerationRef.current) admissionRef.current = undefined;
+      drafts?.clearDelivered(baseUrl, requestDraftKey, currentAdmission.id);
+      if (requestGeneration === requestGenerationRef.current && admissionRef.current?.id === currentAdmission.id) admissionRef.current = undefined;
       if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) {
         if (aui.composer.getState().text === instructions) aui.composer.setText('');
         setSelectedWorkflow((current) => current === workflow ? undefined : current);
@@ -153,12 +214,12 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   return <ComposerPrimitive.Unstable_TriggerPopoverRoot>
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col" onSubmit={onSubmit}>
       <div data-slot="aui_composer-shell" className="border-border/60 focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color]">
-        {selectedWorkflow && <div className="flex items-center gap-2 px-2 text-sm"><span className="rounded bg-muted px-2 py-1">/{selectedWorkflow.description || selectedWorkflow.name}</span><button type="button" className="text-muted-foreground" aria-label={`Remove workflow ${selectedWorkflow.name}`} onClick={() => setSelectedWorkflow(undefined)}>Remove</button></div>}
-        <ComposerPrimitive.Input placeholder={isRunning ? 'Steer the agent…' : 'Send a message...'} className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none" rows={1} autoFocus={autoFocus} enterKeyHint="send" aria-label="Message input" addAttachmentOnPaste={allowAttachments} onChange={(event) => { if (!event.target.value.startsWith('/')) setSlashDismissed(false); }} onKeyDown={onKeyDown} />
+        {selectedWorkflow && <div className="flex items-center gap-2 px-2 text-sm"><span className="rounded bg-muted px-2 py-1">/{selectedWorkflow.description || selectedWorkflow.name}</span><button type="button" className="text-muted-foreground" aria-label={`Remove workflow ${selectedWorkflow.name}`} onClick={() => { setSelectedWorkflow(undefined); persistDraft(text, undefined); }}>Remove</button></div>}
+        <ComposerPrimitive.Input placeholder={isRunning ? 'Steer the agent…' : 'Send a message...'} className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none" rows={1} autoFocus={autoFocus} enterKeyHint="send" aria-label="Message input" addAttachmentOnPaste={allowAttachments} onChange={(event) => { const nextText = event.target.value; if (!nextText.startsWith('/')) setSlashDismissed(false); skipFirstDraftWriteRef.current = false; persistDraft(nextText, selectedWorkflow); }} onKeyDown={onKeyDown} />
         <ComposerPrimitive.Unstable_TriggerPopover char="/" matcher={slashMatcher} adapter={inventoryError ? undefined : workflowAdapter}>
           <ComposerPrimitive.Unstable_TriggerPopover.Action removeOnExecute onExecute={(item) => {
             const workflow = workflows.find((candidate) => candidate.name === item.id);
-            if (workflow) { setSelectedWorkflow(workflow); setSlashDismissed(false); setSubmissionError(''); setNotice(''); }
+            if (workflow) { setSelectedWorkflow(workflow); persistDraft(text, workflow); setSlashDismissed(false); setSubmissionError(''); setNotice(''); }
           }} />
           <ComposerPrimitive.Unstable_TriggerPopoverItems aria-label="Configured workflows">
             {(items) => <div className="mx-2 rounded border bg-card p-1" role="listbox" aria-label="Configured workflows">
