@@ -50,4 +50,6 @@ Dependencies and their versions belong in `package.json` and `package-lock.json`
 Run `npm run check` for lint, behavior tests, types, and production build. Use the
 [repository check](../docs/development.md) before delivery, and verify rendered
 flows against real Python hosts and Docker execution. Tests alone do not establish
-the retained full-system MVP acceptance.
+the retained full-system MVP acceptance. The [local retained-MVP guide](../docs/local-mvp.md)
+documents browser login, host-local profile login, and the complete local startup
+and recovery sequence; acceptance remains active in issue #18.

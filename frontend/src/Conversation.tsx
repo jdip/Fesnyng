@@ -9,7 +9,7 @@ import {
   useOpenCodeRuntimeExtras,
 } from '@assistant-ui/react-opencode';
 import { GitForkIcon } from 'lucide-react';
-import { useMemo, useState, type PropsWithChildren } from 'react';
+import { useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { Thread, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
@@ -36,6 +36,8 @@ export type ConversationProps = {
   onError?: (error: unknown) => void | Promise<void>;
   /** Lets the shell place agent navigation beside or above the runtime thread list. */
   showThreadList?: boolean;
+  /** Reloads the maintained thread inventory without remounting the composer. */
+  refreshKey?: number;
 };
 
 /**
@@ -49,6 +51,7 @@ export function Conversation({
   onSessionChange,
   onError,
   showThreadList = true,
+  refreshKey = 0,
 }: ConversationProps) {
   const client = useMemo(
     () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
@@ -60,6 +63,12 @@ export function Conversation({
     onThreadIdChange: onSessionChange,
     onError,
   });
+  const previousRefresh = useRef(refreshKey);
+  useEffect(() => {
+    if (previousRefresh.current === refreshKey) return;
+    previousRefresh.current = refreshKey;
+    void runtime.threads.reload().catch((error: unknown) => onError?.(error));
+  }, [refreshKey, runtime, onError]);
   const components = useMemo(() => ({
     ToolFallback: OpenCodeToolFallback,
     ToolGroup: PendingApprovalToolGroup,

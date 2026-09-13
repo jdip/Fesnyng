@@ -231,7 +231,7 @@ Public-safe examples should be the default rather than something cleaned up late
 
 ## Status
 
-The application foundation is being implemented against the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). [Development instructions](docs/development.md) describe the runnable components and current verification boundary. [PLAN.md](PLAN.md) remains the initial architecture source, amended by the confirmed primary map.
+The application foundation is implemented against the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). [Development instructions](docs/development.md) describe the runnable components and checks, and the [local retained-MVP guide](docs/local-mvp.md) starts one control plane, two local hosts, Docker agents, and the browser workspace. Retained end-to-end acceptance is still active in [issue #18](https://github.com/jdip/Fesnyng/issues/18); the guide is not an acceptance record. [PLAN.md](PLAN.md) remains the initial architecture source, amended by the confirmed primary map.
 
 The first implementation target is a minimal proof of concept with:
 
@@ -246,4 +246,3 @@ The first implementation target is a minimal proof of concept with:
 9. direct interactive sessions without requiring a task object.
 
 The full-system MVP uses one control plane and two independent local Python agent-host APIs with one Docker container per persistent agent. Owner/admin and member roles ship initially; finer per-agent grants are deferred. Hosts retain execution, credentials and applied peer communication while the control plane is unavailable.
-

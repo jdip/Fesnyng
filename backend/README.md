@@ -1,5 +1,10 @@
 # Fesnyng backends
 
+For the complete local topology—one control plane, two local hosts, Docker
+agents, browser setup, persistence, and recovery—start with the
+[local retained-MVP guide](../docs/local-mvp.md). This document remains the
+backend contract reference for its exact service and API behavior.
+
 The independently runnable control-plane and agent-host APIs each own a private SQLite file, state directory and durable UUID. The control plane owns users, memberships, desired organization policy, agent configuration and host allocations. Each agent host owns Docker execution and its own credential state.
 
 ## Install and verify

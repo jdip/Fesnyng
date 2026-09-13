@@ -12,6 +12,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
+from fesnyng_backend.agent_models import Slug
 from fesnyng_backend.host_memory import MemoryStore
 from fesnyng_backend.host_models import Actor, NativeID
 from fesnyng_backend.host_store import HostStore
@@ -117,10 +118,12 @@ def register_collaboration_tools(
     validate that the authenticated agent owns it before any delivery is made.
     """
 
-    @server.tool(description="Discover organization threads visible to this authenticated agent.")
+    @server.tool(
+        description="Discover organization threads visible to this authenticated agent. Filter workspace by its assigned logical name, such as default."
+    )
     async def discover_threads(
         agent_id: UUID | None = None,
-        workspace: str | None = None,
+        workspace: Slug | None = None,
         topic: str = "",
         active: bool | None = None,
     ) -> dict[str, Any]:
