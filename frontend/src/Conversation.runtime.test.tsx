@@ -629,10 +629,11 @@ test('portals the maintained list into the sidebar with pins, pages and the sele
         : url.endsWith('/session/session-9') ? threads[9] : [];
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
   }));
+  const selected = vi.fn();
   const target = document.createElement('aside');
   target.setAttribute('aria-label', 'Sidebar threads');
   document.body.append(target);
-  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-9" threadListTarget={target} threadPageSize={6} />);
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-9" threadListTarget={target} threadPageSize={6} onThreadSelect={selected} />);
   await screen.findByRole('button', { name: 'Sidebar thread 9' });
   await screen.findByRole('img', { name: 'Pinned' });
   expect(target.querySelector('[data-slot="aui_thread-list-root"]')).toBeTruthy();
@@ -642,6 +643,10 @@ test('portals the maintained list into the sidebar with pins, pages and the sele
   fireEvent.click(screen.getByRole('button', { name: 'Show more threads' }));
   expect(await screen.findByRole('button', { name: 'Sidebar thread 7' })).toBeTruthy();
   expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep sidebar draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Sidebar thread 9' }));
+  expect(selected).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: 'New Thread' }));
+  expect(selected).toHaveBeenCalledTimes(2);
   target.remove();
 });
 

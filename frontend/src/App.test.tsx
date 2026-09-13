@@ -1,7 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
-vi.mock('./Conversation', () => ({ Conversation: ({ sessionId }: { sessionId?: string }) => <p>Native conversation {sessionId}</p> }));
+vi.mock('./Conversation', async () => {
+  const { createPortal } = await import('react-dom');
+  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void }) => <><p>Native conversation {sessionId}</p>{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</> };
+});
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
 
@@ -144,4 +147,11 @@ test('expands only the selected agent and searches titles beyond the sidebar pag
   fireEvent.change(screen.getByRole('searchbox', { name: 'Search organization threads' }), { target: { value: '' } });
   expect(await screen.findByRole('region', { name: 'Beta threads' })).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Alpha threads' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Open sidebar thread' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Create sidebar thread' }));
+  expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
 });

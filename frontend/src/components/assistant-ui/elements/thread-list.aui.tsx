@@ -25,6 +25,8 @@ import {
   TrashIcon,
 } from "lucide-react";
 import {
+  createContext,
+  useContext,
   forwardRef,
   useEffect,
   useRef,
@@ -33,14 +35,16 @@ import {
   type FC,
 } from "react";
 
-export const ThreadList: FC<{ pageSize?: number }> = ({ pageSize = 6 }) => {
+const ThreadNavigationContext = createContext<(() => void) | undefined>(undefined);
+
+export const ThreadList: FC<{ pageSize?: number; onSelect?: () => void }> = ({ pageSize = 6, onSelect }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
-    <ThreadListRoot>
-      <ThreadListNew />
+    <ThreadNavigationContext.Provider value={onSelect}><ThreadListRoot>
+      <ThreadListNew onClick={onSelect} />
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
       {archivedCount > 0 && (
@@ -58,7 +62,7 @@ export const ThreadList: FC<{ pageSize?: number }> = ({ pageSize = 6 }) => {
           {showArchived && <ArchivedThreadListItems />}
         </>
       )}
-    </ThreadListRoot>
+    </ThreadListRoot></ThreadNavigationContext.Provider>
   );
 };
 
@@ -164,6 +168,7 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
+  const onSelect = useContext(ThreadNavigationContext);
   const pins = useThreadPins();
   const session = useAuiState((s) => s.threadListItem.remoteId);
   const pinned = !!session && !!pins?.ids?.has(session);
@@ -194,6 +199,7 @@ export const ThreadListItem: FC = () => {
       ) : (
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
+          onClick={onSelect}
           data-slot="aui_thread-list-item-trigger"
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
         >

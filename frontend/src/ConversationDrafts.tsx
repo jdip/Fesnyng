@@ -5,25 +5,32 @@ export type DraftDeliveryMode = 'queued' | 'steering';
 export type DraftAdmission = {
   key: string;
   id: string;
-  sessionId: string;
+  sessionId?: string;
   mode: DraftDeliveryMode;
 };
 export type ConversationDraft = {
   text: string;
   workflow?: DraftWorkflow;
-  admission?: DraftAdmission;
+  admissions?: DraftAdmission[];
 };
 
 type ConversationDrafts = {
   read: (baseUrl: string, threadKey: string) => ConversationDraft | undefined;
   write: (baseUrl: string, threadKey: string, draft: ConversationDraft) => void;
   migrate: (baseUrl: string, fromThreadKey: string, toThreadKey: string) => ConversationDraft | undefined;
-  clearDelivered: (baseUrl: string, threadKey: string, admissionId: string) => void;
+  clearDelivered: (baseUrl: string, threadKey: string, admissionId: string, admissionKey: string) => void;
+  initialize: (baseUrl: string, threadKey: string, create: () => Promise<string>) => Promise<string>;
 };
 
 const ConversationDraftsContext = createContext<ConversationDrafts | undefined>(undefined);
 
 const draftStorageKey = (baseUrl: string, threadKey: string) => `${baseUrl}\u0000${threadKey}`;
+const cloneDraft = (draft: ConversationDraft | undefined) => draft && ({
+  ...draft,
+  workflow: draft.workflow && { ...draft.workflow },
+  admissions: draft.admissions?.map((admission) => ({ ...admission })),
+});
+const draftKey = (draft: ConversationDraft) => `${draft.workflow?.name ?? ''}\u0000${draft.text}`;
 
 /**
  * Keeps unsent composer state only while a user remains in one organization
@@ -35,22 +42,23 @@ export function ConversationDraftsProvider({
   children,
 }: PropsWithChildren<{ organization: string }>) {
   const draftsRef = useRef(new Map<string, ConversationDraft>());
+  const initializationsRef = useRef(new Map<string, Promise<string>>());
 
   const read = useCallback((baseUrl: string, threadKey: string) => {
     const draft = draftsRef.current.get(draftStorageKey(baseUrl, threadKey));
-    return draft && { ...draft, workflow: draft.workflow && { ...draft.workflow }, admission: draft.admission && { ...draft.admission } };
+    return cloneDraft(draft);
   }, []);
 
   const write = useCallback((baseUrl: string, threadKey: string, draft: ConversationDraft) => {
     const key = draftStorageKey(baseUrl, threadKey);
-    if (!draft.text && !draft.workflow && !draft.admission) {
+    if (!draft.text && !draft.workflow && !draft.admissions?.length) {
       draftsRef.current.delete(key);
       return;
     }
     draftsRef.current.set(key, {
       ...draft,
       workflow: draft.workflow && { ...draft.workflow },
-      admission: draft.admission && { ...draft.admission },
+      admissions: draft.admissions?.map((admission) => ({ ...admission })),
     });
   }, []);
 
@@ -60,23 +68,40 @@ export function ConversationDraftsProvider({
     const toKey = draftStorageKey(baseUrl, toThreadKey);
     const source = draftsRef.current.get(fromKey);
     const destination = draftsRef.current.get(toKey);
-    if (!source) return destination && { ...destination, workflow: destination.workflow && { ...destination.workflow }, admission: destination.admission && { ...destination.admission } };
+    if (!source) return cloneDraft(destination);
     // The active new thread is the user's latest work. It deliberately wins
     // over a stale cache for a session that has just been initialized.
     draftsRef.current.set(toKey, source);
     draftsRef.current.delete(fromKey);
-    return { ...source, workflow: source.workflow && { ...source.workflow }, admission: source.admission && { ...source.admission } };
+    return cloneDraft(source);
   }, [read]);
 
-  const clearDelivered = useCallback((baseUrl: string, threadKey: string, admissionId: string) => {
+  const clearDelivered = useCallback((baseUrl: string, threadKey: string, admissionId: string, admissionKey: string) => {
     const key = draftStorageKey(baseUrl, threadKey);
     const draft = draftsRef.current.get(key);
-    if (draft?.admission?.id === admissionId) draftsRef.current.delete(key);
+    if (!draft) return;
+    const admissions = draft.admissions?.filter((admission) => admission.id !== admissionId);
+    if (admissions?.length === draft.admissions?.length) return;
+    if (draftKey(draft) === admissionKey) {
+      draftsRef.current.delete(key);
+      return;
+    }
+    if (!draft.text && !draft.workflow && !admissions?.length) draftsRef.current.delete(key);
+    else draftsRef.current.set(key, { ...draft, admissions });
+  }, []);
+
+  const initialize = useCallback((baseUrl: string, threadKey: string, create: () => Promise<string>) => {
+    const key = draftStorageKey(baseUrl, threadKey);
+    const existing = initializationsRef.current.get(key);
+    if (existing) return existing;
+    const initialization = create().finally(() => initializationsRef.current.delete(key));
+    initializationsRef.current.set(key, initialization);
+    return initialization;
   }, []);
 
   // organization is intentionally part of the provider boundary. App keys this
   // provider by organization, so no draft can cross an organization switch.
-  const value = useMemo<ConversationDrafts>(() => ({ read, write, migrate, clearDelivered }), [clearDelivered, migrate, read, write]);
+  const value = useMemo<ConversationDrafts>(() => ({ read, write, migrate, clearDelivered, initialize }), [clearDelivered, initialize, migrate, read, write]);
   return <ConversationDraftsContext.Provider key={organization} value={value}>{children}</ConversationDraftsContext.Provider>;
 }
 

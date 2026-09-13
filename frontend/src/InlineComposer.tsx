@@ -12,6 +12,11 @@ type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: s
 type Admission = DraftAdmission;
 
 const workflowInventoryUrl = (baseUrl: string) => `${baseUrl.replace(/\/$/, '')}/command`;
+const admissionFor = (draft: { admissions?: Admission[] } | undefined, key: string) => draft?.admissions?.find((admission) => admission.key === key);
+const withAdmission = (draft: { admissions?: Admission[] } | undefined, admission: Admission) => [
+  ...(draft?.admissions?.filter((candidate) => candidate.id !== admission.id) ?? []),
+  admission,
+];
 
 async function responseError(response: Response) {
   const body: unknown = await response.json().catch(() => undefined);
@@ -37,6 +42,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const submittingRef = useRef(false);
   const auiRef = useRef(aui);
   const admissionRef = useRef<Admission | undefined>(undefined);
+  const selectedWorkflowRef = useRef<Workflow | undefined>(undefined);
   const restoredKeyRef = useRef<string | undefined>(undefined);
   const previousDraftKeyRef = useRef<string | undefined>(undefined);
   const restoredTextRef = useRef('');
@@ -46,6 +52,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const fetchWithFesnyngAuth = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
 
   useEffect(() => { auiRef.current = aui; }, [aui]);
+  useEffect(() => { selectedWorkflowRef.current = selectedWorkflow; }, [selectedWorkflow]);
 
   // A new assistant-ui thread has a local ID that changes on a runtime remount.
   // The provider instead uses one stable new-thread slot per agent facade.
@@ -53,10 +60,9 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const admissionKey = (instructions: string, workflow?: Workflow) => `${workflow?.name ?? ''}\u0000${instructions}`;
   const persistDraft = useCallback((nextText: string, nextWorkflow: Workflow | undefined) => {
     if (!drafts) return;
-    const admission = admissionRef.current?.key === admissionKey(nextText, nextWorkflow)
-      ? admissionRef.current
-      : undefined;
-    drafts.write(baseUrl, draftKey, { text: nextText, workflow: nextWorkflow, admission });
+    const existing = drafts.read(baseUrl, draftKey);
+    admissionRef.current = admissionFor(existing, admissionKey(nextText, nextWorkflow));
+    drafts.write(baseUrl, draftKey, { text: nextText, workflow: nextWorkflow, admissions: existing?.admissions });
   }, [baseUrl, draftKey, drafts]);
 
   useLayoutEffect(() => {
@@ -68,7 +74,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     restoredKeyRef.current = draftKey;
     restoredTextRef.current = restored?.text ?? '';
     skipFirstDraftWriteRef.current = true;
-    admissionRef.current = restored?.admission;
+    admissionRef.current = admissionFor(restored, admissionKey(restoredTextRef.current, restored?.workflow));
     auiRef.current.composer.setText(restoredTextRef.current);
     setSelectedWorkflow(restored?.workflow);
   }, [baseUrl, draftKey, drafts]);
@@ -132,11 +138,14 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     },
   }), [workflows]);
 
-  const resolveSessionId = async () => {
+  const resolveSessionId = async (threadKey: string) => {
     if (nativeSessionId) return nativeSessionId;
     if (sessionId) return sessionId;
-    const initialized = await aui.threadListItem.initialize();
-    return initialized.externalId ?? initialized.remoteId;
+    const initialize = async () => {
+      const initialized = await aui.threadListItem.initialize();
+      return initialized.externalId ?? initialized.remoteId;
+    };
+    return drafts ? drafts.initialize(baseUrl, threadKey, initialize) : initialize();
   };
 
   const sameThread = (requestThreadIdentity: string) => aui.threadListItem.getState().id === requestThreadIdentity;
@@ -155,19 +164,37 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     setSubmissionError('');
     setNotice('');
     try {
-      let currentAdmission = admissionRef.current;
+      let currentAdmission = admissionRef.current ?? admissionFor(drafts?.read(baseUrl, requestDraftKey), key);
       if (!currentAdmission || currentAdmission.key !== key) {
-        currentAdmission = { key, id: crypto.randomUUID(), sessionId: await resolveSessionId(), mode: requestedMode };
+        currentAdmission = { key, id: crypto.randomUUID(), mode: requestedMode };
         admissionRef.current = currentAdmission;
       }
-      // Persist the exact admission before sending. A remount can then retry
-      // the same prompt without creating a second delivery.
-      drafts?.write(baseUrl, requestDraftKey, { text: instructions, workflow, admission: currentAdmission });
-      if (requestDraftKey === 'new' && currentAdmission.sessionId) {
-        drafts?.migrate(baseUrl, requestDraftKey, currentAdmission.sessionId);
-        requestDraftKey = currentAdmission.sessionId;
+      // Store the admission before initialization so a remount reuses its key
+      // and the provider's in-flight initialization rather than creating a
+      // second native session.
+      const beforeInitialization = drafts?.read(baseUrl, requestDraftKey);
+      drafts?.write(baseUrl, requestDraftKey, {
+        text: beforeInitialization?.text ?? instructions,
+        workflow: beforeInitialization?.workflow ?? workflow,
+        admissions: withAdmission(beforeInitialization, currentAdmission),
+      });
+      const resolvedSessionId = currentAdmission.sessionId ?? await resolveSessionId(requestDraftKey);
+      currentAdmission = { ...currentAdmission, sessionId: resolvedSessionId };
+      admissionRef.current = currentAdmission;
+      if (requestDraftKey === 'new') {
+        drafts?.migrate(baseUrl, requestDraftKey, resolvedSessionId);
+        requestDraftKey = resolvedSessionId;
       }
-      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(currentAdmission.sessionId)}/prompt_async`, {
+      // Initialization is asynchronous. Keep an edit made while it was in
+      // flight and attach the original admission beside that newer draft.
+      const currentText = isCurrentThread(requestThreadIdentity) ? aui.composer.getState().text : undefined;
+      const latest = drafts?.read(baseUrl, requestDraftKey);
+      drafts?.write(baseUrl, requestDraftKey, {
+        text: currentText ?? latest?.text ?? instructions,
+        workflow: isCurrentThread(requestThreadIdentity) ? selectedWorkflowRef.current : latest?.workflow ?? workflow,
+        admissions: withAdmission(latest, currentAdmission),
+      });
+      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(resolvedSessionId)}/prompt_async`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
         body: JSON.stringify({
           parts: instructions.trim() ? [{ type: 'text', text: instructions }] : [],
@@ -176,7 +203,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         }),
       });
       if (!response.ok) throw new Error(await responseError(response));
-      drafts?.clearDelivered(baseUrl, requestDraftKey, currentAdmission.id);
+      drafts?.clearDelivered(baseUrl, requestDraftKey, currentAdmission.id, currentAdmission.key);
       if (requestGeneration === requestGenerationRef.current && admissionRef.current?.id === currentAdmission.id) admissionRef.current = undefined;
       if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) {
         if (aui.composer.getState().text === instructions) aui.composer.setText('');

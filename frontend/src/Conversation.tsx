@@ -44,6 +44,7 @@ export type ConversationProps = {
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
   threadPageSize?: number;
+  onThreadSelect?: () => void;
 };
 
 type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
@@ -69,6 +70,7 @@ export function Conversation({
   refreshKey = 0,
   threadListTarget,
   threadPageSize = 6,
+  onThreadSelect,
 }: ConversationProps) {
   const client = useMemo(
     () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
@@ -107,7 +109,7 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} /></aside>}
+          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} /></aside>}
           <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
         </section>
       </InlineComposerConfigurationContext.Provider>
