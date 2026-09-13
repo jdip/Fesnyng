@@ -23,6 +23,7 @@ from fesnyng_backend.host_memory_routes import router as memory_router
 from fesnyng_backend.host_routes import router
 from fesnyng_backend.host_runtime import DockerRuntime
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.host_workspace_routes import router as workspace_router
 from fesnyng_backend.peer_configuration import PeerConfigurationStore
 from fesnyng_backend.peer_configuration_routes import router as peer_configuration_router
 from fesnyng_backend.peer_delivery import PeerDeliveryService
@@ -132,4 +133,5 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.include_router(peer_configuration_router)
     app.include_router(peer_delivery_router)
     app.include_router(peer_discovery_router)
+    app.include_router(workspace_router)
     return app

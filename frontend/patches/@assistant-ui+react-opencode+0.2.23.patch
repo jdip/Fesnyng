@@ -1,0 +1,277 @@
+diff --git a/node_modules/@assistant-ui/react-opencode/dist/OpenCodeThreadController.js b/node_modules/@assistant-ui/react-opencode/dist/OpenCodeThreadController.js
+index 213091b..42b605f 100644
+--- a/node_modules/@assistant-ui/react-opencode/dist/OpenCodeThreadController.js
++++ b/node_modules/@assistant-ui/react-opencode/dist/OpenCodeThreadController.js
+@@ -110,6 +110,11 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 	unsubscribeFromEvents = null;
+ 	loadPromise = null;
+ 	reconnectSyncToken = 0;
++	interactionSyncToken = 0;
++	permissionRevision = 0;
++	questionRevision = 0;
++	permissionChanges = /* @__PURE__ */ new Map();
++	questionChanges = /* @__PURE__ */ new Map();
+ 	childControllersById = /* @__PURE__ */ new Map();
+ 	childSessionIdByPartId = /* @__PURE__ */ new Map();
+ 	ancestorSessionIds;
+@@ -169,6 +174,71 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 		this.childSessionIdByPartId.clear();
+ 		this.listeners.clear();
+ 	}
++	recordPermissionChange(id, request) {
++		this.permissionRevision++;
++		this.permissionChanges.set(id, { revision: this.permissionRevision, request });
++	}
++	recordQuestionChange(id, request) {
++		this.questionRevision++;
++		this.questionChanges.set(id, { revision: this.questionRevision, request });
++	}
++	clearChangesThrough(changes, revision) {
++		for (const [id, change] of changes) if (change.revision <= revision) changes.delete(id);
++	}
++	synchronizePendingPermissions(items, startedAtRevision) {
++		const pending = {};
++		for (const item of items) {
++			const request = toPermissionRequest(item);
++			if (request?.sessionId === this.sessionId) pending[request.id] = request;
++		}
++		for (const [id, change] of this.permissionChanges) {
++			if (change.revision <= startedAtRevision) continue;
++			if (change.request) pending[id] = change.request;
++			else delete pending[id];
++		}
++		this.clearChangesThrough(this.permissionChanges, startedAtRevision);
++		this.state = {
++			...this.state,
++			interactions: {
++				...this.state.interactions,
++				permissions: { ...this.state.interactions.permissions, pending }
++			}
++		};
++		this.notifyListeners();
++	}
++	synchronizePendingQuestions(items, startedAtRevision) {
++		const pending = {};
++		for (const item of items) {
++			const request = toQuestionRequest(item);
++			if (request?.sessionID === this.sessionId) pending[request.id] = request;
++		}
++		for (const [id, change] of this.questionChanges) {
++			if (change.revision <= startedAtRevision) continue;
++			if (change.request) pending[id] = change.request;
++			else delete pending[id];
++		}
++		this.clearChangesThrough(this.questionChanges, startedAtRevision);
++		this.state = {
++			...this.state,
++			interactions: {
++				...this.state.interactions,
++				questions: { ...this.state.interactions.questions, pending }
++			}
++		};
++		this.notifyListeners();
++	}
++	async synchronizePendingInteractions() {
++		const token = ++this.interactionSyncToken;
++		const permissionRevision = this.permissionRevision;
++		const questionRevision = this.questionRevision;
++		const [permissions, questions] = await Promise.allSettled([
++			this.client.permission.list(void 0, OPEN_CODE_REQUEST_OPTIONS),
++			this.client.question.list(void 0, OPEN_CODE_REQUEST_OPTIONS)
++		]);
++		if (token !== this.interactionSyncToken) return;
++		if (permissions.status === "fulfilled") this.synchronizePendingPermissions(permissions.value.data ?? [], permissionRevision);
++		if (questions.status === "fulfilled") this.synchronizePendingQuestions(questions.value.data ?? [], questionRevision);
++	}
+ 	rebuildChildSessionIndex() {
+ 		this.childSessionIdByPartId.clear();
+ 		for (const message of Object.values(this.state.messagesById)) for (const part of message.parts) {
+@@ -266,30 +336,7 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 				sessionId: this.sessionId
+ 			});
+ 		});
+-		this.client.permission.list(void 0, OPEN_CODE_REQUEST_OPTIONS).catch(() => null).then((response) => {
+-			if (!response || token !== this.reconnectSyncToken) return;
+-			for (const item of response.data ?? []) {
+-				const request = toPermissionRequest(item);
+-				if (!request || request.sessionId !== this.sessionId) continue;
+-				if (request.id in this.state.interactions.permissions.pending) continue;
+-				this.dispatch({
+-					type: "permission.asked",
+-					request
+-				});
+-			}
+-		});
+-		this.client.question.list(void 0, OPEN_CODE_REQUEST_OPTIONS).catch(() => null).then((response) => {
+-			if (!response || token !== this.reconnectSyncToken) return;
+-			for (const item of response.data ?? []) {
+-				const request = toQuestionRequest(item);
+-				if (!request || request.sessionID !== this.sessionId) continue;
+-				if (request.id in this.state.interactions.questions.pending) continue;
+-				this.dispatch({
+-					type: "question.asked",
+-					request
+-				});
+-			}
+-		});
++		this.synchronizePendingInteractions().catch(() => void 0);
+ 	}
+ 	dispose() {
+ 		this.unsubscribeFromEvents?.();
+@@ -317,13 +364,14 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 	async load(force = false) {
+ 		if (this.loadPromise && !force) return this.loadPromise;
+ 		this.dispatch({ type: "history.loading" });
+-		const request = Promise.all([this.client.session.get({ sessionID: this.sessionId }, OPEN_CODE_REQUEST_OPTIONS), this.client.session.messages({ sessionID: this.sessionId }, OPEN_CODE_REQUEST_OPTIONS)]).then(([sessionResponse, messagesResponse]) => {
++		const request = Promise.all([this.client.session.get({ sessionID: this.sessionId }, OPEN_CODE_REQUEST_OPTIONS), this.client.session.messages({ sessionID: this.sessionId }, OPEN_CODE_REQUEST_OPTIONS)]).then(async ([sessionResponse, messagesResponse]) => {
+ 			if (this.loadPromise !== request) return;
+ 			this.dispatch({
+ 				type: "history.loaded",
+ 				session: sessionResponse.data ?? null,
+ 				messages: (messagesResponse.data ?? []).slice()
+ 			});
++			await this.synchronizePendingInteractions();
+ 		}).catch((error) => {
+ 			if (this.loadPromise !== request) throw error;
+ 			this.dispatch({
+@@ -449,6 +497,7 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 			requestID: permissionId,
+ 			reply: response
+ 		}, OPEN_CODE_REQUEST_OPTIONS);
++		this.recordPermissionChange(permissionId, null);
+ 		this.dispatch({
+ 			type: "permission.replied",
+ 			permissionId,
+@@ -460,6 +509,7 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 			requestID: questionId,
+ 			answers: answers.slice()
+ 		}, OPEN_CODE_REQUEST_OPTIONS);
++		this.recordQuestionChange(questionId, null);
+ 		this.dispatch({
+ 			type: "question.replied",
+ 			questionId,
+@@ -468,6 +518,7 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 	}
+ 	async rejectQuestion(questionId) {
+ 		await this.client.question.reject({ requestID: questionId }, OPEN_CODE_REQUEST_OPTIONS);
++		this.recordQuestionChange(questionId, null);
+ 		this.dispatch({
+ 			type: "question.rejected",
+ 			questionId
+@@ -577,39 +628,54 @@ var OpenCodeThreadController = class OpenCodeThreadController {
+ 				return;
+ 			case "permission.asked": {
+ 				const request = extractPermissionRequest(event);
+-				if (request) this.dispatch({
+-					type: "permission.asked",
+-					request
+-				});
++				if (request) {
++					this.recordPermissionChange(request.id, request);
++					this.dispatch({
++						type: "permission.asked",
++						request
++					});
++				}
+ 				return;
+ 			}
+ 			case "permission.replied":
+-				if (typeof event.properties.requestID === "string" && (event.properties.reply === "once" || event.properties.reply === "always" || event.properties.reply === "reject")) this.dispatch({
+-					type: "permission.replied",
+-					permissionId: event.properties.requestID,
+-					reply: event.properties.reply
+-				});
++				if (typeof event.properties.requestID === "string" && (event.properties.reply === "once" || event.properties.reply === "always" || event.properties.reply === "reject")) {
++					this.recordPermissionChange(event.properties.requestID, null);
++					this.dispatch({
++						type: "permission.replied",
++						permissionId: event.properties.requestID,
++						reply: event.properties.reply
++					});
++				}
+ 				return;
+ 			case "question.asked": {
+ 				const request = extractQuestionRequest(event);
+-				if (request) this.dispatch({
+-					type: "question.asked",
+-					request
+-				});
++				if (request) {
++					this.recordQuestionChange(request.id, request);
++					this.dispatch({
++						type: "question.asked",
++						request
++					});
++				}
+ 				return;
+ 			}
+ 			case "question.replied":
+-				if (typeof event.properties.requestID === "string" && Array.isArray(event.properties.answers)) this.dispatch({
+-					type: "question.replied",
+-					questionId: event.properties.requestID,
+-					answers: event.properties.answers
+-				});
++				if (typeof event.properties.requestID === "string" && Array.isArray(event.properties.answers)) {
++					this.recordQuestionChange(event.properties.requestID, null);
++					this.dispatch({
++						type: "question.replied",
++						questionId: event.properties.requestID,
++						answers: event.properties.answers
++					});
++				}
+ 				return;
+ 			case "question.rejected":
+-				if (typeof event.properties.requestID === "string") this.dispatch({
+-					type: "question.rejected",
+-					questionId: event.properties.requestID
+-				});
++				if (typeof event.properties.requestID === "string") {
++					this.recordQuestionChange(event.properties.requestID, null);
++					this.dispatch({
++						type: "question.rejected",
++						questionId: event.properties.requestID
++					});
++				}
+ 				return;
+ 		}
+ 		this.dispatch({
+diff --git a/node_modules/@assistant-ui/react-opencode/dist/openCodeThreadListAdapter.js b/node_modules/@assistant-ui/react-opencode/dist/openCodeThreadListAdapter.js
+index 31bbfc1..c202844 100644
+--- a/node_modules/@assistant-ui/react-opencode/dist/openCodeThreadListAdapter.js
++++ b/node_modules/@assistant-ui/react-opencode/dist/openCodeThreadListAdapter.js
+@@ -52,8 +52,9 @@ const createOpenCodeThreadListAdapter = (client) => ({
+ 			externalId: response.data.id
+ 		};
+ 	},
+-	generateTitle: async (remoteId) => {
+-		await client.session.summarize({ sessionID: remoteId }, OPEN_CODE_REQUEST_OPTIONS);
++	generateTitle: async () => {
++		// OpenCode generates session titles itself. Its `summarize` endpoint
++		// compacts conversation history and is not a title generator.
+ 		return new ReadableStream({ start(controller) {
+ 			controller.close();
+ 		} });
+diff --git a/node_modules/@assistant-ui/react-opencode/src/openCodeThreadListAdapter.ts b/node_modules/@assistant-ui/react-opencode/src/openCodeThreadListAdapter.ts
+index b1ea661..dcae270 100644
+--- a/node_modules/@assistant-ui/react-opencode/src/openCodeThreadListAdapter.ts
++++ b/node_modules/@assistant-ui/react-opencode/src/openCodeThreadListAdapter.ts
+@@ -90,15 +90,10 @@ export const createOpenCodeThreadListAdapter = (
+       externalId: response.data.id,
+     };
+   },
+-  generateTitle: async (remoteId: string) => {
+-    await client.session.summarize(
+-      {
+-        sessionID: remoteId,
+-      },
+-      OPEN_CODE_REQUEST_OPTIONS,
+-    );
+-    // Title updates arrive through the OpenCode event stream, so this
+-    // placeholder stream only satisfies the remote thread list contract.
++  generateTitle: async () => {
++    // OpenCode generates session titles itself. Its `summarize` endpoint
++    // compacts conversation history, so using it here races a new session's
++    // first prompt and must never be used as a title generator.
+     return new ReadableStream({
+       start(controller) {
+         controller.close();

@@ -118,7 +118,7 @@ class Interactions:
     ) -> dict[str, Any]:
         if kind not in {"question", "permission"}:
             raise ValueError("Unknown native interaction kind")
-        payload = _reply_payload(kind, answer)
+        payload, path = _reply_request(kind, request_id, answer)
         session = self.host.session(organization_id, agent_id, session_id)
         async with self.runtime.lock(agent_id):
             if self._has_operation(str(operation_id)):
@@ -156,10 +156,108 @@ class Interactions:
                 await self.runtime.request(
                     organization_id,
                     agent_id,
-                    f"/{kind}/{request_id}/reply",
+                    path,
                     method="POST",
                     body=payload,
                     directory=session["directory"],
+                )
+            except RuntimeUnavailable as error:
+                self._set_operation_state(str(operation_id), "uncertain", str(error))
+                raise
+            except asyncio.CancelledError:
+                self._set_operation_state(
+                    str(operation_id),
+                    "uncertain",
+                    "Host stopped during native interaction reply; inspect before retrying",
+                )
+                raise
+        self._set_operation_state(str(operation_id), "completed")
+        return self._operation(organization_id, agent_id, str(operation_id))
+
+    async def reject_question(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        operation_id: UUID,
+        request_id: str,
+        author: Actor,
+    ) -> dict[str, Any]:
+        """Persist a native question rejection before asking OpenCode to reject it."""
+        return await self.reply(
+            organization_id,
+            agent_id,
+            session_id,
+            operation_id,
+            request_id,
+            "question",
+            {"reject": True},
+            author,
+        )
+
+    async def reply_scoped(
+        self,
+        organization_id: str,
+        agent_id: str,
+        owner_session_id: str,
+        native_session_id: str,
+        native_directory: str,
+        operation_id: UUID,
+        request_id: str,
+        kind: InteractionKind,
+        answer: object,
+        author: Actor,
+    ) -> dict[str, Any]:
+        """Reply to a proven native child while retaining its mapped root as owner.
+
+        Child sessions are native execution descendants, not independently
+        configured Fesnyng threads.  The durable receipt and policy therefore
+        remain on the mapped root, while native pending/reply calls use the
+        verified child's session and directory.
+        """
+        if kind not in {"question", "permission"}:
+            raise ValueError("Unknown native interaction kind")
+        payload, path = _reply_request(kind, request_id, answer)
+        self.host.session(organization_id, agent_id, owner_session_id)
+        async with self.runtime.lock(agent_id):
+            if self._has_operation(str(operation_id)):
+                return self._start_reply(
+                    organization_id,
+                    agent_id,
+                    owner_session_id,
+                    operation_id,
+                    request_id,
+                    kind,
+                    answer,
+                    author,
+                )
+            self._require_reply_admission(organization_id, agent_id, owner_session_id)
+            pending = await self._pending_native(
+                organization_id, agent_id, native_session_id, native_directory, kind
+            )
+            if not any(item.get("id") == request_id for item in pending):
+                raise ValueError("Native interaction is not pending for this thread")
+            self._require_reply_admission(organization_id, agent_id, owner_session_id)
+            receipt = self._start_reply(
+                organization_id,
+                agent_id,
+                owner_session_id,
+                operation_id,
+                request_id,
+                kind,
+                answer,
+                author,
+            )
+            if receipt["state"] != "submitting":
+                return receipt
+            try:
+                await self.runtime.request(
+                    organization_id,
+                    agent_id,
+                    path,
+                    method="POST",
+                    body=payload,
+                    directory=native_directory,
                 )
             except RuntimeUnavailable as error:
                 self._set_operation_state(str(operation_id), "uncertain", str(error))
@@ -196,6 +294,30 @@ class Interactions:
             or receipt["kind"] != kind
         ):
             raise LookupError("Interaction operation does not belong to this native request")
+        return receipt
+
+    def existing_reply(
+        self,
+        organization_id: str,
+        agent_id: str,
+        operation_id: UUID,
+        request_id: str,
+        kind: InteractionKind,
+        answer: object,
+        author: Actor,
+    ) -> dict[str, Any] | None:
+        """Return a matching durable receipt before a retry rechecks native pending state."""
+        try:
+            receipt = self._operation(organization_id, agent_id, str(operation_id))
+        except LookupError:
+            return None
+        if (
+            receipt["request_id"] != request_id
+            or receipt["kind"] != kind
+            or receipt["answer"] != answer
+            or receipt["author"] != author.model_dump(mode="json")
+        ):
+            raise ValueError("Interaction operation identity conflict")
         return receipt
 
     def put_policy(
@@ -568,19 +690,38 @@ class Interactions:
         state = statuses.get(session_id, {})
         return isinstance(state, dict) and state.get("type", "idle") == "idle"
 
+    async def _pending_native(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        directory: str,
+        kind: InteractionKind,
+    ) -> list[dict[str, Any]]:
+        result = await self.runtime.request(
+            organization_id, agent_id, f"/{kind}", directory=directory
+        )
+        if not isinstance(result, list) or not all(isinstance(entry, dict) for entry in result):
+            raise RuntimeUnavailable("Native pending interactions response is invalid")
+        return [entry for entry in result if entry.get("sessionID") == session_id]
 
-def _reply_payload(kind: InteractionKind, answer: object) -> dict[str, Any]:
+
+def _reply_request(
+    kind: InteractionKind, request_id: str, answer: object
+) -> tuple[dict[str, Any], str]:
     if kind == "question":
+        if answer == {"reject": True}:
+            return {}, f"/question/{request_id}/reject"
         if not (
             isinstance(answer, list)
             and all(isinstance(values, list) for values in answer)
             and all(isinstance(value, str) for values in answer for value in values)
         ):
             raise ValueError("Question answers must be nested strings")
-        return {"answers": answer}
+        return {"answers": answer}, f"/question/{request_id}/reply"
     if answer not in {"once", "reject"}:
         raise ValueError("Permission replies must be once or reject")
-    return {"reply": answer}
+    return {"reply": answer}, f"/permission/{request_id}/reply"
 
 
 def _operation(row: sqlite3.Row) -> dict[str, Any]:

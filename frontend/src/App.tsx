@@ -1,34 +1,109 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { readWorkspaceLocation, saveWorkspaceLocation } from './workspace-location';
+import { ConversationBoundary } from './ConversationBoundary';
+import { Activity } from './Activity';
+import { ThreadContext } from './ThreadContext';
+const Conversation = lazy(async () => ({ default: (await import('./Conversation')).Conversation }));
+import { AgentSettings } from './AgentSettings';
+import { OrganizationSettings } from './OrganizationSettings';
+import { AgentMemory } from './AgentMemory';
+import { api, ApiError, errorMessage, type LoginSession, type Organization, type Agent, type Member } from './workspace-api';
 
+function Brand() { return <div className="brand"><span className="brand-mark" aria-hidden="true">f</span>Fesnyng</div>; }
 export function App() {
-  const [status, setStatus] = useState('Connecting to control plane…');
-
+  const [session, setSession] = useState<LoginSession | null | undefined>();
+  const [error, setError] = useState('');
   useEffect(() => {
     const controller = new AbortController();
-    void fetch('/api/health', { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error('Control plane unavailable');
-        const health: unknown = await response.json();
-        if (typeof health !== 'object' || health === null ||
-            !('service' in health) || health.service !== 'control-plane' ||
-            !('status' in health) || health.status !== 'ok') {
-          throw new Error('Unexpected service response');
-        }
-        if (!controller.signal.aborted) setStatus('Control plane connected');
-      })
-      .catch(() => { if (!controller.signal.aborted) setStatus('Control plane unavailable'); });
+    void api<LoginSession>('/auth/session', { signal: controller.signal }).then(setSession).catch((cause: unknown) => {
+      if (controller.signal.aborted) return;
+      setSession(null);
+      if (!(cause instanceof ApiError && cause.status === 401)) setError(errorMessage(cause));
+    });
     return () => controller.abort();
   }, []);
+  if (session === undefined) return <div className="sign-in"><p role="status">Connecting to your workspace…</p></div>;
+  if (!session) return <SignIn onLogin={setSession} initialError={error} />;
+  return <Workspace key={session.user.id} session={session} onLogout={() => setSession(null)} />;
+}
+function SignIn({ onLogin, initialError }: { onLogin: (session: LoginSession) => void; initialError: string }) {
+  const [error, setError] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+  return <main className="sign-in"><div className="sign-in-card"><Brand /><h1>Your agent organization.</h1><p className="page-intro">Sign in to work with your team.</p>
+    <form className="app-form" onSubmit={(event) => {
+      event.preventDefault(); const data = new FormData(event.currentTarget); setBusy(true); setError('');
+      void api<LoginSession>('/auth/login', { method: 'POST', body: { login: data.get('login'), password: data.get('password') } }).then(onLogin).catch((cause: unknown) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    }}><label>Login<input className="app-input" name="login" autoComplete="username" required /></label><label>Password<input className="app-input" name="password" type="password" autoComplete="current-password" required /></label>
+      {error && <p className="app-error" role="alert">{error}</p>}<button className="app-button primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+    </form></div></main>;
+}
 
-  return (
-    <main>
-      <p className="eyebrow">Persistent agent organizations</p>
-      <h1>Fesnyng</h1>
-      <p className="intro">A shared home for your agent organization.</p>
-      <section aria-label="Connection status">
-        <span className="status-icon" aria-hidden="true">◉</span>
-        <div><p role="status">{status}</p><p className="detail">Application foundation · Organization workspace in development</p></div>
-      </section>
-    </main>
-  );
+function Workspace({ session, onLogout }: { session: LoginSession; onLogout: () => void }) {
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [organization, setOrganization] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<Organization[]>('/organizations', { signal: controller.signal }).then((items) => {
+      if (controller.signal.aborted) return;
+      setLoading(false); setOrganizations(items); const saved = readWorkspaceLocation().organization; setOrganization(items.find((item) => item.id === saved)?.id ?? items[0]?.id ?? '');
+    }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, []);
+  if (error) return <main className="workspace-page"><p className="app-error" role="alert">{error}</p><button className="app-button" onClick={onLogout}>Sign in again</button></main>;
+  if (loading) return <div className="app-empty" role="status">Loading organizations…</div>;
+  if (!organization) return <main className="sign-in"><div className="sign-in-card"><Brand /><h1>Create your organization</h1><p className="page-intro">Bring your persistent agents together.</p><form className="app-form" onSubmit={(event) => {
+    event.preventDefault(); const name = new FormData(event.currentTarget).get('name'); setCreating(true);
+    void api<Organization>('/organizations', { method: 'POST', csrf: session.csrf_token, body: { name } }).then((created) => { setOrganizations((items) => [...items, created]); saveWorkspaceLocation(created.id); setOrganization(created.id); }).catch((cause: unknown) => setError(errorMessage(cause)));
+  }}><label>Organization name<input className="app-input" name="name" required maxLength={120} /></label><button className="app-button primary" disabled={creating}>Create organization</button>{organizations.length > 0 && <button className="app-button quiet" type="button" onClick={() => setOrganization(organizations[0].id)}>Cancel</button>}</form></div></main>;
+  return <OrganizationWorkspace key={organization} organization={organization} organizations={organizations} onOrganization={(id) => { setCreating(false); saveWorkspaceLocation(id === '__new__' ? '' : id); setOrganization(id === '__new__' ? '' : id); }} session={session} onLogout={onLogout} />;
+}
+function OrganizationWorkspace({ organization, organizations, onOrganization, session, onLogout }: { organization: string; organizations: Organization[]; onOrganization: (id: string) => void; session: LoginSession; onLogout: () => void }) {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [selected, setSelected] = useState(() => readWorkspaceLocation().organization === organization ? readWorkspaceLocation().agent ?? '' : '');
+  const [thread, setThread] = useState<string | undefined>(() => readWorkspaceLocation().organization === organization ? readWorkspaceLocation().thread : undefined);
+  const [threadMount, setThreadMount] = useState(0);
+  const [view, setView] = useState(() => readWorkspaceLocation().organization === organization && readWorkspaceLocation().agent ? 'conversation' : 'overview');
+  const [search, setSearch] = useState('');
+  const [error, setError] = useState('');
+  const [mobile, setMobile] = useState(false);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.all([api<Agent[]>(`/organizations/${organization}/agents`, { signal: controller.signal }), api<Member[]>(`/organizations/${organization}/members`, { signal: controller.signal })]).then(([items, people]) => {
+      if (controller.signal.aborted) return; setAgents(items); setMembers(people);
+    }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, [organization, version]);
+  const manager = ['owner', 'admin'].includes(members.find((member) => member.user_id === session.user.id)?.role ?? '');
+  const agent = agents.find((item) => item.id === selected);
+  const navigate = (next: string) => { setView(next); setMobile(false); setError(''); };
+  const openAgent = (id: string, nativeSession?: string) => { saveWorkspaceLocation(organization, id, nativeSession); setSelected(id); setThread(nativeSession); setThreadMount((value) => value + 1); navigate('conversation'); };
+  return <div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><Brand />
+    <label className="app-label">Organization<select className="app-select" value={organization} onChange={(event) => onOrganization(event.target.value)}>{organizations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}<option value="__new__">+ Create organization</option></select></label>
+    <nav className="app-nav"><button aria-current={view === 'activity' ? 'page' : undefined} onClick={() => navigate('activity')}>Activity</button><button aria-current={view === 'overview' ? 'page' : undefined} onClick={() => navigate('overview')}>Overview</button><button aria-current={view === 'chart' ? 'page' : undefined} onClick={() => navigate('chart')}>Reporting chart</button>{manager && <button aria-current={view === 'organization' ? 'page' : undefined} onClick={() => navigate('organization')}>Organization settings</button>}</nav>
+    <div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
+    <input className="app-input" aria-label="Search agents" placeholder="Find an agent…" value={search} onChange={(event) => setSearch(event.target.value)} />
+    <div className="agent-list">{agents.filter((item) => `${item.name} ${item.title}`.toLowerCase().includes(search.toLowerCase())).map((item) => <button key={item.id} className="agent-choice" aria-pressed={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><span>{item.name}<small>{item.title || 'Agent'}</small></span></button>)}</div>
+    <div className="sidebar-footer"><span>{session.user.display_name}</span><button className="app-button quiet" onClick={() => { void api('/auth/logout', { method: 'POST', csrf: session.csrf_token }).then(onLogout).catch((cause: unknown) => setError(errorMessage(cause))); }}>Sign out</button></div>
+  </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1>{view === 'activity' ? 'Activity' : view === 'overview' ? 'Your organization' : view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['overview', 'chart', 'organization', 'activity'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
+    <div className="header-actions">{agent && !['overview', 'chart', 'organization', 'activity'].includes(view) && <><button className="app-button" onClick={() => navigate('conversation')}>Threads</button><button className="app-button" onClick={() => navigate('memory')}>Memory</button>{manager && <button className="app-button" onClick={() => navigate('agent-settings')}>Agent settings</button>}</>}<button className="app-button quiet" onClick={() => setVersion((current) => current + 1)}>Refresh</button></div></header>
+    {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content">
+    <Activity organization={organization} agents={agents} onOpen={openAgent} compact={view !== 'activity'} />
+    {view === 'conversation' && agent && <div className="conversation-region" style={{ display: 'flex', flexDirection: 'column' }}>{thread && <ThreadContext key={`${agent.id}:${thread}`} organization={organization} agent={agent.id} session={thread} csrf={session.csrf_token} onOpen={openAgent} />}<ConversationBoundary key={`${agent.id}:${threadMount}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}><Conversation key={`${agent.id}:${threadMount}`} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={session.csrf_token} sessionId={thread} onSessionChange={(id) => { setThread(id); saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} /></Suspense></ConversationBoundary></div>}
+    {view === 'overview' && <div className="workspace-page"><h2>A shared home for your team.</h2><p className="page-intro">Open an agent to continue a thread, inspect its memory, or start new work.</p><div className="form-grid">{agents.map((item) => <button className="app-panel" key={item.id} onClick={() => openAgent(item.id)} style={{ textAlign: 'left' }}><h3>{item.name}</h3><p className="muted">{item.title || 'Agent'}</p><span className="app-badge">{item.configuration_status ?? 'Available'}</span></button>)}</div>{!agents.length && <p className="app-empty">{manager ? 'Create your first agent to get started.' : 'Your organization has no agents yet.'}</p>}</div>}
+    {view === 'agent-settings' && manager && <AgentSettings key={agent?.id ?? 'new'} organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} onSaved={(saved) => { setAgents((items) => [...items.filter((item) => item.id !== saved.id), saved]); setSelected(saved.id); }} />}
+    {view === 'organization' && manager && <OrganizationSettings organization={organization} csrf={session.csrf_token} agents={agents} onChanged={() => setVersion((current) => current + 1)} />}
+    {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
+    {view === 'chart' && <div className="workspace-page"><p className="page-intro">Reporting relationships help agents find the right collaborator.</p><ReportingChart agents={agents} onOpen={openAgent} /></div>}
+    </div></main></div>;
+}
+function ReportingChart({ agents, onOpen }: { agents: Agent[]; onOpen: (id: string) => void }) {
+  function branch(parent: string | null, seen: Set<string>) {
+    return <ul className="chart-list">{agents.filter((agent) => (agent.reports_to_agent_id ?? null) === parent && !seen.has(agent.id)).map((agent) => <li key={agent.id}><button className="chart-node" onClick={() => onOpen(agent.id)}><span className="agent-avatar">{agent.name.slice(0, 2).toUpperCase()}</span><span>{agent.name}<small>{agent.title || 'Agent'}</small></span></button>{agents.some((item) => item.reports_to_agent_id === agent.id) && branch(agent.id, new Set([...seen, agent.id]))}</li>)}</ul>;
+  }
+  return branch(null, new Set());
 }

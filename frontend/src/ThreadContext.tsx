@@ -1,0 +1,41 @@
+import { useEffect, useState } from 'react';
+import { agentPath, api, errorMessage, type Rule } from './workspace-api';
+import { ThreadArtifact } from './ThreadArtifact';
+import { RuleEditor } from './RuleEditor';
+export type Delivery = { id: string; session_id: string; state: string; author: { kind: string; id: string; name: string; session_id?: string }; payload: { text: string; mode: string; origin_id?: string }; updated_at: number; error?: string };
+export function ThreadContext({ organization, agent, session, csrf, onOpen }: { organization: string; agent: string; session: string; csrf: string; onOpen: (agent: string, session: string) => void }) {
+  const [panel, setPanel] = useState('');
+  return <div className="thread-context"><div className="app-actions">{[['activity', 'Thread activity'], ['policy', 'Thread permissions'], ['files', 'Files'], ['steering', 'Steer or invoke workflow']].map(([key, title]) => <button key={key} className="app-button quiet" aria-expanded={panel === key} onClick={() => setPanel(panel === key ? '' : key)}>{title}</button>)}</div>{panel === 'activity' && <DeliveryActivity organization={organization} agent={agent} session={session} csrf={csrf} onOpen={onOpen} />}{panel === 'policy' && <ThreadPolicy organization={organization} agent={agent} session={session} csrf={csrf} />}{panel === 'files' && <ThreadArtifact organization={organization} agent={agent} session={session} />}
+    {panel === 'steering' && <ThreadSteering organization={organization} agent={agent} session={session} csrf={csrf} />}</div>;
+}
+function DeliveryActivity({ organization, agent, session, csrf, onOpen }: { organization: string; agent: string; session: string; csrf: string; onOpen: (agent: string, session: string) => void }) {
+  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
+  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
+  const path = `${agentPath(organization, agent)}/sessions/${encodeURIComponent(session)}/dispatches`;
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+    async function poll() {
+      try { const rows = await api<Delivery[]>(path, { signal: controller.signal }); if (!controller.signal.aborted) { setDeliveries(rows); setError(''); } } catch (cause) { if (!controller.signal.aborted) setError(errorMessage(cause)); }
+      if (!controller.signal.aborted) timer = window.setTimeout(() => { void poll(); }, 5000);
+    }
+    void poll(); return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [path, revision]);
+  return <div style={{ maxHeight: 320, overflow: 'auto' }}>{error && <p className="app-error" role="alert">{error}</p>}{!deliveries.length && <p className="muted">No delivery records in this thread yet.</p>}{[...deliveries].reverse().map((delivery) => <article className="activity-item" key={delivery.id}><div className="app-actions"><strong>{delivery.author.name}</strong><span className="app-badge">{delivery.author.kind}</span><span>{delivery.state} · {delivery.payload.mode}</span></div><p>{delivery.payload.text.slice(0, 220)}{delivery.payload.text.length > 220 ? '…' : ''}</p>{delivery.author.kind === 'agent' && delivery.author.session_id && <button className="app-button" onClick={() => onOpen(delivery.author.id, delivery.author.session_id!)}>Open source thread</button>}{delivery.payload.origin_id && <p className="muted">Linked to originating request {delivery.payload.origin_id.slice(0, 8)}</p>}{delivery.error && <p className="app-error">{delivery.error}</p>}{['unresolved', 'uncertain', 'stopping', 'submitting'].includes(delivery.state) && <details><summary>Investigate outcome</summary><p className="muted">Inspect the native conversation and external effects before resolving. Resolution records the finding without repeating the work.</p><button className="app-button" onClick={() => { void api(`${path}/${delivery.id}/reconcile`, { method: 'POST', csrf }).then(() => setRevision((value) => value + 1)).catch((cause: unknown) => setError(errorMessage(cause))); }}>Reconcile available evidence</button><form className="app-form" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void api(`${path}/${delivery.id}/resolve`, { method: 'POST', csrf, body: { operation_id: crypto.randomUUID(), outcome: data.get('outcome'), evidence: data.get('evidence') } }).then(() => setRevision((value) => value + 1)).catch((cause: unknown) => setError(errorMessage(cause))); }}><label>Observed outcome<select name="outcome" className="app-select"><option value="completed">Completed</option><option value="failed">Failed</option></select></label><label>Investigation evidence<textarea name="evidence" required className="app-textarea" /></label><div><button className="app-button">Record resolution</button></div></form></details>}</article>)}</div>;
+}
+type ThreadPolicyRecord = { desired_revision: number; applied_revision: number; rules: Rule[]; effective_rules: Rule[] };
+function ThreadPolicy({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {
+  const [policy, setPolicy] = useState<ThreadPolicyRecord>();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const path = `${agentPath(organization, agent)}/sessions/${encodeURIComponent(session)}/policy`;
+  useEffect(() => { const controller = new AbortController(); void api<ThreadPolicyRecord>(path, { signal: controller.signal }).then(setPolicy).catch((cause: unknown) => { if (!controller.signal.aborted) setError(errorMessage(cause)); }); return () => controller.abort(); }, [path]);
+  return <div className="app-panel" style={{ maxHeight: 360, overflow: 'auto' }}>{error && <p className="app-error" role="alert">{error}</p>}{policy && <form className="app-form" onSubmit={(event) => { event.preventDefault(); setBusy(true); setError(''); void api<ThreadPolicyRecord>(path, { method: 'PUT', csrf, body: { expected_revision: policy.desired_revision, rules: policy.rules } }).then(setPolicy).catch((cause: unknown) => setError(errorMessage(cause))).finally(() => setBusy(false)); }}><p className="muted">Organization mandatory rules always take precedence. Desired revision {policy.desired_revision} · Applied {policy.applied_revision}.</p><RuleEditor rules={policy.rules} onChange={(rules) => setPolicy({ ...policy, rules })} /><details><summary>Effective permissions</summary><ul>{policy.effective_rules.map((rule, index) => <li key={index}>{rule.permission} · {rule.pattern} · {rule.action}</li>)}</ul></details><div><button className="app-button" disabled={busy}>Save thread permissions</button></div></form>}</div>;
+}
+function ThreadSteering({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  return <form className="app-form app-panel" onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const values = new FormData(form); setBusy(true); setError(''); setNotice(''); void api(`${agentPath(organization, agent)}/sessions/${encodeURIComponent(session)}/dispatches`, { method: 'POST', csrf, body: { id: crypto.randomUUID(), text: values.get('text'), command: values.get('command') || null, mode: values.get('mode') } }).then(() => { form.reset(); setNotice('Request received by the host.'); }).catch((cause: unknown) => setError(errorMessage(cause))).finally(() => setBusy(false)); }}><div className="form-grid"><label>Delivery<select className="app-select" name="mode"><option value="queued">Queue after current work</option><option value="steering">Steer at a safe boundary</option></select></label><label>Explicit workflow name (optional)<input className="app-input" name="command" placeholder="Configured workflow name" pattern="[A-Za-z0-9_/-]+" /></label></div><label>Instructions<textarea name="text" className="app-textarea" maxLength={200000} /></label>{error && <p className="app-error" role="alert">{error}</p>}{notice && <p className="app-notice" role="status">{notice}</p>}<div><button className="app-button" disabled={busy}>Submit request</button></div></form>;
+}
