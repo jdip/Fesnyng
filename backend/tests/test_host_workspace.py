@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from fesnyng_backend.agent_host import create_app
 from fesnyng_backend.agent_models import AgentConfiguration
-from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore
+from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -135,6 +135,105 @@ class EventNative(Native):
                 yield line
 
         yield lines()
+
+
+def test_workspace_lists_threads_by_attributed_incoming_message_recency(tmp_path):
+    """Only admitted human or peer messages affect the mapped thread list order."""
+
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    for session_id in (
+        "ses_human",
+        "ses_peer",
+        "ses_empty",
+        "ses_own",
+        "ses_untrusted",
+        "ses_tie_b",
+        "ses_tie_a",
+    ):
+        store.save_session(org, agent, session_id, f"/workspace/default/{session_id}", session_id)
+    with store.connect() as connection:
+        for session_id, created_at in {
+            "ses_human": 1,
+            "ses_peer": 2,
+            "ses_empty": 6,
+            "ses_own": 5,
+            "ses_untrusted": 4,
+            "ses_tie_b": 3,
+            "ses_tie_a": 3,
+        }.items():
+            connection.execute(
+                "UPDATE host_sessions SET created_at=? WHERE session_id=?", (created_at, session_id)
+            )
+
+    native = Native()
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    for session_id, author in (
+        ("ses_human", Actor(kind="human", id=uuid4(), name="Member")),
+        ("ses_peer", Actor(kind="agent", id=uuid4(), name="Peer")),
+        ("ses_own", Actor(kind="agent", id=UUID(agent), name="This agent")),
+    ):
+        receipt = dispatches.enqueue(
+            org, agent, session_id, Submission(id=uuid4(), text="Incoming"), author
+        )
+        with store.connect() as connection:
+            connection.execute(
+                "UPDATE host_dispatches SET created_at=? WHERE id=?",
+                ({"ses_human": 8, "ses_peer": 7, "ses_own": 10}[session_id], receipt["id"]),
+            )
+    stop = dispatches.enqueue(
+        org,
+        agent,
+        "ses_untrusted",
+        Submission(id=uuid4(), mode="stop"),
+        Actor(kind="human", id=uuid4(), name="Member"),
+    )
+    with store.connect() as connection:
+        connection.execute("UPDATE host_dispatches SET created_at=11 WHERE id=?", (stop["id"],))
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    first = workspace.sessions(org, agent)
+    assert [session["id"] for session in first] == [
+        "ses_human",
+        "ses_peer",
+        "ses_empty",
+        "ses_own",
+        "ses_untrusted",
+        "ses_tie_a",
+        "ses_tie_b",
+    ]
+
+    # A later queued peer receipt must take effect on the next façade refresh;
+    # it does not wait for native model execution or react to local agent output.
+    refreshed_receipt = dispatches.enqueue(
+        org,
+        agent,
+        "ses_peer",
+        Submission(id=uuid4(), text="Later peer result"),
+        Actor(kind="agent", id=uuid4(), name="Peer"),
+    )
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE host_dispatches SET created_at=11 WHERE id=?", (refreshed_receipt["id"],)
+        )
+    refreshed = workspace.sessions(org, agent)
+    assert [session["id"] for session in refreshed[:2]] == ["ses_peer", "ses_human"]
 
 
 def test_workspace_facade_scopes_native_history_and_persists_text_prompt(tmp_path):

@@ -120,8 +120,15 @@ class Workspace:
         self.interactions = interactions
 
     def sessions(self, org: str, agent: str, *, archived: bool = False) -> list[dict[str, Any]]:
-        result = []
         sessions = self.host.sessions(org, agent, archived=None if archived else False)
+        incoming = self.dispatches.latest_incoming_at(org, agent)
+        sessions.sort(
+            key=lambda session: (
+                -incoming.get(session["session_id"], session["created_at"] * 1000),
+                session["session_id"],
+            )
+        )
+        result = []
         for session in sessions:
             time = {"created": session["created_at"] * 1000}
             if session["archived_at"] is not None:

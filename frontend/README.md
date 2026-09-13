@@ -18,6 +18,11 @@ New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
 model until an authorized configuration change. An agent is persistent identity,
 rules, tools, skills, and memory that can own multiple threads.
 
+Threads are ordered by their latest incoming human or other-agent message;
+the thread agent's own replies and tool activity do not bump them. Threads with
+no incoming messages use creation time. The list refreshes while the app is
+visible and when returning to it, preserving the selected conversation and draft.
+
 Owners and admins manage agents, organization permissions, membership, and named
 credential profiles. Host registration and networking remain installation/ops
 work. A profile is independently authorized on each host; the UI receives device

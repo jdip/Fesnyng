@@ -124,10 +124,10 @@ export const ThreadListItems: FC<
       className={cn("flex flex-col gap-0.5", className)}
       {...props}
     >
-      <AuiIf condition={(s) => s.threads.isLoading}>
+      <AuiIf condition={(s) => s.threads.isLoading && s.threads.threadIds.length === 0}>
         <ThreadListSkeleton />
       </AuiIf>
-      <AuiIf condition={(s) => !s.threads.isLoading}>
+      <AuiIf condition={(s) => !s.threads.isLoading || s.threads.threadIds.length > 0}>
         <ThreadListItemGroups searchQuery={searchQuery} />
       </AuiIf>
     </div>
