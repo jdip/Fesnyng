@@ -9,8 +9,8 @@ import {
   useOpenCodeRuntimeExtras,
 } from '@assistant-ui/react-opencode';
 import { GitForkIcon } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
-import { Thread, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
+import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
@@ -20,6 +20,7 @@ import {
   ToolGroupTrigger,
 } from './components/assistant-ui/elements/tool-group.aui';
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
+import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
 import './assistant.css';
 
@@ -38,6 +39,15 @@ export type ConversationProps = {
   showThreadList?: boolean;
   /** Reloads the maintained thread inventory without remounting the composer. */
   refreshKey?: number;
+};
+
+type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
+const InlineComposerConfigurationContext = createContext<InlineComposerConfiguration | undefined>(undefined);
+
+const ConversationComposer = ({ autoFocus, allowAttachments }: ThreadComposerProps) => {
+  const configuration = useContext(InlineComposerConfigurationContext);
+  if (!configuration) throw new Error('The conversation composer requires its facade configuration.');
+  return <InlineComposer {...configuration} autoFocus={autoFocus} allowAttachments={allowAttachments} />;
 };
 
 /**
@@ -70,6 +80,7 @@ export function Conversation({
     void runtime.threads.reload().catch((error: unknown) => onError?.(error));
   }, [refreshKey, runtime, onError]);
   const components = useMemo(() => ({
+    Composer: ConversationComposer,
     ToolFallback: OpenCodeToolFallback,
     ToolGroup: PendingApprovalToolGroup,
     MessageAction: () => <OpenCodeForkAction runtime={runtime} onError={onError} />,
@@ -77,10 +88,12 @@ export function Conversation({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <section className="fesnyng-conversation" aria-label="Agent conversation">
-        {showThreadList && <aside><ThreadList /></aside>}
-        <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
-      </section>
+      <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
+        <section className="fesnyng-conversation" aria-label="Agent conversation">
+          {showThreadList && <aside><ThreadList /></aside>}
+          <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
+        </section>
+      </InlineComposerConfigurationContext.Provider>
     </AssistantRuntimeProvider>
   );
 }

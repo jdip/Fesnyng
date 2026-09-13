@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
@@ -35,6 +36,7 @@ _READ_PATHS = {
     "permission",
     "provider",
     "config",
+    "command",
     "event",
     *_ARTIFACT_PATHS,
 }
@@ -199,6 +201,9 @@ async def _relay_events(
         async for chunk in stream.response.aiter_bytes():
             _still_authorized(request, session_token, user_id, organization_id)
             yield chunk
+    except httpx.TransportError:
+        # Finish the response so the maintained client reconnects and refreshes history.
+        return
     finally:
         await stream.close()
 

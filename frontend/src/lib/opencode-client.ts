@@ -4,6 +4,12 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 const WRITE_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 
+async function nativeFailure(response: Response) {
+  const body: unknown = await response.clone().json().catch(() => undefined);
+  const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
+  return new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+}
+
 /**
  * Browser transport for the Fesnyng-owned OpenCode facade.
  *
@@ -19,10 +25,13 @@ export function createFesnyngOpenCodeFetch(csrfToken: string, fetchImpl: FetchLi
 
     if (WRITE_METHODS.has(method)) {
       headers.set('X-CSRF-Token', csrfToken);
-      headers.set('Idempotency-Key', crypto.randomUUID());
+      if (!headers.has('Idempotency-Key')) headers.set('Idempotency-Key', crypto.randomUUID());
     }
 
-    return fetchImpl(input, { ...init, credentials: 'include', headers });
+    return fetchImpl(input, { ...init, credentials: 'include', headers }).then(async (response) => {
+      if (!response.ok) throw await nativeFailure(response);
+      return response;
+    });
   };
 }
 

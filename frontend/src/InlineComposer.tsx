@@ -1,0 +1,183 @@
+import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react';
+import { ArrowUpIcon, ListPlusIcon, SquareIcon } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import type { ThreadComposerProps } from './components/assistant-ui/elements/thread.aui';
+import { createFesnyngOpenCodeFetch } from './lib/opencode-client';
+import { errorMessage } from './workspace-api';
+
+type Workflow = { name: string; description: string };
+type DeliveryMode = 'queued' | 'steering';
+type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: string; sessionId?: string };
+type Admission = { key: string; id: string; sessionId: string; mode: DeliveryMode };
+
+const workflowInventoryUrl = (baseUrl: string) => `${baseUrl.replace(/\/$/, '')}/command`;
+
+async function responseError(response: Response) {
+  const body: unknown = await response.json().catch(() => undefined);
+  const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
+  return typeof detail === 'string' ? detail : `Request failed (${response.status}).`;
+}
+
+/** A product slot around the maintained assistant-ui composer primitives. */
+export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken, sessionId }: InlineComposerProps) {
+  const aui = useAui();
+  const text = useAuiState((state) => state.composer.text);
+  const isRunning = useAuiState((state) => state.thread.isRunning);
+  const threadIdentity = useAuiState((state) => state.threadListItem.id);
+  const nativeSessionId = useAuiState((state) => state.threadListItem.externalId);
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [inventoryError, setInventoryError] = useState('');
+  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow>();
+  const [submissionError, setSubmissionError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const submittingRef = useRef(false);
+  const admissionRef = useRef<Admission | undefined>(undefined);
+  const requestGenerationRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const fetchWithFesnyngAuth = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
+
+  useEffect(() => {
+    requestGenerationRef.current += 1;
+    const controller = new AbortController();
+    void fetchWithFesnyngAuth(workflowInventoryUrl(baseUrl), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response));
+        const value: unknown = await response.json();
+        if (!Array.isArray(value) || !value.every((workflow) => (
+          workflow && typeof workflow === 'object'
+          && typeof workflow.name === 'string' && typeof workflow.description === 'string'
+        ))) throw new Error('The workflow inventory response is invalid.');
+        setWorkflows(value as Workflow[]);
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setInventoryError(`Workflows are unavailable: ${errorMessage(error)}`);
+      });
+    return () => controller.abort();
+  }, [baseUrl, fetchWithFesnyngAuth]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  const slashMatcher = useCallback((value: string, trigger: string, cursor: number) => {
+    if (slashDismissed || !value.startsWith(trigger)) return null;
+    const query = value.slice(trigger.length, cursor);
+    if (/\s/u.test(query)) return null;
+    return { query: query || ' ', offset: 0, endOffset: cursor };
+  }, [slashDismissed]);
+
+  const workflowAdapter = useMemo(() => ({
+    categories: () => [],
+    categoryItems: () => [],
+    search: (query: string) => {
+      const normalized = query.trim().toLocaleLowerCase();
+      return workflows
+        .filter((workflow) => workflow.name.toLocaleLowerCase().includes(normalized))
+        .map((workflow) => ({ id: workflow.name, type: 'workflow', label: workflow.name, description: workflow.description }));
+    },
+  }), [workflows]);
+
+  const resolveSessionId = async () => {
+    if (nativeSessionId) return nativeSessionId;
+    if (sessionId) return sessionId;
+    const initialized = await aui.threadListItem.initialize();
+    return initialized.externalId ?? initialized.remoteId;
+  };
+
+  const sameThread = (requestThreadIdentity: string) => aui.threadListItem.getState().id === requestThreadIdentity;
+  const isCurrentThread = (requestThreadIdentity: string) => isMountedRef.current && sameThread(requestThreadIdentity);
+  const submit = async (requestedMode: DeliveryMode) => {
+    if (submittingRef.current) return;
+    const instructions = text;
+    const workflow = selectedWorkflow;
+    if (!instructions.trim() && !workflow) return;
+    const requestThreadIdentity = threadIdentity;
+    const requestGeneration = requestGenerationRef.current;
+    const key = `${requestThreadIdentity}\u0000${workflow?.name ?? ''}\u0000${instructions}`;
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    setSubmissionError('');
+    setNotice('');
+    try {
+      let currentAdmission = admissionRef.current;
+      if (!currentAdmission || currentAdmission.key !== key) {
+        currentAdmission = { key, id: crypto.randomUUID(), sessionId: await resolveSessionId(), mode: requestedMode };
+        admissionRef.current = currentAdmission;
+      }
+      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(currentAdmission.sessionId)}/prompt_async`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
+        body: JSON.stringify({
+          parts: instructions.trim() ? [{ type: 'text', text: instructions }] : [],
+          command: workflow?.name,
+          mode: currentAdmission.mode,
+        }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      if (requestGeneration === requestGenerationRef.current) admissionRef.current = undefined;
+      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) {
+        if (aui.composer.getState().text === instructions) aui.composer.setText('');
+        setSelectedWorkflow((current) => current === workflow ? undefined : current);
+        setNotice(workflow ? `/${workflow.name} sent.` : currentAdmission.mode === 'steering' ? 'Steering sent.' : 'Queued.');
+      }
+    } catch (error) {
+      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) setSubmissionError(errorMessage(error));
+    } finally {
+      if (requestGeneration === requestGenerationRef.current) {
+        submittingRef.current = false;
+        if (isCurrentThread(requestThreadIdentity)) setIsSubmitting(false);
+      }
+    }
+  };
+
+  const onSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    void submit(isRunning ? 'steering' : 'queued');
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.shiftKey) return;
+    if (!slashDismissed && /^\/[^\s]*$/u.test(text)) {
+      if (event.key === 'Escape') setSlashDismissed(true);
+      return;
+    }
+    if (isRunning && event.key === 'Enter') {
+      event.preventDefault();
+      void submit('steering');
+    }
+  };
+
+  const canSubmit = Boolean(text.trim() || selectedWorkflow) && !isSubmitting;
+  return <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col" onSubmit={onSubmit}>
+      <div data-slot="aui_composer-shell" className="border-border/60 focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color]">
+        {selectedWorkflow && <div className="flex items-center gap-2 px-2 text-sm"><span className="rounded bg-muted px-2 py-1">/{selectedWorkflow.description || selectedWorkflow.name}</span><button type="button" className="text-muted-foreground" aria-label={`Remove workflow ${selectedWorkflow.name}`} onClick={() => setSelectedWorkflow(undefined)}>Remove</button></div>}
+        <ComposerPrimitive.Input placeholder={isRunning ? 'Steer the agent…' : 'Send a message...'} className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none" rows={1} autoFocus={autoFocus} enterKeyHint="send" aria-label="Message input" addAttachmentOnPaste={allowAttachments} onChange={(event) => { if (!event.target.value.startsWith('/')) setSlashDismissed(false); }} onKeyDown={onKeyDown} />
+        <ComposerPrimitive.Unstable_TriggerPopover char="/" matcher={slashMatcher} adapter={inventoryError ? undefined : workflowAdapter}>
+          <ComposerPrimitive.Unstable_TriggerPopover.Action removeOnExecute onExecute={(item) => {
+            const workflow = workflows.find((candidate) => candidate.name === item.id);
+            if (workflow) { setSelectedWorkflow(workflow); setSlashDismissed(false); setSubmissionError(''); setNotice(''); }
+          }} />
+          <ComposerPrimitive.Unstable_TriggerPopoverItems aria-label="Configured workflows">
+            {(items) => <div className="mx-2 rounded border bg-card p-1" role="listbox" aria-label="Configured workflows">
+              {items.length === 0 ? <p className="px-2 py-1 text-sm text-muted-foreground">No configured workflows match.</p> : items.map((item, index) => <ComposerPrimitive.Unstable_TriggerPopoverItem key={item.id} item={item} index={index} className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-muted aria-selected:bg-muted"><span className="font-medium">/{item.description || item.label}</span></ComposerPrimitive.Unstable_TriggerPopoverItem>)}
+            </div>}
+          </ComposerPrimitive.Unstable_TriggerPopoverItems>
+        </ComposerPrimitive.Unstable_TriggerPopover>
+        {text.startsWith('/') && inventoryError && <p className="app-error px-2" role="alert">{inventoryError}</p>}
+        <div className="aui-composer-action-wrapper relative flex items-center justify-between px-1">
+          {isRunning ? <button type="button" className="flex items-center gap-1 text-sm text-muted-foreground" disabled={!canSubmit} onClick={() => void submit('queued')} aria-label="Queue message"><ListPlusIcon className="size-4" /><span>Queue</span></button> : <span aria-hidden="true" />}
+          <div className="flex items-center gap-1.5">
+            {!isRunning && !selectedWorkflow && <button type="button" className="aui-composer-send rounded-full bg-primary p-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void submit('queued')} aria-label="Send message"><ArrowUpIcon className="size-4" /></button>}
+            {(isRunning || selectedWorkflow) && <button type="button" className="flex items-center gap-1 rounded-full bg-primary px-3 py-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void submit(isRunning ? 'steering' : 'queued')} aria-label={isRunning ? 'Steer agent' : 'Run workflow'}><ArrowUpIcon className="size-4" /><span>{isRunning ? 'Steer' : 'Run'}</span></button>}
+            {isRunning && <ComposerPrimitive.Cancel asChild><button type="button" className="rounded-full bg-primary p-2 text-primary-foreground" aria-label="Stop generating"><SquareIcon className="size-4 fill-current" /></button></ComposerPrimitive.Cancel>}
+          </div>
+        </div>
+        {notice && <p className="app-notice px-2" role="status">{notice}</p>}
+        {submissionError && <p className="app-error px-2" role="alert">{submissionError}</p>}
+      </div>
+    </ComposerPrimitive.Root>
+  </ComposerPrimitive.Unstable_TriggerPopoverRoot>;
+}
