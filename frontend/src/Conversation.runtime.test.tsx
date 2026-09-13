@@ -208,3 +208,22 @@ test('renders native question controls without generic Allow or Deny actions', a
   expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
 });
+
+test('refreshes externally created threads without discarding composer text', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  let threads: { id: string; title: string; time: object }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return new Response(JSON.stringify(url.includes('/experimental/session') ? threads : []), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }));
+  const props = { baseUrl: 'http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode', csrfToken: 'csrf-example' };
+  const { rerender } = render(<Conversation {...props} refreshKey={0} />);
+  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Unsent work instructions' } });
+  threads = [{ id: 'external-thread', title: 'Colleague investigation', time: {} }];
+  rerender(<Conversation {...props} refreshKey={1} />);
+  expect(await screen.findByRole('button', { name: 'Colleague investigation' })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Unsent work instructions');
+});

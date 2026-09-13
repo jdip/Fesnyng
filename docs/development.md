@@ -2,7 +2,7 @@
 
 Fesnyng has separate Python/FastAPI control-plane and agent-host services in `backend/`, and a React/TypeScript/Vite application in `frontend/`. The Python package shares contracts while each service owns its SQLite database and schema. Product code and contracts are **Application Code**; setup and delivery scripts are **Tooling**.
 
-The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace is described in [frontend/README.md](../frontend/README.md). Retained full-system verification remains the final child of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10); backend execution alone is not the complete MVP.
+The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace is described in [frontend/README.md](../frontend/README.md). Use the [local retained-MVP guide](local-mvp.md) for one control plane, two local hosts, Docker, login, persistence, and recovery. Retained full-system verification is recorded in [issue #18](https://github.com/jdip/Fesnyng/issues/18), the final child of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10).
 
 ## Install and check
 
@@ -27,7 +27,7 @@ In another terminal:
 npm run dev --prefix frontend
 ```
 
-Vite serves the frontend and proxies `/api` to the Python control plane. Set `FESNYNG_CONTROL_PLANE_URL` when launching Vite to use a different local control-plane URL. The browser never receives a host credential from frontend configuration. Vite is a development server; retained full-system installation and runtime instructions are completed by the final MVP delivery ticket.
+Vite serves the frontend and proxies `/api` to the Python control plane. Set `FESNYNG_CONTROL_PLANE_URL` when launching Vite to use a different local control-plane URL. The browser never receives a host credential from frontend configuration. Vite is a development server; follow the [local retained-MVP guide](local-mvp.md) for the service topology and operational recovery sequence. See issue #18 for live acceptance and delivery evidence.
 
 Inspect rendered behavior in the browser after visual changes. Verify both backend processes through their actual `/health` endpoints and confirm each service's instance identity survives restart. Use distinct host state directories to prove independent identity. Conversation UI work uses maintained assistant-ui Thread and companion components under the approved specification.
 

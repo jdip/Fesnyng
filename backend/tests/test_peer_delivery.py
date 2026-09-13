@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+import sqlite3
 from uuid import uuid4
 
 import httpx
@@ -359,6 +360,408 @@ def test_remote_peer_delivery_uses_peer_auth_and_rejects_forged_source(tmp_path)
     assert asyncio.run(call_invalid_envelope()).status_code == 422
 
 
+def test_definitive_remote_rejection_is_terminal_and_notifies_the_source_thread(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    calls = []
+
+    async def rejected(origin, token, envelope):
+        calls.append(envelope)
+        raise _http_status_error(404)
+
+    service.transport = rejected
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Use the wrong target thread")
+
+    receipt = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+
+    assert receipt["state"] == "rejected"
+    assert receipt["attempts"] == 1
+    assert "HTTP 404" in receipt["error"]
+    repeated = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+    assert repeated == receipt
+    assert len(calls) == 1
+
+    async def observe_worker():
+        async with service.run():
+            service.changed.set()
+            await asyncio.sleep(0.05)
+
+    asyncio.run(observe_worker())
+    assert len(calls) == 1
+    notices = dispatch.for_thread(organization_id, str(source_agent), "ses_source")
+    assert len(notices) == 1
+    assert notices[0]["payload"]["origin_id"] == str(request.id)
+    assert notices[0]["author"] == {
+        "kind": "agent",
+        "id": str(target_agent),
+        "name": "Target",
+        "session_id": None,
+    }
+    assert "rejected before target acceptance" in notices[0]["payload"]["text"]
+
+
+def test_duplicate_recovery_finishes_an_interrupted_rejection_notice(tmp_path, monkeypatch):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    delivery_calls = []
+
+    async def rejected(origin, token, envelope):
+        delivery_calls.append(envelope)
+        raise _http_status_error(404)
+
+    service.transport = rejected
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Recover the result notice")
+    enqueue = dispatch.enqueue
+
+    def interrupted(*args, **kwargs):
+        enqueue(*args, **kwargs)
+        raise RuntimeError("interrupted after durable notice enqueue")
+
+    monkeypatch.setattr(dispatch, "enqueue", interrupted)
+    interrupted_receipt = asyncio.run(
+        service.send(organization_id, str(source_agent), "ses_source", request)
+    )
+
+    assert interrupted_receipt["state"] == "rejected"
+    assert interrupted_receipt["result_id"] is None
+    monkeypatch.setattr(dispatch, "enqueue", enqueue)
+    recovered = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+    assert recovered["state"] == "rejected"
+    assert recovered["result_id"] is not None
+    assert len(delivery_calls) == 1
+    assert len(dispatch.for_thread(organization_id, str(source_agent), "ses_source")) == 1
+
+
+@pytest.mark.parametrize("status_code", [408, 409, 429])
+def test_ambiguous_remote_client_status_remains_pending(tmp_path, status_code):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+
+    async def ambiguous(origin, token, envelope):
+        raise _http_status_error(status_code)
+
+    service.transport = ambiguous
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Wait for a verified outcome")
+
+    receipt = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+
+    assert receipt["state"] == "pending"
+    assert receipt["attempts"] == 1
+
+
+def test_later_rejection_after_an_uncertain_transport_outcome_stays_uncertain(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    calls = []
+
+    async def uncertain_then_rejected(origin, token, envelope):
+        calls.append(envelope)
+        if len(calls) == 1:
+            raise httpx.ConnectError("response lost after the receiver may have accepted")
+        raise _http_status_error(404)
+
+    service.transport = uncertain_then_rejected
+    request = PeerSend(
+        id=uuid4(), target_agent=target_agent, text="Preserve an unknown first outcome"
+    )
+    initial = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+    assert initial["state"] == "pending"
+    with service.store.connect() as connection:
+        connection.execute("UPDATE peer_outbox SET next_attempt=0 WHERE id=?", (str(request.id),))
+
+    async def retry_once():
+        async with service.run():
+            for _ in range(100):
+                service.changed.set()
+                receipt = service.status(organization_id, str(source_agent), str(request.id))
+                if receipt["state"] == "uncertain":
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the uncertain peer outcome")
+
+    outcome = asyncio.run(retry_once())
+    assert outcome["attempts"] == 2
+    assert "outcome is uncertain" in outcome["error"]
+    assert len(calls) == 2
+    notices = dispatch.for_thread(organization_id, str(source_agent), "ses_source")
+    assert len(notices) == 1
+    assert notices[0]["payload"]["origin_id"] == str(request.id)
+    assert "prior acceptance is unknown" in notices[0]["payload"]["text"]
+    assert "rejected before target acceptance" not in notices[0]["payload"]["text"]
+    repeated = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+    assert repeated["state"] == "uncertain"
+    assert len(dispatch.for_thread(organization_id, str(source_agent), "ses_source")) == 1
+
+
+def test_restart_404_after_an_interrupted_transport_attempt_stays_uncertain(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    started = asyncio.Event()
+
+    async def interrupted_after_remote_acceptance(origin, token, envelope):
+        started.set()
+        await asyncio.Event().wait()
+
+    service.transport = interrupted_after_remote_acceptance
+    request = PeerSend(
+        id=uuid4(), target_agent=target_agent, text="Do not forget unknown acceptance"
+    )
+
+    async def interrupt_delivery():
+        sending = asyncio.create_task(
+            service.send(organization_id, str(source_agent), "ses_source", request)
+        )
+        await started.wait()
+        sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+
+    asyncio.run(interrupt_delivery())
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
+    recovered = PeerDeliveryService(service.store, service.config, Native(), dispatch, Waker())
+    recovered.initialize()
+
+    async def rejected_after_restart(origin, token, envelope):
+        raise _http_status_error(404)
+
+    recovered.transport = rejected_after_restart
+    with recovered.store.connect() as connection:
+        connection.execute("UPDATE peer_outbox SET next_attempt=0 WHERE id=?", (str(request.id),))
+
+    async def wait_for_uncertainty():
+        async with recovered.run():
+            for _ in range(100):
+                recovered.changed.set()
+                receipt = recovered.status(organization_id, str(source_agent), str(request.id))
+                if receipt["state"] == "uncertain":
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the recovered uncertain outcome")
+
+    receipt = asyncio.run(wait_for_uncertainty())
+    assert receipt["attempts"] == 2
+    assert "outcome is uncertain" in receipt["error"]
+
+
+def test_legacy_pending_outbox_is_conservatively_uncertain_after_recovery(tmp_path):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+    request = PeerSend(
+        id=uuid4(), target_agent=target_agent, text="Recover a legacy outbound delivery"
+    )
+    envelope = PeerEnvelope(
+        **request.model_dump(),
+        organization_id=organization_id,
+        source_host=service.store.instance_id,
+        source_agent=source_agent,
+        source_session="ses_source",
+    )
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    with service.store.connect() as connection:
+        connection.execute("DROP TABLE peer_outbox")
+        connection.execute(
+            """CREATE TABLE peer_outbox (
+                id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_agent TEXT NOT NULL,
+                source_session TEXT NOT NULL, target_host TEXT NOT NULL, envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                str(request.id),
+                organization_id,
+                str(source_agent),
+                "ses_source",
+                target_host,
+                envelope.model_dump_json(),
+            ),
+        )
+    service.initialize()
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
+
+    async def rejected_after_restart(origin, token, envelope):
+        raise _http_status_error(404)
+
+    service.transport = rejected_after_restart
+
+    async def wait_for_uncertainty():
+        async with service.run():
+            for _ in range(100):
+                service.changed.set()
+                receipt = service.status(organization_id, str(source_agent), str(request.id))
+                if receipt["state"] == "uncertain":
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the legacy uncertain outcome")
+
+    receipt = asyncio.run(wait_for_uncertainty())
+    assert receipt["attempts"] == 2
+    assert "outcome is uncertain" in receipt["error"]
+
+
+def test_legacy_outbox_schema_and_conservative_backfill_rollback_together(tmp_path):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Protect the atomic migration")
+    envelope = PeerEnvelope(
+        **request.model_dump(),
+        organization_id=organization_id,
+        source_host=service.store.instance_id,
+        source_agent=source_agent,
+        source_session="ses_source",
+    )
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    with service.store.connect() as connection:
+        connection.execute("DROP TABLE peer_outbox")
+        connection.execute(
+            """CREATE TABLE peer_outbox (
+                id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_agent TEXT NOT NULL,
+                source_session TEXT NOT NULL, target_host TEXT NOT NULL, envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                str(request.id),
+                organization_id,
+                str(source_agent),
+                "ses_source",
+                target_host,
+                envelope.model_dump_json(),
+            ),
+        )
+        connection.execute(
+            """CREATE TRIGGER fail_peer_outbox_backfill
+            BEFORE UPDATE OF attempts ON peer_outbox
+            WHEN OLD.attempts = 0 AND NEW.attempts = 1
+            BEGIN SELECT RAISE(ABORT, 'forced legacy backfill failure'); END"""
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced legacy backfill failure"):
+        service.initialize()
+
+    with service.store.connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(peer_outbox)")}
+        attempts = connection.execute(
+            "SELECT attempts FROM peer_outbox WHERE id=?", (str(request.id),)
+        ).fetchone()["attempts"]
+        connection.execute("DROP TRIGGER fail_peer_outbox_backfill")
+    assert "result_id" not in columns
+    assert attempts == 0
+
+    service.initialize()
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
+
+
+def test_direct_send_and_retry_worker_share_one_outbound_delivery_attempt(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def accepted(origin, token, envelope):
+        calls.append(envelope)
+        started.set()
+        service.changed.set()
+        await release.wait()
+        return {
+            "id": str(envelope["id"]),
+            "organization_id": envelope["organization_id"],
+            "source_host": envelope["source_host"],
+            "source_agent": envelope["source_agent"],
+            "source_session": envelope["source_session"],
+            "target_host": str(target_host),
+            "target_agent": envelope["target_agent"],
+            "target_session": "ses_target",
+            "dispatch_id": str(envelope["id"]),
+            "state": "accepted",
+        }
+
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    service.transport = accepted
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Serialize this one delivery")
+
+    async def race():
+        async with service.run():
+            direct = asyncio.create_task(
+                service.send(organization_id, str(source_agent), "ses_source", request)
+            )
+            await started.wait()
+            await asyncio.sleep(0.05)
+            release.set()
+            return await direct
+
+    receipt = asyncio.run(race())
+    assert receipt["state"] == "accepted"
+    assert len(calls) == 1
+    assert dispatch.for_thread(organization_id, str(source_agent), "ses_source") == []
+
+
+def test_transient_peer_outage_remains_pending_for_a_later_retry(tmp_path):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+    calls = []
+
+    async def unavailable(origin, token, envelope):
+        calls.append(envelope)
+        raise httpx.ConnectError("network unavailable")
+
+    service.transport = unavailable
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Retry after the outage")
+
+    initial = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", request))
+
+    assert initial["state"] == "pending"
+    assert initial["attempts"] == 1
+    with service.store.connect() as connection:
+        connection.execute("UPDATE peer_outbox SET next_attempt=0 WHERE id=?", (str(request.id),))
+
+    async def retry_once():
+        async with service.run():
+            for _ in range(100):
+                service.changed.set()
+                receipt = service.status(organization_id, str(source_agent), str(request.id))
+                if receipt["attempts"] == 2:
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the transient peer retry")
+
+    retried = asyncio.run(retry_once())
+    assert retried["state"] == "pending"
+    assert retried["attempts"] == 2
+    assert len(calls) == 2
+    assert calls[1] == calls[0]
+
+
+def test_local_unknown_target_thread_is_rejected_before_native_effects(tmp_path):
+    host, target_agent, configuration, dispatch, service_state = _local_receiver(tmp_path)
+    native = Native()
+    service = PeerDeliveryService(host, configuration, native, dispatch, Waker())
+    service.initialize()
+    request = PeerSend(
+        id=uuid4(),
+        target_agent=target_agent,
+        target_session="ses_wrong_host_thread",
+        text="This target thread is not on this host",
+    )
+
+    receipt = asyncio.run(
+        service.send(
+            service_state["organization_id"],
+            str(service_state["source_agent"]),
+            "ses_sender",
+            request,
+        )
+    )
+
+    assert receipt["state"] == "rejected"
+    assert receipt["attempts"] == 1
+    assert native.created == []
+    assert dispatch.for_thread(
+        service_state["organization_id"], str(service_state["source_agent"]), "ses_sender"
+    )[0]["payload"]["origin_id"] == str(request.id)
+
+
 def test_lost_native_create_response_adopts_only_metadata_correlated_session(tmp_path):
     host, agent, configuration, dispatch, service = _local_receiver(tmp_path)
     delivery_id, source_agent = uuid4(), service["source_agent"]
@@ -612,6 +1015,40 @@ def test_concurrent_duplicate_receives_share_one_native_reservation(tmp_path):
     assert first == second
     assert first["target_session"] == "ses_peer"
     assert native.creates == 1
+
+
+def _remote_sender(path):
+    organization_id = str(uuid4())
+    source, source_agent = _host(path / "source", organization_id, "Source")
+    target_agent, target_host = uuid4(), uuid4()
+    source["configuration"].apply(
+        PeerConfiguration(
+            organization_id=organization_id,
+            host_id=source["host"].instance_id,
+            version=1,
+            agents=[
+                PeerAgent(agent_id=source_agent, name="Source", host_id=source["host"].instance_id),
+                PeerAgent(agent_id=target_agent, name="Target", host_id=target_host),
+            ],
+            peers=[
+                PeerHost(
+                    host_id=target_host,
+                    origin="http://target",
+                    outbound_token=secrets.token_urlsafe(32),
+                    inbound_token=secrets.token_urlsafe(32),
+                )
+            ],
+        )
+    )
+    return source["service"], organization_id, source_agent, target_agent, source["dispatch"]
+
+
+def _http_status_error(status_code):
+    request = httpx.Request("POST", "http://target/peers/deliveries")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        "peer receiver rejected the envelope", request=request, response=response
+    )
 
 
 def _host(path, organization_id, name):

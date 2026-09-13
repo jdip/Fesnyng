@@ -273,3 +273,140 @@ def test_malformed_peer_discovery_preserves_local_results_and_reports_unavailabl
         ]
 
     asyncio.run(check())
+
+
+def test_discovery_returns_active_and_archived_threads_from_a_healthy_peer(tmp_path):
+    org = str(uuid4())
+    source_host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "source.db",
+            state_directory=tmp_path / "source-state",
+        )
+    )
+    remote_host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "remote.db",
+            state_directory=tmp_path / "remote-state",
+        )
+    )
+    source_host.initialize()
+    remote_host.initialize()
+    source_host.bind_organization(org, secrets.token_urlsafe(32))
+    remote_host.bind_organization(org, secrets.token_urlsafe(32))
+    source_agent, remote_agent = str(uuid4()), str(uuid4())
+    roster = [
+        {
+            "agent_id": source_agent,
+            "name": "Source",
+            "host_id": str(source_host.instance_id),
+        },
+        {
+            "agent_id": remote_agent,
+            "name": "Remote",
+            "host_id": str(remote_host.instance_id),
+        },
+    ]
+    for host, agent, name in (
+        (source_host, source_agent, "Source"),
+        (remote_host, remote_agent, "Remote"),
+    ):
+        envelope = HostAgentConfiguration(
+            host_id=host.instance_id,
+            organization_id=org,
+            agent_id=agent,
+            version=1,
+            name=name,
+        )
+        host.stage_agent(envelope)
+        host.mark_applied(envelope)
+    remote_host.save_session(
+        org, remote_agent, "ses_active", "/workspace/default/threads/active", "Active work"
+    )
+    remote_host.save_session(
+        org,
+        remote_agent,
+        "ses_archived",
+        "/workspace/default/threads/archived",
+        "Archived work",
+    )
+    remote_host.archive_session(org, remote_agent, "ses_archived", 1)
+    remote_host.save_session(
+        org,
+        remote_agent,
+        "ses_deleted",
+        "/workspace/default/threads/deleted",
+        "Deleted work",
+    )
+    remote_host.delete_session(org, remote_agent, "ses_deleted")
+
+    source_to_remote, remote_to_source = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    source_config = PeerConfigurationStore(source_host)
+    remote_config = PeerConfigurationStore(remote_host)
+    source_config.initialize()
+    remote_config.initialize()
+    source_config.apply(
+        PeerConfiguration.model_validate(
+            {
+                "host_id": str(source_host.instance_id),
+                "organization_id": org,
+                "version": 1,
+                "agents": roster,
+                "peers": [
+                    {
+                        "host_id": str(remote_host.instance_id),
+                        "origin": "http://remote.test",
+                        "outbound_token": source_to_remote,
+                        "inbound_token": remote_to_source,
+                    }
+                ],
+            }
+        )
+    )
+    remote_config.apply(
+        PeerConfiguration.model_validate(
+            {
+                "host_id": str(remote_host.instance_id),
+                "organization_id": org,
+                "version": 1,
+                "agents": roster,
+                "peers": [
+                    {
+                        "host_id": str(source_host.instance_id),
+                        "origin": "http://source.test",
+                        "outbound_token": remote_to_source,
+                        "inbound_token": source_to_remote,
+                    }
+                ],
+            }
+        )
+    )
+
+    class Native:
+        async def request(self, organization_id, agent_id, path, *, directory=None):
+            assert organization_id == org
+            assert agent_id == remote_agent
+            assert path == "/session/status"
+            return {}
+
+    remote_app = FastAPI()
+    remote_app.state.peer_configuration = remote_config
+    remote_app.state.peer_discovery = PeerDiscovery(remote_host, remote_config, Native())
+    remote_app.include_router(router)
+
+    async def check():
+        discovery = PeerDiscovery(
+            source_host,
+            source_config,
+            Native(),
+            httpx.ASGITransport(remote_app),
+        )
+        result = await discovery.discover(org, source_agent, DiscoveryQuery(agent_id=remote_agent))
+        assert [thread["session_id"] for thread in result["threads"]] == [
+            "ses_active",
+            "ses_archived",
+        ]
+        assert result["unavailable"] == []
+
+    asyncio.run(check())

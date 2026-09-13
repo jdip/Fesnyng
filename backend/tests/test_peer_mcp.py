@@ -134,6 +134,29 @@ def test_collaboration_tools_reject_a_foreign_claimed_source_session(tmp_path):
     asyncio.run(check())
 
 
+def test_discovery_tool_explains_invalid_workspace_names(tmp_path):
+    server, app, system = _collaboration_mcp(tmp_path)
+
+    async def check():
+        async with (
+            server.session_manager.run(),
+            AsyncClient(transport=ASGITransport(app), base_url="http://localhost") as client,
+        ):
+            response = await _request(
+                client,
+                system["token"],
+                "tools/call",
+                {"name": "discover_threads", "arguments": {"workspace": "/workspace/default"}},
+            )
+            result = response.json()["result"]
+            assert result["isError"] is True
+            text = " ".join(part.get("text", "") for part in result["content"])
+            assert "workspace" in text
+            assert "pattern" in text
+
+    asyncio.run(check())
+
+
 class Native:
     def __init__(self):
         self._locks: dict[str, asyncio.Lock] = {}

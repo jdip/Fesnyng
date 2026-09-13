@@ -4,7 +4,8 @@ import secrets
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 
 from fesnyng_backend import control_workspace_routes
 from fesnyng_backend.control_plane import create_app
@@ -17,6 +18,114 @@ from fesnyng_backend.host_workspace_routes import router as host_workspace_route
 from fesnyng_backend.settings import ControlPlaneSessionSettings, ServiceSettings
 
 ORIGIN = "https://workspace.example"
+
+
+class BlockingEventResponse:
+    """A host event source whose next event is released by the test."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.closed = False
+        self.status_code = 200
+        self.headers = {"content-type": "text/event-stream"}
+
+    async def aiter_bytes(self):
+        await self.release.wait()
+        yield b'event: session.updated\ndata: {"id":"ses_main"}\n\n'
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class BlockingHostStream:
+    def __init__(self) -> None:
+        self.response = BlockingEventResponse()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+        await self.response.aclose()
+
+
+class EventHostClient:
+    """The remote host boundary for a controlled, long-lived event response."""
+
+    def __init__(self, agents, stream: BlockingHostStream) -> None:
+        self.agents = agents
+        self._stream = stream
+
+    async def stream(self, organization_id, host_id, path, *, headers=None, params=None):
+        assert path.endswith("/opencode/event")
+        return self._stream
+
+
+async def _open_event_route(app: FastAPI, path: str, token: str):
+    """Start the public HTTP stream without buffering its response body."""
+
+    messages = []
+    started = asyncio.Event()
+    disconnected = asyncio.Event()
+    requested = False
+
+    async def receive():
+        nonlocal requested
+        if not requested:
+            requested = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+        if message["type"] == "http.response.start":
+            started.set()
+
+    task = asyncio.create_task(
+        app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https",
+                "path": path,
+                "raw_path": path.encode(),
+                "query_string": b"",
+                "headers": [(b"cookie", f"fesnyng_session={token}".encode())],
+                "client": ("testclient", 50000),
+                "server": ("workspace.example", 443),
+            },
+            receive,
+            send,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    return task, messages
+
+
+def _event_context(organization, monkeypatch):
+    settings, _, owner, org, agents, host_id = organization
+    agents.set_host_credential(org.id, host_id, secrets.token_urlsafe(32))
+    agent = agents.create_agent(org.id, owner.id, {"name": "Workspace", "host_id": host_id})
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+    store = app.state.control_store
+    membership = store.add_member(
+        org.id,
+        "viewer",
+        "Viewer",
+        "correct horse battery staple",
+        "member",
+        actor_id=owner.id,
+    )
+    authenticated = store.login("viewer", "correct horse battery staple", 3600)
+    assert authenticated is not None
+    user, credentials = authenticated
+    assert user.id == membership.user_id
+    stream = BlockingHostStream()
+    monkeypatch.setattr(
+        control_workspace_routes, "host_client", lambda _: EventHostClient(agents, stream)
+    )
+    return app, store, owner, org, agent, user, credentials.token, stream
 
 
 def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
@@ -179,6 +288,59 @@ def test_workspace_facade_forwards_attributed_prompt_with_stable_idempotency_and
     UUID(operation_id)
     assert json.loads(interaction.headers["x-fesnyng-actor"])["id"] == owner.id
     assert json.loads(interaction.content) == {"answers": [["Yes"]], "operation_id": operation_id}
+
+
+@pytest.mark.parametrize(("revocation", "expected_status"), [("membership", 404), ("session", 401)])
+def test_workspace_event_route_drops_events_after_access_revocation(
+    organization, monkeypatch, revocation, expected_status
+):
+    app, store, owner, org, agent, user, token, stream = _event_context(organization, monkeypatch)
+
+    async def exercise():
+        task, messages = await _open_event_route(
+            app,
+            f"/organizations/{org.id}/agents/{agent['id']}/opencode/event",
+            token,
+        )
+        if revocation == "membership":
+            store.remove_member(org.id, user.id, actor_id=owner.id)
+        else:
+            store.revoke_session(token)
+        stream.response.release.set()
+        with pytest.raises(RuntimeError) as error:
+            await task
+        assert isinstance(error.value.__cause__, HTTPException)
+        assert error.value.__cause__.status_code == expected_status
+        assert [message for message in messages if message["type"] == "http.response.body"] == []
+        assert stream.closed
+        assert stream.response.closed
+
+    asyncio.run(exercise())
+
+
+def test_workspace_event_route_forwards_events_while_access_remains_valid(
+    organization, monkeypatch
+):
+    app, _, _, org, agent, _, token, stream = _event_context(organization, monkeypatch)
+
+    async def exercise():
+        task, messages = await _open_event_route(
+            app,
+            f"/organizations/{org.id}/agents/{agent['id']}/opencode/event",
+            token,
+        )
+        stream.response.release.set()
+        await task
+        assert [
+            message["body"] for message in messages if message["type"] == "http.response.body"
+        ] == [
+            b'event: session.updated\ndata: {"id":"ses_main"}\n\n',
+            b"",
+        ]
+        assert stream.closed
+        assert stream.response.closed
+
+    asyncio.run(exercise())
 
 
 def test_workspace_facade_reaches_the_real_host_router_with_agent_scope(

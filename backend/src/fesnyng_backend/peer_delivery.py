@@ -91,6 +91,7 @@ class PeerDeliveryService:
         self.transport = transport or _post_envelope
         self.changed = asyncio.Event()
         self.inbound_locks: dict[str, asyncio.Lock] = {}
+        self.delivery_locks: dict[str, asyncio.Lock] = {}
         self.delivery_tasks: dict[str, asyncio.Task[None]] = {}
         self.result_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -101,7 +102,7 @@ class PeerDeliveryService:
                 CREATE TABLE IF NOT EXISTS peer_outbox (
                     id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_agent TEXT NOT NULL,
                     source_session TEXT NOT NULL, target_host TEXT NOT NULL, envelope TEXT NOT NULL,
-                    state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT,
+                    state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT, result_id TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
                 );
@@ -114,6 +115,15 @@ class PeerDeliveryService:
                 );
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
+            outbox_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(peer_outbox)")
+            }
+            if "result_id" not in outbox_columns:
+                connection.execute("ALTER TABLE peer_outbox ADD COLUMN result_id TEXT")
+                connection.execute(
+                    "UPDATE peer_outbox SET attempts=1 WHERE state='pending' AND attempts=0"
+                )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(peer_inbox)")}
             if "author" not in columns:
                 connection.execute("ALTER TABLE peer_inbox ADD COLUMN author TEXT")
@@ -131,6 +141,7 @@ class PeerDeliveryService:
             source_session=source_session,
         )
         encoded = envelope.model_dump_json()
+        existing_delivery = False
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -142,18 +153,22 @@ class PeerDeliveryService:
                     or existing["envelope"] != encoded
                 ):
                     raise ValueError("Peer delivery identity conflict")
-                return _outbox(existing)
-            connection.execute(
-                "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) VALUES(?,?,?,?,?,?)",
-                (
-                    str(body.id),
-                    organization_id,
-                    source_agent,
-                    source_session,
-                    target["host_id"],
-                    encoded,
-                ),
-            )
+                existing_delivery = True
+            else:
+                connection.execute(
+                    "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) VALUES(?,?,?,?,?,?)",
+                    (
+                        str(body.id),
+                        organization_id,
+                        source_agent,
+                        source_session,
+                        target["host_id"],
+                        encoded,
+                    ),
+                )
+        if existing_delivery:
+            self._publish_terminal_notices()
+            return self.status(organization_id, source_agent, str(body.id))
         receipt = self.status(organization_id, source_agent, str(body.id))
         await self._deliver_with_timeout(receipt)
         return self.status(organization_id, source_agent, str(body.id))
@@ -358,6 +373,7 @@ class PeerDeliveryService:
                         self._deliver_with_timeout(receipt)
                     )
             self._publish_results()
+            self._publish_terminal_notices()
             try:
                 await asyncio.wait_for(self.changed.wait(), timeout=1)
             except TimeoutError:
@@ -370,8 +386,24 @@ class PeerDeliveryService:
             origin, token = self.config.connection(
                 receipt["organization_id"], receipt["target_host"]
             )
+        except LookupError as error:
+            self._record_delivery_rejection(receipt["id"], error)
+            return
+        try:
             response = await self.transport(origin, token, receipt["envelope"])
             self._validate_acceptance(receipt, response)
+        except httpx.HTTPStatusError as error:
+            if _definitive_rejection(error):
+                self._record_delivery_rejection(
+                    receipt["id"],
+                    RuntimeError(
+                        "Peer receiver rejected delivery before acceptance "
+                        f"(HTTP {error.response.status_code})"
+                    ),
+                )
+            else:
+                self._record_delivery_failure(receipt["id"], error)
+            return
         except (
             httpx.HTTPError,
             LookupError,
@@ -384,20 +416,33 @@ class PeerDeliveryService:
         self._accept(receipt["id"], response)
 
     async def _deliver_with_timeout(self, receipt: dict[str, Any]) -> None:
-        try:
-            if receipt["target_host"] == str(self.store.instance_id):
-                envelope = PeerEnvelope.model_validate(receipt["envelope"])
-                accepted = await asyncio.wait_for(
-                    self.receive(str(self.store.instance_id), envelope), timeout=10
-                )
-                self._validate_acceptance(receipt, accepted)
-                self._accept(receipt["id"], accepted)
-            else:
-                await asyncio.wait_for(self._deliver(receipt), timeout=10)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:  # noqa: BLE001 - persisted by the supervisor.
-            self._record_delivery_failure(receipt["id"], error)
+        lock = self.delivery_locks.setdefault(receipt["id"], asyncio.Lock())
+        async with lock:
+            current = self._pending_delivery(receipt["id"])
+            if current is None or current["next_attempt"] > time.time():
+                return
+            admitted = self._admit_delivery_attempt(receipt["id"])
+            if admitted is None:
+                return
+            try:
+                if admitted["target_host"] == str(self.store.instance_id):
+                    envelope = PeerEnvelope.model_validate(admitted["envelope"])
+                    try:
+                        self._validate_local_target(envelope)
+                    except (LookupError, PermissionError) as error:
+                        self._record_delivery_rejection(admitted["id"], error)
+                        return
+                    accepted = await asyncio.wait_for(
+                        self.receive(str(self.store.instance_id), envelope), timeout=10
+                    )
+                    self._validate_acceptance(admitted, accepted)
+                    self._accept(admitted["id"], accepted)
+                else:
+                    await asyncio.wait_for(self._deliver(admitted), timeout=10)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - persisted by the supervisor.
+                self._record_delivery_failure(admitted["id"], error)
 
     @staticmethod
     def _validate_acceptance(receipt: dict[str, Any], response: Any) -> None:
@@ -424,14 +469,83 @@ class PeerDeliveryService:
     def _record_delivery_failure(self, delivery_id: str, error: Exception) -> None:
         with self.store.connect() as connection:
             attempts = connection.execute(
-                "SELECT attempts FROM peer_outbox WHERE id=?", (delivery_id,)
+                "SELECT attempts FROM peer_outbox WHERE id=? AND state='pending'", (delivery_id,)
             ).fetchone()
             if attempts is None:
                 return
-            count = attempts["attempts"] + 1
             connection.execute(
-                "UPDATE peer_outbox SET attempts=?,next_attempt=?,error=?,updated_at=unixepoch() WHERE id=?",
-                (count, time.time() + min(60, 2 ** min(count, 6)), str(error), delivery_id),
+                "UPDATE peer_outbox SET attempts=?,next_attempt=?,error=?,updated_at=unixepoch() "
+                "WHERE id=? AND state='pending'",
+                (
+                    attempts["attempts"],
+                    time.time() + min(60, 2 ** min(attempts["attempts"], 6)),
+                    str(error),
+                    delivery_id,
+                ),
+            )
+
+    def _record_delivery_rejection(self, delivery_id: str, error: Exception) -> None:
+        """Retain a verified pre-acceptance refusal without retrying the envelope."""
+
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT attempts FROM peer_outbox WHERE id=? AND state='pending'", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                return
+            if row["attempts"] > 1:
+                connection.execute(
+                    "UPDATE peer_outbox SET state='uncertain',next_attempt=0,error=?,"
+                    "updated_at=unixepoch() WHERE id=? AND state='pending'",
+                    (
+                        f"Peer delivery outcome is uncertain after a prior unverified attempt: {error}",
+                        delivery_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "UPDATE peer_outbox SET state='rejected',next_attempt=0,error=?,"
+                    "updated_at=unixepoch() WHERE id=? AND state='pending'",
+                    (str(error), delivery_id),
+                )
+        self._publish_terminal_notices()
+
+    def _pending_delivery(self, delivery_id: str) -> dict[str, Any] | None:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM peer_outbox WHERE id=? AND state='pending'", (delivery_id,)
+            ).fetchone()
+        return _outbox(row) if row is not None else None
+
+    def _admit_delivery_attempt(self, delivery_id: str) -> dict[str, Any] | None:
+        """Persist an outbound attempt before any local native or remote transport await."""
+
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM peer_outbox WHERE id=? AND state='pending'", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE peer_outbox SET attempts=attempts+1,updated_at=unixepoch() "
+                "WHERE id=? AND state='pending'",
+                (delivery_id,),
+            )
+            admitted = connection.execute(
+                "SELECT * FROM peer_outbox WHERE id=?", (delivery_id,)
+            ).fetchone()
+        return _outbox(admitted) if admitted is not None else None
+
+    def _validate_local_target(self, envelope: PeerEnvelope) -> None:
+        """Validate the same-host target before a receive can reserve or invoke native work."""
+
+        target = self.config.agent(str(envelope.organization_id), str(envelope.target_agent))
+        if target["host_id"] != str(self.store.instance_id):
+            raise PermissionError("Peer target agent is not hosted here")
+        if envelope.target_session is not None:
+            self.store.session(
+                str(envelope.organization_id), str(envelope.target_agent), envelope.target_session
             )
 
     def _publish_results(self) -> None:
@@ -459,6 +573,58 @@ class PeerDeliveryService:
                 continue
             self.result_tasks[inbox["id"]] = asyncio.create_task(
                 self._publish_result(inbox, envelope, delivery)
+            )
+
+    def _publish_terminal_notices(self) -> None:
+        """Queue one local, attributable result for each terminal work outcome."""
+
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM peer_outbox WHERE state IN ('rejected','uncertain') AND result_id IS NULL"
+            ).fetchall()
+        for row in rows:
+            receipt = _outbox(row)
+            envelope = PeerEnvelope.model_validate(receipt["envelope"])
+            result_id = uuid5(NAMESPACE_URL, f"fesnyng-peer-terminal:{receipt['id']}")
+            if envelope.kind == "result":
+                self._mark_terminal_notice_published(receipt["id"], result_id)
+                continue
+            try:
+                target = self.config.agent(receipt["organization_id"], str(envelope.target_agent))
+                author = Actor(
+                    kind="agent",
+                    id=envelope.target_agent,
+                    name=target["name"],
+                )
+            except LookupError:
+                # A stale roster must not turn a terminal delivery rejection
+                # back into a retryable work envelope. The durable row remains
+                # eligible for its local result notice when configuration returns.
+                continue
+            try:
+                self.dispatch.enqueue(
+                    receipt["organization_id"],
+                    receipt["source_agent"],
+                    receipt["source_session"],
+                    Submission(
+                        id=result_id,
+                        text=_terminal_notice_text(receipt),
+                        mode="queued",
+                        origin_id=UUID(receipt["id"]),
+                    ),
+                    author,
+                )
+            except (LookupError, ValueError):
+                continue
+            self._mark_terminal_notice_published(receipt["id"], result_id)
+            self.dispatcher.wake()
+
+    def _mark_terminal_notice_published(self, delivery_id: str, result_id: UUID) -> None:
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE peer_outbox SET result_id=?,updated_at=unixepoch() "
+                "WHERE id=? AND state IN ('rejected','uncertain') AND result_id IS NULL",
+                (str(result_id), delivery_id),
             )
 
     async def _publish_result(
@@ -677,6 +843,26 @@ async def _post_envelope(origin: str, token: str, envelope: dict[str, Any]) -> d
     if not isinstance(value, dict):
         raise RuntimeUnavailable("Peer acceptance response is invalid")
     return value
+
+
+def _definitive_rejection(error: httpx.HTTPStatusError) -> bool:
+    """Only retryable/ambiguous client statuses keep an unverified envelope pending."""
+
+    status = error.response.status_code
+    return 400 <= status < 500 and status not in {408, 409, 425, 429}
+
+
+def _terminal_notice_text(receipt: dict[str, Any]) -> str:
+    if receipt["state"] == "rejected":
+        return (
+            f"Peer delivery {receipt['id']} was rejected before target acceptance: "
+            f"{receipt['error']}"
+        )
+    return (
+        f"Peer delivery {receipt['id']} has an uncertain outcome: prior acceptance is unknown, "
+        "automatic retries stopped; inspect receiving history/receipt before new work. "
+        f"Last observed error: {receipt['error']}"
+    )
 
 
 def _outbox(row: Any) -> dict[str, Any]:
