@@ -131,6 +131,16 @@ async def session(request: Request, organization_id: UUID, agent_id: UUID, sessi
         return await _workspace(request).get(org, agent, session_id)
 
 
+@router.get("/agents/{agent_id}/opencode/session/{session_id}/context")
+async def session_context(
+    request: Request, organization_id: UUID, agent_id: UUID, session_id: NativeID
+):
+    org, agent = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        return await _workspace(request).context(org, agent, session_id)
+
+
 @router.patch("/agents/{agent_id}/opencode/session/{session_id}")
 async def update_session(
     request: Request,
@@ -394,6 +404,20 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict) and data.get("type") in {
+                    "vcs.branch.updated",
+                    "file.edited",
+                }:
+                    # The native stream itself is scoped to this directory.
+                    # Forward only an invalidation, never its raw path/payload.
+                    for session in request.app.state.host_store.sessions(org, agent):
+                        if session["directory"] == directory:
+                            invalidation = {
+                                "type": "fesnyng.context.updated",
+                                "properties": {"sessionID": session["session_id"]},
+                            }
+                            yield f"event: message\ndata: {json.dumps(invalidation, separators=(',', ':'))}\n\n"
                     continue
                 session_id = _event_session(data)
                 if session_id and await workspace.event_authorized(

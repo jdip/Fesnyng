@@ -2,6 +2,8 @@
 
 This directory builds the pinned OpenCode runtime image used by Fesnyng agent hosts. It is an OpenCode server image, not a separate agent loop: the host owns container lifecycle and credentials, while OpenCode owns native sessions, model requests, tools, and skills. It does not establish a general preinstalled command-tool baseline for agents.
 
+The image includes Git solely for the host's scoped, read-only thread-context lookup. It is not exposed as a control-plane mutation or a general host filesystem capability.
+
 Build it from the repository root:
 
 ```bash

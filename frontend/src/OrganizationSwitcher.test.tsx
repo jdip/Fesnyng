@@ -29,3 +29,18 @@ test('shows initials fallback and configured identity without app branding', () 
   expect(screen.getByText('🌿')).toBeTruthy();
   expect(screen.queryByText('FO')).toBeNull();
 });
+
+test('keeps chart and role-authorized settings actions with their organization entry', async () => {
+  const onSelect = vi.fn();
+  const onOpen = vi.fn();
+  render(<OrganizationSwitcher organizations={organizations} selected="one" managerOrganizationIds={['two']} onSelect={onSelect} onOpen={onOpen} />);
+  const trigger = screen.getByRole('button', { name: 'Switch organization: First organization' });
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Reporting chart for First organization' }));
+  expect(onOpen).toHaveBeenCalledWith('one', 'chart');
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  expect(screen.queryByRole('menuitem', { name: 'Organization settings for First organization' })).toBeNull();
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Organization settings for Second organization' }));
+  expect(onOpen).toHaveBeenCalledWith('two', 'organization');
+});

@@ -13,9 +13,8 @@ Markdown, composer, actions, branches, scrolling, reasoning, and generic tools.
 The native OpenCode adapter owns session attachment and event reconciliation.
 Fesnyng supplies organization navigation, reporting relationships, settings,
 explicit memory, attributable delivery history, and the authorized connection.
-The reporting chart is the organization overview. Its compact icon and the
-manager-only organization settings icon sit above the signed-in user in the
-sidebar.
+The reporting chart is the organization overview. Each entry in the organization
+picker offers chart and authorized settings actions for that organization.
 
 New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
 model until an authorized configuration change. An agent is persistent identity,
@@ -30,11 +29,25 @@ threads, retaining incoming-message recency within each group. Pins belong only
 to the signed-in user and persist across devices and sign-in sessions.
 Only the selected agent expands its maintained thread list in the page sidebar.
 All pins and the selected thread remain visible alongside the first six recent
-unpinned threads. Show more adds another page; Thread list settings saves a
-personal page size across devices. One organization-wide title search finds
+unpinned threads. The plus on the selected agent's role row opens a new thread.
+Show more adds another page; User preferences beside sign-out contains the
+thread-list page size, saved across devices. One organization-wide title search above Agents finds
 threads beyond the visible page and groups them by agent. Navigation preserves
 unsent text, selected workflows and retry identity within the current workspace;
 drafts are not stored on the server.
+
+The active thread has a compact information block with an editable title,
+repository, branch, Git changes, and native child-session count. Git totals compare
+tracked staged and unstaged workspace changes against HEAD; untracked files and
+binary changes are counted separately. These are workspace changes, not native
+session-summary totals. An unborn repository has no HEAD comparison; a detached
+checkout is labelled Detached HEAD. Repository subtitles use the same per-thread
+workspace source, including pinned entries. No repository denotes established
+absence; Repository unavailable denotes a failed or unknown lookup. Background
+processes remain Unavailable when native data cannot establish thread ownership.
+Context loads on selection and refreshes on the header Refresh action and relevant
+native updates, without an additional polling loop. Memory, settings and Refresh
+use labelled icons; the sidebar remains the thread navigation and return path.
 
 Owners and admins manage agents, organization permissions, membership, and named
 credential profiles. Host registration and networking remain installation/ops

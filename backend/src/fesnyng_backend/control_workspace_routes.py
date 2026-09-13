@@ -23,6 +23,7 @@ router = APIRouter(
 _NATIVE_ID = r"[A-Za-z0-9_-]{1,160}"
 _SESSION = re.compile(rf"^session/{_NATIVE_ID}$")
 _SESSION_READ = re.compile(rf"^session/{_NATIVE_ID}/(?:message|status)$")
+_SESSION_CONTEXT = re.compile(rf"^session/{_NATIVE_ID}/context$")
 _SESSION_MUTATION = re.compile(
     rf"^session/{_NATIVE_ID}/(?:prompt_async|abort|revert|unrevert|fork)$"
 )
@@ -45,7 +46,10 @@ _READ_PATHS = {
 def _allowed(method: str, path: str) -> bool:
     if method == "GET":
         return bool(
-            path in _READ_PATHS or _SESSION.fullmatch(path) or _SESSION_READ.fullmatch(path)
+            path in _READ_PATHS
+            or _SESSION.fullmatch(path)
+            or _SESSION_READ.fullmatch(path)
+            or _SESSION_CONTEXT.fullmatch(path)
         )
     if method == "POST":
         return bool(

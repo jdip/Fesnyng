@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useThreadPins } from "@/ThreadPins";
 import { ThreadNotificationBadge } from "@/ThreadNotificationBadge";
+import { repositoryLabel, useThreadContext, useThreadWorkspace } from "@/thread-context";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -33,6 +34,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useId,
   type ComponentPropsWithoutRef,
   type FC,
 } from "react";
@@ -41,14 +43,14 @@ export type ThreadMenuTarget = { id: string; title: string };
 type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void };
 const ThreadNavigationContext = createContext<ThreadNavigation>({});
 
-export const ThreadList: FC<ThreadNavigation & { pageSize?: number }> = ({ pageSize = 6, onSelect, onOpenFiles, onOpenPermissions }) => {
+export const ThreadList: FC<ThreadNavigation & { pageSize?: number; showNew?: boolean }> = ({ pageSize = 6, showNew = true, onSelect, onOpenFiles, onOpenPermissions }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
     <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions }}><ThreadListRoot>
-      <ThreadListNew onClick={onSelect} />
+      {showNew && <ThreadListNew onClick={onSelect} />}
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
       {archivedCount > 0 && (
@@ -175,6 +177,8 @@ export const ThreadListItem: FC = () => {
   const { onSelect } = useContext(ThreadNavigationContext);
   const pins = useThreadPins();
   const session = useAuiState((s) => s.threadListItem.remoteId);
+  const workspace = useThreadWorkspace();
+  const subtitleId = useId();
   const pinned = !!session && !!pins?.ids?.has(session);
   const isRunning = useAuiState((s) => s.threadListItem.isRunning);
   const isArchived = useAuiState((s) => s.threadListItem.status === "archived");
@@ -191,7 +195,7 @@ export const ThreadListItem: FC = () => {
   return (
     <ThreadListItemPrimitive.Root
       data-slot="aui_thread-list-item"
-      className="group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 items-center rounded-md transition-colors focus-visible:outline-none"
+      className="group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex min-h-11 items-center rounded-md transition-colors focus-visible:outline-none"
     >
       {isRenaming ? (
         <ThreadListItemRename
@@ -203,6 +207,7 @@ export const ThreadListItem: FC = () => {
       ) : (
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
+          aria-describedby={session && workspace ? subtitleId : undefined}
           onClick={onSelect}
           data-slot="aui_thread-list-item-trigger"
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
@@ -218,9 +223,10 @@ export const ThreadListItem: FC = () => {
           )}
           <span
             data-slot="aui_thread-list-item-title"
-            className="min-w-0 flex-1 truncate"
+            className="min-w-0 flex-1 py-1"
           >
-            <ThreadListItemPrimitive.Title fallback="New Chat" />
+            <span className="block truncate"><ThreadListItemPrimitive.Title fallback="New Chat" /></span>
+            {session && workspace && <ThreadRepositorySubtitle id={subtitleId} session={session} {...workspace} />}
           </span>
           {isRunning && <span className="sr-only">Running</span>}
         </ThreadListItemPrimitive.Trigger>
@@ -232,6 +238,12 @@ export const ThreadListItem: FC = () => {
     </ThreadListItemPrimitive.Root>
   );
 };
+
+function ThreadRepositorySubtitle({ id, session, baseUrl, csrfToken, refreshKey }: { id: string; session: string; baseUrl: string; csrfToken: string; refreshKey: string | number }) {
+  const { data, failed } = useThreadContext(baseUrl, csrfToken, session, refreshKey);
+  const label = !data && !failed ? 'Loading repository…' : repositoryLabel(data?.repository);
+  return <small id={id} aria-hidden="true" className="block truncate text-xs text-muted-foreground" title={label}>{label}</small>;
+}
 
 const ThreadListItemRename: FC<{
   onDone: (restoreFocus: boolean) => void;

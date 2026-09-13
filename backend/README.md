@@ -59,6 +59,17 @@ The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/
 
 Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
+The authorized `opencode/session/{id}/context` read exposes display-safe repository
+and branch metadata for the mapped thread workspace. Git changes compare tracked
+staged and unstaged files against HEAD, with binary and untracked file counts
+reported separately. Repository metadata must stay inside that workspace; external
+diff, text conversion and filesystem-monitor commands are disabled. The response
+distinguishes absent repositories and unavailable data, including unborn HEAD,
+and never returns filesystem paths or remote URLs. Subagent counts describe
+verified native descendant sessions; background processes remain unavailable
+without authoritative thread attribution. The existing agent image declares Git
+as the owner of these read-only repository calculations.
+
 ## Install an agent host
 
 The host launches one OpenCode container per applied agent. Build the pinned runtime image from the repository root before applying an agent configuration:
