@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { useThreadPins } from "@/ThreadPins";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -18,6 +19,7 @@ import {
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
+  PinIcon,
   PlusIcon,
   SearchIcon,
   TrashIcon,
@@ -34,6 +36,7 @@ import {
 } from "react";
 
 export const ThreadList: FC = () => {
+  const pins = useThreadPins();
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const hasThreads = useAuiState((s) => s.threads.threadIds.length > 0);
@@ -42,6 +45,7 @@ export const ThreadList: FC = () => {
   return (
     <ThreadListRoot>
       <ThreadListNew />
+      {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       {hasThreads && (
         <ThreadListSearch value={search} onValueChange={setSearch} />
       )}
@@ -305,6 +309,9 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
+  const pins = useThreadPins();
+  const session = useAuiState((s) => s.threadListItem.remoteId);
+  const pinned = !!session && !!pins?.ids?.has(session);
   const isRunning = useAuiState((s) => s.threadListItem.isRunning);
   const isArchived = useAuiState((s) => s.threadListItem.status === "archived");
   const [isRenaming, setIsRenaming] = useState(false);
@@ -335,6 +342,7 @@ export const ThreadListItem: FC = () => {
           data-slot="aui_thread-list-item-trigger"
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
         >
+          {pinned && <PinIcon role="img" aria-label="Pinned" className="me-1.5 size-3.5 shrink-0" />}
           {isRunning && (
             <Loader2Icon
               aria-hidden
@@ -427,6 +435,9 @@ const ThreadListItemMore: FC<{
   archived: boolean;
   onRename: () => void;
 }> = ({ archived, onRename }) => {
+  const pins = useThreadPins();
+  const session = useAuiState((s) => s.threadListItem.remoteId);
+  const pinned = !!session && !!pins?.ids?.has(session);
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
@@ -447,6 +458,11 @@ const ThreadListItemMore: FC<{
         data-slot="aui_thread-list-item-more-content"
         className="bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-32 overflow-hidden rounded-xl border p-1.5"
       >
+        {pins && session && !archived && <ThreadListItemMorePrimitive.Item
+          disabled={!pins.ids || pins.saving}
+          className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"
+          onSelect={() => { void pins.setPinned(session, !pinned); }}
+        ><PinIcon aria-hidden className="size-4" />{pinned ? 'Unpin thread' : 'Pin thread'}</ThreadListItemMorePrimitive.Item>}
         <ThreadListItemMorePrimitive.Item
           data-slot="aui_thread-list-item-more-item"
           className="hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"

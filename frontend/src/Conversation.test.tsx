@@ -26,6 +26,9 @@ vi.mock('./components/assistant-ui/elements/thread.aui', () => ({
 vi.mock('./components/assistant-ui/elements/thread-list.aui', () => ({
   ThreadList: () => <div data-testid="thread-list" />,
 }));
+vi.mock('./ThreadPins', () => ({
+  ThreadPinsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 
 test('connects the maintained runtime to the selected Fesnyng agent session', async () => {
   const { Conversation } = await import('./Conversation');

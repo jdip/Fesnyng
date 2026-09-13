@@ -261,6 +261,61 @@ test('refreshes incoming-message order on return to the app without losing the a
   expect(screen.getByRole('button', { name: 'First thread' }).closest('[data-active]')?.getAttribute('data-active')).toBe('true');
 });
 
+test('pins and unpins a thread through its menu while preserving the active draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const recent = { id: 'recent', title: 'Recent thread', time: {} };
+  const older = { id: 'older', title: 'Older thread', time: {} };
+  let pinned = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    const method = init?.method ?? request?.method ?? 'GET';
+    if (url.endsWith('/thread-pins/older')) pinned = method === 'PUT';
+    const body = url.includes('/thread-pins') ? { session_ids: pinned ? ['older'] : [] }
+      : url.includes('/experimental/session') ? (pinned ? [older, recent] : [recent, older])
+        : url.endsWith('/session/recent') ? recent : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="recent" />);
+  await screen.findByRole('button', { name: 'Older thread' });
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Message input' }), { target: { value: 'Keep my draft' } });
+  fireEvent.keyDown(screen.getAllByRole('button', { name: 'More options' })[1]!, { key: 'Enter' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin thread' }));
+  await waitFor(() => expect(pinned).toBe(true));
+  await waitFor(() => expect(screen.getAllByRole('button', { name: /(?:Recent|Older) thread/ })[0]!.textContent).toContain('Older thread'));
+  expect(screen.getByRole('img', { name: 'Pinned' })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep my draft');
+  fireEvent.keyDown(screen.getAllByRole('button', { name: 'More options' })[0]!, { key: 'Enter' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Unpin thread' }));
+  await waitFor(() => expect(pinned).toBe(false));
+  await waitFor(() => expect(screen.getAllByRole('button', { name: /(?:Recent|Older) thread/ })[0]!.textContent).toContain('Recent thread'));
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep my draft');
+});
+
+test('restores a personal pin on attachment and reports a failed unpin without losing the draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const thread = { id: 'saved', title: 'Saved thread', time: {} };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.endsWith('/thread-pins/saved') && init?.method === 'DELETE') {
+      return new Response(JSON.stringify({ detail: 'Pins are temporarily unavailable.' }), { status: 503 });
+    }
+    const body = url.endsWith('/thread-pins') ? { session_ids: ['saved'] }
+      : url.includes('/experimental/session') ? [thread]
+        : url.endsWith('/session/saved') ? thread : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="saved" />);
+  expect(await screen.findByRole('img', { name: 'Pinned' })).toBeTruthy();
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Message input' }), { target: { value: 'Keep this too' } });
+  fireEvent.keyDown(screen.getByRole('button', { name: 'More options' }), { key: 'Enter' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Unpin thread' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Pins are temporarily unavailable. Retry pins');
+  expect(screen.getByRole('img', { name: 'Pinned' })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep this too');
+});
+
 test('steers an active native thread from its maintained composer and keeps queue and stop available', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

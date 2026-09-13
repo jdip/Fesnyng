@@ -116,6 +116,34 @@ def _response(reply: HostResponse, idempotency_key: str | None = None) -> Respon
     )
 
 
+def _pinned_sessions(reply: HostResponse, pinned: list[str]) -> HostResponse:
+    """Keep host recency order while projecting this member's pins first."""
+    if not pinned or not 200 <= reply.status_code < 300:
+        return reply
+    try:
+        sessions = json.loads(reply.content)
+    except json.JSONDecodeError:
+        return reply
+    if not isinstance(sessions, list):
+        return reply
+    pinned_ids = set(pinned)
+    ordered = [
+        session
+        for session in sessions
+        if isinstance(session, dict) and session.get("id") in pinned_ids
+    ]
+    ordered.extend(
+        session
+        for session in sessions
+        if not isinstance(session, dict) or session.get("id") not in pinned_ids
+    )
+    return HostResponse(
+        reply.status_code,
+        json.dumps(ordered, separators=(",", ":")).encode(),
+        reply.content_type,
+    )
+
+
 @router.api_route("/{resource_path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
 async def facade(
     request: Request, organization_id: UUID, agent_id: UUID, resource_path: str
@@ -127,8 +155,11 @@ async def facade(
         return await _events(request, organization, agent)
     mutation = request.method != "GET"
     actor = _authorized_actor(request, organization) if mutation else None
+    user = None
     if not mutation:
         auth.require_member(request, organization)
+        if resource_path in {"session", "experimental/session"}:
+            user = auth.current_user(request)
     _artifact_params(request, resource_path)
     body = await _body(request) if mutation else None
     idempotency_key = None
@@ -152,6 +183,10 @@ async def facade(
             body=body,
             headers=headers,
             params=dict(request.query_params),
+        )
+    if user is not None:
+        reply = _pinned_sessions(
+            reply, auth.get_store(request).list_thread_pins(organization, user.id, agent)
         )
     return _response(reply, idempotency_key)
 

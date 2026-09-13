@@ -233,6 +233,39 @@ class ControlPlaneStore:
             user_id=row["user_id"], organization_id=row["organization_id"], role=row["role"]
         )
 
+    def list_thread_pins(self, organization_id: str, user_id: str, agent_id: str) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT session_id FROM thread_pins
+                WHERE organization_id=? AND user_id=? AND agent_id=?
+                ORDER BY created_at,session_id""",
+                (organization_id, user_id, agent_id),
+            ).fetchall()
+        return [row["session_id"] for row in rows]
+
+    def pin_thread(
+        self, organization_id: str, user_id: str, agent_id: str, session_id: str
+    ) -> list[str]:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO thread_pins(
+                organization_id,user_id,agent_id,session_id,created_at
+                ) VALUES(?,?,?,?,unixepoch())""",
+                (organization_id, user_id, agent_id, session_id),
+            )
+        return self.list_thread_pins(organization_id, user_id, agent_id)
+
+    def unpin_thread(
+        self, organization_id: str, user_id: str, agent_id: str, session_id: str
+    ) -> list[str]:
+        with self.connect() as connection:
+            connection.execute(
+                """DELETE FROM thread_pins
+                WHERE organization_id=? AND user_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, user_id, agent_id, session_id),
+            )
+        return self.list_thread_pins(organization_id, user_id, agent_id)
+
     def login(
         self, login: str, password: str, lifetime_seconds: int
     ) -> tuple[User, SessionCredentials] | None:
