@@ -41,6 +41,31 @@ test('switches organization scope and removes the previous agents immediately', 
   expect(await screen.findByRole('button', { name: /Second researcher/, pressed: false })).toBeTruthy();
 });
 
+test('uses the reporting chart as the default overview with compact settings navigation', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'owner', display_name: 'Owner' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/members') ? [{ user_id: 'owner', role: 'owner' }]
+      : input.endsWith('/policy') ? { desired_version: 1, configuration: { default_permission: 'allow', mandatory_permissions: [], allow_thread_overrides: true } }
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByRole('heading', { name: 'Reporting chart' })).toBeTruthy();
+  const settings = await screen.findByRole('button', { name: 'Organization settings' });
+  expect(screen.getByText('Create your first agent to get started.')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Overview' })).toBeNull();
+  const chart = screen.getByRole('button', { name: 'Reporting chart' });
+  expect(chart.getAttribute('title')).toBe('Reporting chart');
+  expect(chart.getAttribute('aria-current')).toBe('page');
+  expect(settings.getAttribute('title')).toBe('Organization settings');
+  fireEvent.click(settings);
+  expect(await screen.findByRole('heading', { name: 'Organization settings', level: 1 })).toBeTruthy();
+  expect(settings.getAttribute('aria-current')).toBe('page');
+});
+
 test('restores a selected native thread after reloading an authorized organization', async () => {
   window.history.replaceState(null, '', '/#organization=one&agent=agent-one&thread=thread-one');
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: string) => {
