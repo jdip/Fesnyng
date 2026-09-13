@@ -42,7 +42,7 @@ function matchingDeliveries(deliveries: Delivery[], message: NativeMessage) {
 }
 
 function resolutionEvidence(delivery: Delivery) {
-  return delivery.state === 'completed' && delivery.outcome?.kind === 'operator_resolution' && delivery.outcome.outcome === 'completed' && delivery.outcome.evidence
+  return delivery.outcome?.kind === 'operator_resolution' && (delivery.outcome.outcome === 'completed' || delivery.outcome.outcome === 'failed') && delivery.outcome.evidence
     ? delivery.outcome : undefined;
 }
 
@@ -83,7 +83,7 @@ function DeliveryContext({ delivery, configuration, notifications, session, role
     {delivery.payload.origin_id && <p className="muted">Linked to originating request {delivery.payload.origin_id.slice(0, 8)}</p>}
     {delivery.error && <p className="app-error">{delivery.error}</p>}
     {failure && (handled ? <p className="muted">Failure handled</p> : <button className="app-button" onClick={() => { void notifications.acknowledge(configuration.agent, session, delivery, 'failure_handled'); }}>Mark failure handled</button>)}
-    {resolution?.evidence && <><p className="muted">Operator resolution: {resolution.evidence}</p>{unreadResolution(notifications, configuration.agent, session, delivery) && <ViewedContent identity={`${delivery.id}:${resultIdentity(delivery)}`} onView={() => notifications.acknowledge(configuration.agent, session, delivery, 'read')} />}</>}
+    {resolution?.evidence && <><p className="muted">Observed outcome: {resolution.outcome === 'failed' ? 'Failed' : 'Completed'}. {resolution.evidence}</p>{unreadResolution(notifications, configuration.agent, session, delivery) && <ViewedContent identity={`${delivery.id}:${resultIdentity(delivery)}`} onView={() => notifications.acknowledge(configuration.agent, session, delivery, 'read')} />}</>}
     {actionableStates.has(delivery.state) && <details><summary>Investigate outcome</summary><RecoveryActions delivery={delivery} configuration={configuration} notifications={notifications} session={session} /></details>}
   </article>;
 }

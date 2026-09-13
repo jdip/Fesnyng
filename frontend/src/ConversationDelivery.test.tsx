@@ -109,12 +109,26 @@ test('acknowledges visible matched operator-resolution evidence', () => {
   };
   fixture.receipts = { junior: { 'receiving-thread': [{ ...resolution, native_message_id: 'input-one' }] } };
   const mounted = renderDelivery(<ConversationDeliveryFooter />);
-  expect(screen.getByText(/Operator resolution:/)).toBeTruthy();
+  expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Visible delivery result' }));
   expect(fixture.acknowledge).toHaveBeenCalledWith('junior', 'receiving-thread', expect.objectContaining({ id: resolution.id }), 'read');
   fixture.isAcknowledged.mockReturnValue(true);
   mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()}><ConversationDeliveryFooter /></ConversationDeliveryProvider>);
-  expect(screen.getByText(/Operator resolution:/)).toBeTruthy();
+  expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Visible delivery result' })).toBeNull();
+});
+
+test('keeps a mapped failed operator resolution visible without a completed-result acknowledgement', () => {
+  const resolution = { ...peerDelivery, id: 'failed-mapped', state: 'failed', outcome: { kind: 'operator_resolution', operation_id: '00000000-0000-4000-8000-000000000002', evidence: 'The release check failed.', outcome: 'failed' } };
+  fixture.message = {
+    id: 'input-one', role: 'user', status: { type: 'complete' }, metadata: { custom: { opencode: {
+      originalMessage: { id: 'input-one', sessionID: 'receiving-thread' }, parts: [{ messageID: 'input-one' }],
+    } } },
+  };
+  fixture.receipts = { junior: { 'receiving-thread': [{ ...resolution, native_message_id: 'input-one' }] } };
+  renderDelivery(<ConversationDeliveryFooter />);
+  expect(screen.getByText(/Observed outcome: Failed/)).toBeTruthy();
+  expect(screen.getByText(/The release check failed/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Visible delivery result' })).toBeNull();
 });
 
@@ -140,14 +154,22 @@ test('retains unmatched operator-resolution evidence after its read acknowledgem
   const queued = { ...peerDelivery, id: 'queued', state: 'queued', outcome: undefined };
   fixture.receipts = { junior: { 'receiving-thread': [resolution, queued] } };
   const mounted = renderDelivery(<ConversationDeliveryRecovery />);
-  expect(screen.getByText(/Operator resolution:/)).toBeTruthy();
+  expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
   expect(screen.queryByText('Delivery needs review')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Visible delivery result' }));
   expect(fixture.acknowledge).toHaveBeenCalledWith('junior', 'receiving-thread', resolution, 'read');
   fixture.isAcknowledged.mockReturnValue(true);
   mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()}><ConversationDeliveryRecovery /></ConversationDeliveryProvider>);
-  expect(screen.getByText(/Operator resolution:/)).toBeTruthy();
+  expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
   expect(screen.queryByText('Delivery needs review')).toBeNull();
+});
+
+test('keeps an unmatched failed operator resolution in the selected-thread evidence tail', () => {
+  const resolution = { ...peerDelivery, id: 'failed-tail', state: 'failed', outcome: { kind: 'operator_resolution', operation_id: '00000000-0000-4000-8000-000000000003', evidence: 'The host confirmed failure.', outcome: 'failed' } };
+  fixture.receipts = { junior: { 'receiving-thread': [resolution] } };
+  renderDelivery(<ConversationDeliveryRecovery />);
+  expect(screen.getByText(/Observed outcome: Failed/)).toBeTruthy();
+  expect(screen.getByText(/The host confirmed failure/)).toBeTruthy();
 });
 
 test('keeps an unmatched terminal failure available for explicit handling', () => {
