@@ -118,6 +118,43 @@ class DispatchStore:
             ).fetchall()
         return [self._record(row) for row in rows]
 
+    def latest_incoming_at(self, org: str, agent: str) -> dict[str, int]:
+        """Return the newest admitted human or peer message for each mapped thread.
+
+        Native OpenCode history identifies messages by role but cannot retain the
+        Fesnyng actor who admitted them.  Dispatch receipts are therefore the
+        provenance authority for workspace recency, including queued work that
+        has not reached native execution yet.
+        """
+        with self.host.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM host_dispatches
+                WHERE organization_id=? AND agent_id=? ORDER BY session_id,sequence""",
+                (org, agent),
+            ).fetchall()
+        latest: dict[str, int] = {}
+        for row in rows:
+            receipt = self._record(row)
+            if not self._is_incoming(receipt, agent):
+                continue
+            latest[receipt["session_id"]] = max(
+                latest.get(receipt["session_id"], 0), receipt["created_at"] * 1000
+            )
+        return latest
+
+    @staticmethod
+    def _is_incoming(receipt: dict[str, Any], receiving_agent: str) -> bool:
+        payload, author = receipt["payload"], receipt["author"]
+        if not isinstance(payload, dict) or not isinstance(author, dict):
+            return False
+        if payload.get("mode") not in {"queued", "steering"}:
+            return False
+        if not isinstance(author.get("id"), str):
+            return False
+        return author.get("kind") == "human" or (
+            author.get("kind") == "agent" and author["id"] != receiving_agent
+        )
+
     def pending(self) -> list[dict[str, Any]]:
         with self.host.connect() as connection:
             rows = connection.execute(

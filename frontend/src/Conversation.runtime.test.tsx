@@ -230,6 +230,37 @@ test('refreshes externally created threads without discarding composer text', as
   expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Unsent work instructions');
 });
 
+test('refreshes incoming-message order on return to the app without losing the active draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const first = { id: 'session-one', title: 'First thread', time: { created: 1 } };
+  const second = { id: 'session-two', title: 'Second thread', time: { created: 2 } };
+  let threads = [first, second];
+  let refreshGate = Promise.resolve();
+  let finishRefresh = () => {};
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/experimental/session')) await refreshGate;
+    const body = url.includes('/experimental/session') ? threads
+      : url.endsWith('/session/session-one') ? first : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" />);
+  await screen.findByRole('button', { name: 'Second thread' });
+  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Keep this draft' } });
+  const titles = () => screen.getAllByRole('button', { name: /^(First|Second) thread$/ }).map((item) => item.textContent);
+  expect(titles()).toEqual(['First thread', 'Second thread']);
+  // The host orders by incoming authorship even when native creation order differs.
+  threads = [second, first];
+  refreshGate = new Promise<void>((resolve) => { finishRefresh = resolve; });
+  fireEvent.focus(window);
+  expect(screen.getByRole('button', { name: 'First thread' })).toBeTruthy();
+  finishRefresh();
+  await waitFor(() => expect(titles()).toEqual(['Second thread', 'First thread']));
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep this draft');
+  expect(screen.getByRole('button', { name: 'First thread' }).closest('[data-active]')?.getAttribute('data-active')).toBe('true');
+});
+
 test('steers an active native thread from its maintained composer and keeps queue and stop available', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

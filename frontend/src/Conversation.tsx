@@ -9,7 +9,7 @@ import {
   useOpenCodeRuntimeExtras,
 } from '@assistant-ui/react-opencode';
 import { GitForkIcon } from 'lucide-react';
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
+import { createContext, useContext, useEffect, useEffectEvent, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
@@ -79,6 +79,30 @@ export function Conversation({
     previousRefresh.current = refreshKey;
     void runtime.threads.reload().catch((error: unknown) => onError?.(error));
   }, [refreshKey, runtime, onError]);
+  const reportRefreshError = useEffectEvent((error: unknown) => onError?.(error));
+  useEffect(() => {
+    let refreshing = false;
+    let disposed = false;
+    const refresh = () => {
+      if (refreshing || document.visibilityState === 'hidden') return;
+      refreshing = true;
+      void runtime.threads.reload().catch((error: unknown) => {
+        if (!disposed) reportRefreshError(error);
+      }).finally(() => { refreshing = false; });
+    };
+    // Host-owned incoming recency also changes when a peer or another browser writes.
+    const timer = window.setInterval(refresh, 10000);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [runtime]);
   const components = useMemo(() => ({
     Composer: ConversationComposer,
     ToolFallback: OpenCodeToolFallback,
