@@ -88,8 +88,10 @@ export type ThreadComponents = {
     | undefined;
   /** A native runtime action rendered beside maintained assistant actions. */
   MessageAction?: ComponentType | undefined;
-  /** Product read receipts anchored after the rendered assistant content. */
+  /** Product context anchored after rendered native user and assistant content. */
   MessageFooter?: ComponentType | undefined;
+  /** Product attention inside the maintained viewport, directly above its composer. */
+  ThreadFooter?: ComponentType | undefined;
 };
 
 export type ThreadComposerProps = {
@@ -178,7 +180,7 @@ const ThreadRoot: FC<{
   autoFocus,
   allowAttachments,
 }) => {
-  const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  const { Welcome = ThreadWelcome, ThreadFooter } = useContext(ThreadComponentsContext);
 
   return (
     <ThreadPrimitive.Root
@@ -216,6 +218,8 @@ const ThreadRoot: FC<{
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
           </div>
+
+          {ThreadFooter && <ThreadFooter />}
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
@@ -599,6 +603,7 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 );
 
 const UserMessage: FC = () => {
+  const { MessageFooter } = useContext(ThreadComponentsContext);
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -616,6 +621,7 @@ const UserMessage: FC = () => {
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
+        {MessageFooter && <MessageFooter />}
       </div>
 
       <BranchPicker

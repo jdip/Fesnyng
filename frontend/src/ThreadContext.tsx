@@ -2,37 +2,10 @@ import { useEffect, useState } from 'react';
 import { agentPath, api, errorMessage, type Rule } from './workspace-api';
 import { ThreadArtifact } from './ThreadArtifact';
 import { RuleEditor } from './RuleEditor';
-import { resultIdentity, useThreadNotifications, type Delivery } from './ThreadNotifications';
-import { ViewedContent } from './ViewedContent';
 
-export type { Delivery } from './ThreadNotifications';
-export function ThreadContext({ organization, agent, session, csrf, onOpen }: { organization: string; agent: string; session: string; csrf: string; onOpen: (agent: string, session: string) => void }) {
+export function ThreadContext({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {
   const [panel, setPanel] = useState('');
-  return <div className="thread-context"><div className="app-actions">{[['activity', 'Thread activity'], ['policy', 'Thread permissions'], ['files', 'Files']].map(([key, title]) => <button key={key} className="app-button quiet" aria-expanded={panel === key} onClick={() => setPanel(panel === key ? '' : key)}>{title}</button>)}</div>{panel === 'activity' && <DeliveryActivity organization={organization} agent={agent} session={session} csrf={csrf} onOpen={onOpen} />}{panel === 'policy' && <ThreadPolicy organization={organization} agent={agent} session={session} csrf={csrf} />}{panel === 'files' && <ThreadArtifact organization={organization} agent={agent} session={session} />}</div>;
-}
-function DeliveryActivity({ organization, agent, session, csrf, onOpen }: { organization: string; agent: string; session: string; csrf: string; onOpen: (agent: string, session: string) => void }) {
-  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
-  const [error, setError] = useState('');
-  const [revision, setRevision] = useState(0);
-  const notifications = useThreadNotifications();
-  const path = `${agentPath(organization, agent)}/sessions/${encodeURIComponent(session)}/dispatches`;
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: number | undefined;
-    async function poll() {
-      try { const rows = await api<Delivery[]>(path, { signal: controller.signal }); if (!controller.signal.aborted) { setDeliveries(rows); setError(''); } } catch (cause) { if (!controller.signal.aborted) setError(errorMessage(cause)); }
-      if (!controller.signal.aborted) timer = window.setTimeout(() => { void poll(); }, 5000);
-    }
-    void poll(); return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [path, revision]);
-  return <div style={{ maxHeight: 320, overflow: 'auto' }}>{error && <p className="app-error" role="alert">{error}</p>}{!deliveries.length && <p className="muted">No delivery records in this thread yet.</p>}{[...deliveries].reverse().map((delivery) => {
-    const outcome = delivery.outcome;
-    const resolution = delivery.state === 'completed' && outcome?.kind === 'operator_resolution' && outcome.outcome === 'completed' ? outcome : undefined;
-    const failure = delivery.state === 'failed' && outcome?.kind !== 'operator_resolution';
-    const failureHandled = failure && notifications?.isAcknowledged(agent, session, delivery, 'failure_handled');
-    const unreadResolution = resolution?.evidence && resultIdentity(delivery) && !notifications?.isAcknowledged(agent, session, delivery, 'read');
-    return <article className="activity-item" key={delivery.id}><div className="app-actions"><strong>{delivery.author.name}</strong><span className="app-badge">{delivery.author.kind}</span><span>{delivery.state} · {delivery.payload.mode}</span></div><p>{delivery.payload.text.slice(0, 220)}{delivery.payload.text.length > 220 ? '…' : ''}</p>{delivery.author.kind === 'agent' && delivery.author.session_id && <button className="app-button" onClick={() => onOpen(delivery.author.id, delivery.author.session_id!)}>Open source thread</button>}{delivery.payload.origin_id && <p className="muted">Linked to originating request {delivery.payload.origin_id.slice(0, 8)}</p>}{delivery.error && <p className="app-error">{delivery.error}</p>}{failure && (failureHandled ? <p className="muted">Failure handled</p> : <button className="app-button" onClick={() => { void notifications?.acknowledge(agent, session, delivery, 'failure_handled'); }}>Mark failure handled</button>)}{resolution?.evidence && <p className="muted">Operator resolution: {resolution.evidence}</p>}{unreadResolution && notifications && <ViewedContent identity={`${delivery.id}:${resultIdentity(delivery)}`} onView={() => notifications.acknowledge(agent, session, delivery, 'read')} />}{['unresolved', 'uncertain', 'stopping', 'submitting'].includes(delivery.state) && <details><summary>Investigate outcome</summary><p className="muted">Inspect the native conversation and external effects before resolving. Resolution records the finding without repeating the work.</p><button className="app-button" onClick={() => { void api(`${path}/${delivery.id}/reconcile`, { method: 'POST', csrf }).then(() => setRevision((value) => value + 1)).catch((cause: unknown) => setError(errorMessage(cause))); }}>Reconcile available evidence</button><form className="app-form" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void api(`${path}/${delivery.id}/resolve`, { method: 'POST', csrf, body: { operation_id: crypto.randomUUID(), outcome: data.get('outcome'), evidence: data.get('evidence') } }).then(() => setRevision((value) => value + 1)).catch((cause: unknown) => setError(errorMessage(cause))); }}><label>Observed outcome<select name="outcome" className="app-select"><option value="completed">Completed</option><option value="failed">Failed</option></select></label><label>Investigation evidence<textarea name="evidence" required className="app-textarea" /></label><div><button className="app-button">Record resolution</button></div></form></details>}</article>;
-  })}</div>;
+  return <div className="thread-context"><div className="app-actions">{[['policy', 'Thread permissions'], ['files', 'Files']].map(([key, title]) => <button key={key} className="app-button quiet" aria-expanded={panel === key} onClick={() => setPanel(panel === key ? '' : key)}>{title}</button>)}</div>{panel === 'policy' && <ThreadPolicy organization={organization} agent={agent} session={session} csrf={csrf} />}{panel === 'files' && <ThreadArtifact organization={organization} agent={agent} session={session} />}</div>;
 }
 type ThreadPolicyRecord = { desired_revision: number; applied_revision: number; rules: Rule[]; effective_rules: Rule[] };
 function ThreadPolicy({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {
