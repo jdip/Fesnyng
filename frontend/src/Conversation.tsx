@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { GitForkIcon } from 'lucide-react';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { ThreadPinsProvider } from './ThreadPins';
-import { ThreadReadReceipt } from './ThreadReadReceipt';
+import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
@@ -101,7 +101,8 @@ export function Conversation({
     ToolFallback: OpenCodeToolFallback,
     ToolGroup: PendingApprovalToolGroup,
     MessageAction: () => <OpenCodeForkAction runtime={runtime} onError={onError} />,
-    MessageFooter: ThreadReadReceipt,
+    MessageFooter: ConversationMessageFooter,
+    ThreadFooter: ConversationDeliveryRecovery,
   }), [onError, runtime]);
 
   return (

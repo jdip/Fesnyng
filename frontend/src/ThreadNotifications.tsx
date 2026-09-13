@@ -5,6 +5,7 @@ import { agentPath, api, errorMessage, type Agent } from './workspace-api';
 export type Delivery = {
   id: string;
   session_id: string;
+  native_message_id?: string;
   state: string;
   author: { kind: string; id: string; name: string; session_id?: string };
   payload: { text: string; mode: string; origin_id?: string };
