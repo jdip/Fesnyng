@@ -14,8 +14,9 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type P
 import { ThreadPinsProvider } from './ThreadPins';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
-import { ThreadList, type ThreadFileTarget } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
+import { ThreadPolicyDialog } from './ThreadPolicyDialog';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
 import {
@@ -73,11 +74,13 @@ export function Conversation({
   threadPageSize = 6,
   onThreadSelect,
 }: ConversationProps) {
-  const [files, setFiles] = useState<ThreadFileTarget>();
+  const [files, setFiles] = useState<ThreadMenuTarget>();
   const [fileFocusRequest, setFileFocusRequest] = useState(0);
+  const [permissions, setPermissions] = useState<ThreadMenuTarget>();
+  const permissionTrigger = useRef<HTMLButtonElement | null>(null);
   const fileTrigger = useRef<HTMLButtonElement | null>(null);
   const conversationElement = useRef<HTMLElement>(null);
-  const openFiles = (target: ThreadFileTarget, trigger: HTMLButtonElement | null) => {
+  const openFiles = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
     fileTrigger.current = trigger;
     setFiles(target);
     setFileFocusRequest((current) => current + 1);
@@ -87,6 +90,15 @@ export function Conversation({
     setFiles(undefined);
     fileTrigger.current?.focus();
     if (document.activeElement !== fileTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
+  };
+  const openPermissions = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
+    permissionTrigger.current = trigger;
+    setPermissions(target);
+    onThreadSelect?.();
+  };
+  const restorePermissionFocus = () => {
+    permissionTrigger.current?.focus();
+    if (document.activeElement !== permissionTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
   };
   const client = useMemo(
     () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
@@ -126,9 +138,10 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} /></aside>}
+          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} /></aside>}
           <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
           {files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
+          {permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>

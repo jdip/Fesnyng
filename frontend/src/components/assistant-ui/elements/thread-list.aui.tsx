@@ -18,6 +18,7 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   FolderOpenIcon,
+  ShieldCheckIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -36,17 +37,17 @@ import {
   type FC,
 } from "react";
 
-export type ThreadFileTarget = { id: string; title: string };
-type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadFileTarget, trigger: HTMLButtonElement | null) => void };
+export type ThreadMenuTarget = { id: string; title: string };
+type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void };
 const ThreadNavigationContext = createContext<ThreadNavigation>({});
 
-export const ThreadList: FC<ThreadNavigation & { pageSize?: number }> = ({ pageSize = 6, onSelect, onOpenFiles }) => {
+export const ThreadList: FC<ThreadNavigation & { pageSize?: number }> = ({ pageSize = 6, onSelect, onOpenFiles, onOpenPermissions }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
-    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles }}><ThreadListRoot>
+    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions }}><ThreadListRoot>
       <ThreadListNew onClick={onSelect} />
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
@@ -301,11 +302,11 @@ const ThreadListItemMore: FC<{
   onRename: () => void;
 }> = ({ archived, onRename }) => {
   const pins = useThreadPins();
-  const { onOpenFiles } = useContext(ThreadNavigationContext);
+  const { onOpenFiles, onOpenPermissions } = useContext(ThreadNavigationContext);
   const session = useAuiState((s) => s.threadListItem.remoteId);
   const title = useAuiState((s) => s.threadListItem.title) ?? 'New thread';
   const menuTrigger = useRef<HTMLButtonElement>(null);
-  const openedFiles = useRef(false);
+  const openedPanel = useRef(false);
   const pinned = !!session && !!pins?.ids?.has(session);
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
@@ -322,7 +323,7 @@ const ThreadListItemMore: FC<{
         </Button>
       </ThreadListItemMorePrimitive.Trigger>
       <ThreadListItemMorePrimitive.Content
-        onCloseAutoFocus={(event) => { if (openedFiles.current) { event.preventDefault(); openedFiles.current = false; } }}
+        onCloseAutoFocus={(event) => { if (openedPanel.current) { event.preventDefault(); openedPanel.current = false; } }}
         side="right"
         align="start"
         sideOffset={6}
@@ -331,8 +332,12 @@ const ThreadListItemMore: FC<{
       >
         {session && onOpenFiles && <ThreadListItemMorePrimitive.Item
           className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"
-          onSelect={() => { openedFiles.current = true; onOpenFiles({ id: session, title }, menuTrigger.current); }}
+          onSelect={() => { openedPanel.current = true; onOpenFiles({ id: session, title }, menuTrigger.current); }}
         ><FolderOpenIcon aria-hidden className="size-4" />Files</ThreadListItemMorePrimitive.Item>}
+        {session && onOpenPermissions && <ThreadListItemMorePrimitive.Item
+          className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"
+          onSelect={() => { openedPanel.current = true; onOpenPermissions({ id: session, title }, menuTrigger.current); }}
+        ><ShieldCheckIcon aria-hidden className="size-4" />Thread permissions</ThreadListItemMorePrimitive.Item>}
         {pins && session && !archived && <ThreadListItemMorePrimitive.Item
           disabled={!pins.ids || pins.saving}
           className="hover:bg-accent focus:bg-accent flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none"

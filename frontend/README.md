@@ -51,8 +51,9 @@ action that never repeats execution. Refresh failures preserve known indicators
 and expose a retry notice. Conversation content retains contribution authorship, source-thread links and
 contextual investigation controls. Unmatched delivery failures and resolution
 evidence remain accessible beside the conversation; no duplicate activity feed
-or automatic replay is introduced. Thread permissions expose desired and
-applied revisions. While an agent is working, the same conversation composer
+or automatic replay is introduced. Thread permissions in each thread's menu open
+the existing editor for that thread and expose desired and applied revisions,
+without changing the active conversation or its draft. While an agent is working, the same conversation composer
 steers on Enter; Queue remains a secondary action and Stop stays beside it. Type
 `/` in that composer to choose a configured explicit workflow. A rejected or
 uncertain submission retains its draft and selected workflow for retry without
