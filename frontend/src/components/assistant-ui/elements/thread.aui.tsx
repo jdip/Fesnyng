@@ -60,9 +60,6 @@ import {
 import {
   createContext,
   useContext,
-  useEffect,
-  useRef,
-  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -305,22 +302,9 @@ const ThreadComposer: FC<ThreadComposerProps> = ({
   allowAttachments,
 }) => {
   const { Composer = DefaultComposer } = useContext(ThreadComponentsContext);
-  const externalId = useAuiState((state) => state.threadListItem.externalId);
-  const initialExternalIdRef = useRef<string | undefined>(undefined);
-  const [composerKey, setComposerKey] = useState(0);
-  useEffect(() => {
-    if (!externalId) return;
-    if (!initialExternalIdRef.current) {
-      initialExternalIdRef.current = externalId;
-      return;
-    }
-    if (externalId !== initialExternalIdRef.current) {
-      initialExternalIdRef.current = externalId;
-      queueMicrotask(() => setComposerKey((current) => current + 1));
-    }
-  }, [externalId]);
+  const threadIdentity = useAuiState((state) => state.threadListItem.id);
   // A composer owns only one thread's draft, workflow choice, and admission.
-  return <Composer key={composerKey} autoFocus={autoFocus} allowAttachments={allowAttachments} />;
+  return <Composer key={threadIdentity} autoFocus={autoFocus} allowAttachments={allowAttachments} />;
 };
 
 const DefaultComposer: FC<ThreadComposerProps> = ({

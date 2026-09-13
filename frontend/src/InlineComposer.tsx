@@ -8,15 +8,9 @@ import { errorMessage } from './workspace-api';
 type Workflow = { name: string; description: string };
 type DeliveryMode = 'queued' | 'steering';
 type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: string; sessionId?: string };
-type Admission = { key: string; id: string };
+type Admission = { key: string; id: string; sessionId: string; mode: DeliveryMode };
 
 const workflowInventoryUrl = (baseUrl: string) => `${baseUrl.replace(/\/$/, '')}/command`;
-
-const dispatchUrl = (baseUrl: string, sessionId: string) => {
-  const facade = baseUrl.replace(/\/$/, '');
-  if (!facade.endsWith('/opencode')) throw new Error('The selected agent does not provide a conversation facade.');
-  return `${facade.slice(0, -'/opencode'.length)}/sessions/${encodeURIComponent(sessionId)}/dispatches`;
-};
 
 async function responseError(response: Response) {
   const body: unknown = await response.json().catch(() => undefined);
@@ -63,7 +57,10 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     return () => controller.abort();
   }, [baseUrl, fetchWithFesnyngAuth]);
 
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const slashMatcher = useCallback((value: string, trigger: string, cursor: number) => {
     if (slashDismissed || !value.startsWith(trigger)) return null;
@@ -92,102 +89,39 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
 
   const sameThread = (requestThreadIdentity: string) => aui.threadListItem.getState().id === requestThreadIdentity;
   const isCurrentThread = (requestThreadIdentity: string) => isMountedRef.current && sameThread(requestThreadIdentity);
-  const admission = (key: string) => {
-    if (admissionRef.current?.key === key) return admissionRef.current.id;
-    const next = { key, id: crypto.randomUUID() };
-    admissionRef.current = next;
-    return next.id;
-  };
-
-  const submitDelivery = async (mode: DeliveryMode) => {
+  const submit = async (requestedMode: DeliveryMode) => {
     if (submittingRef.current) return;
     const instructions = text;
     const workflow = selectedWorkflow;
     if (!instructions.trim() && !workflow) return;
     const requestThreadIdentity = threadIdentity;
     const requestGeneration = requestGenerationRef.current;
+    const key = `${requestThreadIdentity}\u0000${workflow?.name ?? ''}\u0000${instructions}`;
     submittingRef.current = true;
     setIsSubmitting(true);
     setSubmissionError('');
     setNotice('');
     try {
-      const targetSessionId = await resolveSessionId();
-      const id = admission(`${requestThreadIdentity}\u0000${targetSessionId}\u0000${mode}\u0000${workflow?.name ?? ''}\u0000${instructions}`);
-      const response = await fetchWithFesnyngAuth(dispatchUrl(baseUrl, targetSessionId), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, text: instructions, command: workflow?.name ?? null, mode }),
+      let currentAdmission = admissionRef.current;
+      if (!currentAdmission || currentAdmission.key !== key) {
+        currentAdmission = { key, id: crypto.randomUUID(), sessionId: await resolveSessionId(), mode: requestedMode };
+        admissionRef.current = currentAdmission;
+      }
+      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(currentAdmission.sessionId)}/prompt_async`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
+        body: JSON.stringify({
+          parts: instructions.trim() ? [{ type: 'text', text: instructions }] : [],
+          command: workflow?.name,
+          mode: currentAdmission.mode,
+        }),
       });
       if (!response.ok) throw new Error(await responseError(response));
       if (requestGeneration === requestGenerationRef.current) admissionRef.current = undefined;
       if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) {
         if (aui.composer.getState().text === instructions) aui.composer.setText('');
-        if (selectedWorkflow?.name === workflow?.name) setSelectedWorkflow(undefined);
-        setNotice(mode === 'steering' ? 'Steering sent.' : 'Queued.');
+        setSelectedWorkflow((current) => current === workflow ? undefined : current);
+        setNotice(workflow ? `/${workflow.name} sent.` : currentAdmission.mode === 'steering' ? 'Steering sent.' : 'Queued.');
       }
-    } catch (error) {
-      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) setSubmissionError(errorMessage(error));
-    } finally {
-      if (requestGeneration === requestGenerationRef.current) {
-        submittingRef.current = false;
-        if (isCurrentThread(requestThreadIdentity)) setIsSubmitting(false);
-      }
-    }
-  };
-
-  const submitCommand = async () => {
-    if (submittingRef.current || !selectedWorkflow) return;
-    const instructions = text;
-    const workflow = selectedWorkflow;
-    const requestThreadIdentity = threadIdentity;
-    const requestGeneration = requestGenerationRef.current;
-    submittingRef.current = true;
-    setIsSubmitting(true);
-    setSubmissionError('');
-    setNotice('');
-    try {
-      const targetSessionId = await resolveSessionId();
-      const id = admission(`${requestThreadIdentity}\u0000${targetSessionId}\u0000command\u0000${workflow.name}\u0000${instructions}`);
-      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(targetSessionId)}/prompt_async`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': id },
-        body: JSON.stringify({ parts: instructions.trim() ? [{ type: 'text', text: instructions }] : [], command: workflow.name, mode: 'queued' }),
-      });
-      if (!response.ok) throw new Error(await responseError(response));
-      if (requestGeneration === requestGenerationRef.current) admissionRef.current = undefined;
-      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) {
-        if (aui.composer.getState().text === instructions) aui.composer.setText('');
-        if (selectedWorkflow?.name === workflow.name) setSelectedWorkflow(undefined);
-        setNotice(`/${workflow.name} sent.`);
-      }
-    } catch (error) {
-      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) setSubmissionError(errorMessage(error));
-    } finally {
-      if (requestGeneration === requestGenerationRef.current) {
-        submittingRef.current = false;
-        if (isCurrentThread(requestThreadIdentity)) setIsSubmitting(false);
-      }
-    }
-  };
-
-  const submitNative = async () => {
-    if (submittingRef.current || !text.trim()) return;
-    const instructions = text;
-    const requestThreadIdentity = threadIdentity;
-    const requestGeneration = requestGenerationRef.current;
-    submittingRef.current = true;
-    setIsSubmitting(true);
-    setSubmissionError('');
-    setNotice('');
-    try {
-      const targetSessionId = await resolveSessionId();
-      const id = admission(`${requestThreadIdentity}\u0000${targetSessionId}\u0000native\u0000${instructions}`);
-      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(targetSessionId)}/prompt_async`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': id },
-        body: JSON.stringify({ parts: [{ type: 'text', text: instructions }], mode: 'queued' }),
-      });
-      if (!response.ok) throw new Error(await responseError(response));
-      if (requestGeneration === requestGenerationRef.current) admissionRef.current = undefined;
-      if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)
-        && aui.composer.getState().text === instructions) aui.composer.setText('');
     } catch (error) {
       if (requestGeneration === requestGenerationRef.current && isCurrentThread(requestThreadIdentity)) setSubmissionError(errorMessage(error));
     } finally {
@@ -199,16 +133,8 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   };
 
   const onSubmit = (event: FormEvent) => {
-    if (isRunning) {
-      event.preventDefault();
-      void submitDelivery('steering');
-    } else if (selectedWorkflow) {
-      event.preventDefault();
-      void submitCommand();
-    } else {
-      event.preventDefault();
-      void submitNative();
-    }
+    event.preventDefault();
+    void submit(isRunning ? 'steering' : 'queued');
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -219,7 +145,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     }
     if (isRunning && event.key === 'Enter') {
       event.preventDefault();
-      void submitDelivery('steering');
+      void submit('steering');
     }
   };
 
@@ -242,10 +168,10 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         </ComposerPrimitive.Unstable_TriggerPopover>
         {text.startsWith('/') && inventoryError && <p className="app-error px-2" role="alert">{inventoryError}</p>}
         <div className="aui-composer-action-wrapper relative flex items-center justify-between px-1">
-          {isRunning ? <button type="button" className="flex items-center gap-1 text-sm text-muted-foreground" disabled={!canSubmit} onClick={() => void submitDelivery('queued')} aria-label="Queue message"><ListPlusIcon className="size-4" /><span>Queue</span></button> : <span aria-hidden="true" />}
+          {isRunning ? <button type="button" className="flex items-center gap-1 text-sm text-muted-foreground" disabled={!canSubmit} onClick={() => void submit('queued')} aria-label="Queue message"><ListPlusIcon className="size-4" /><span>Queue</span></button> : <span aria-hidden="true" />}
           <div className="flex items-center gap-1.5">
-            {!isRunning && !selectedWorkflow && <button type="button" className="aui-composer-send rounded-full bg-primary p-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void submitNative()} aria-label="Send message"><ArrowUpIcon className="size-4" /></button>}
-            {(isRunning || selectedWorkflow) && <button type="button" className="flex items-center gap-1 rounded-full bg-primary px-3 py-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void (isRunning ? submitDelivery('steering') : submitCommand())} aria-label={isRunning ? 'Steer agent' : 'Run workflow'}><ArrowUpIcon className="size-4" /><span>{isRunning ? 'Steer' : 'Run'}</span></button>}
+            {!isRunning && !selectedWorkflow && <button type="button" className="aui-composer-send rounded-full bg-primary p-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void submit('queued')} aria-label="Send message"><ArrowUpIcon className="size-4" /></button>}
+            {(isRunning || selectedWorkflow) && <button type="button" className="flex items-center gap-1 rounded-full bg-primary px-3 py-2 text-primary-foreground" disabled={!canSubmit} onClick={() => void submit(isRunning ? 'steering' : 'queued')} aria-label={isRunning ? 'Steer agent' : 'Run workflow'}><ArrowUpIcon className="size-4" /><span>{isRunning ? 'Steer' : 'Run'}</span></button>}
             {isRunning && <ComposerPrimitive.Cancel asChild><button type="button" className="rounded-full bg-primary p-2 text-primary-foreground" aria-label="Stop generating"><SquareIcon className="size-4 fill-current" /></button></ComposerPrimitive.Cancel>}
           </div>
         </div>

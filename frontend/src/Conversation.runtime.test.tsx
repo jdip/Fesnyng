@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { Conversation } from './Conversation';
 
 class ResizeObserverStub {
@@ -220,6 +221,7 @@ test('refreshes externally created threads without discarding composer text', as
   }));
   const props = { baseUrl: 'http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode', csrfToken: 'csrf-example' };
   const { rerender } = render(<Conversation {...props} refreshKey={0} />);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const composer = await screen.findByRole('textbox', { name: 'Message input' });
   fireEvent.change(composer, { target: { value: 'Unsent work instructions' } });
   threads = [{ id: 'external-thread', title: 'Colleague investigation', time: {} }];
@@ -233,9 +235,13 @@ test('steers an active native thread from its maintained composer and keeps queu
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? input.toString();
-    if (url.endsWith('/event')) return new Response(`data: ${JSON.stringify({
-      type: 'session.status', properties: { sessionID: 'session-one', status: { type: 'busy' } },
-    })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    if (url.endsWith('/event')) return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          type: 'session.status', properties: { sessionID: 'session-one', status: { type: 'busy' } },
+        })}\n\n`));
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } });
     const body = url.includes('/experimental/session')
       ? [{ id: 'session-one', title: 'Release review', time: {} }]
       : url.includes('/session/session-one/message')
@@ -258,17 +264,18 @@ test('steers an active native thread from its maintained composer and keeps queu
     />,
   );
 
-  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  await screen.findByRole('textbox', { name: 'Message input' });
   expect(await screen.findByRole('button', { name: 'Steer agent' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Queue message' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Stop generating' })).toBeTruthy();
+  const composer = screen.getByRole('textbox', { name: 'Message input' });
 
   fireEvent.change(composer, { target: { value: 'Keep composing.' } });
   fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true });
   fireEvent.keyDown(composer, { key: 'Enter', isComposing: true });
   expect(fetchMock.mock.calls.some(([input]) => {
     const url = input instanceof Request ? input.url : input.toString();
-    return url.includes('/dispatches');
+    return url.includes('/prompt_async');
   })).toBe(false);
 
   fireEvent.change(composer, { target: { value: 'Queue this after the current work.' } });
@@ -276,12 +283,12 @@ test('steers an active native thread from its maintained composer and keeps queu
   await waitFor(() => {
     const dispatches = fetchMock.mock.calls.filter(([input]) => {
       const url = input instanceof Request ? input.url : input.toString();
-      return url.includes('/dispatches');
+      return url.includes('/prompt_async');
     });
     expect(dispatches).toHaveLength(1);
     const init = (dispatches[0] as unknown as [RequestInfo | URL, RequestInit?])[1] ?? {};
     expect(JSON.parse(String(init.body))).toMatchObject({
-      text: 'Queue this after the current work.', mode: 'queued', command: null,
+      parts: [{ type: 'text', text: 'Queue this after the current work.' }], mode: 'queued',
     });
   });
 
@@ -291,12 +298,12 @@ test('steers an active native thread from its maintained composer and keeps queu
   await waitFor(() => {
     const dispatches = fetchMock.mock.calls.filter(([input]) => {
       const url = input instanceof Request ? input.url : input.toString();
-      return url.includes('/dispatches');
+      return url.includes('/prompt_async');
     });
     expect(dispatches).toHaveLength(2);
     const init = (dispatches[1] as unknown as [RequestInfo | URL, RequestInit?])[1] ?? {};
     expect(JSON.parse(String(init.body))).toMatchObject({
-      text: 'Check the migration evidence.', mode: 'steering', command: null,
+      parts: [{ type: 'text', text: 'Check the migration evidence.' }], mode: 'steering',
     });
   });
 });
@@ -317,12 +324,14 @@ test('restores an idle native-send draft when the host rejects it', async () => 
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
   }));
 
-  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" showThreadList={false} />);
+  render(<StrictMode><Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" showThreadList={false} /></StrictMode>);
   const composer = await screen.findByRole('textbox', { name: 'Message input' });
   fireEvent.change(composer, { target: { value: 'Keep this draft after rejection.' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
 
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep this draft after rejection.'));
+  expect((await screen.findByRole('alert')).textContent).toContain('The host rejected this prompt.');
+  expect(screen.getByRole('button', { name: 'Send message' })).toHaveProperty('disabled', false);
 });
 
 test('selects a namespaced workflow with slash keyboard input and preserves it with its draft after rejection', async () => {
@@ -347,13 +356,14 @@ test('selects a namespaced workflow with slash keyboard input and preserves it w
   });
   vi.stubGlobal('fetch', fetchMock);
 
-  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} />);
+  const { rerender } = render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} onError={() => {}} />);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const composer = await screen.findByRole('textbox', { name: 'Message input' });
   fireEvent.change(composer, { target: { value: '/' } });
   expect(await screen.findByRole('listbox', { name: 'Configured workflows' })).toBeTruthy();
-  fireEvent.keyDown(composer, { key: 'Enter' });
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message input' }), { key: 'Enter' });
   expect(await screen.findByLabelText('Remove workflow fesnyng/workspace-check')).toBeTruthy();
-  fireEvent.change(composer, { target: { value: 'Check the changed workspace.' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Check the changed workspace.' } });
   fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
 
   await waitFor(() => {
@@ -371,4 +381,154 @@ test('selects a namespaced workflow with slash keyboard input and preserves it w
   expect((await screen.findByRole('alert')).textContent).toContain('Workflow arguments were rejected.');
   expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Check the changed workspace.');
   expect(screen.getByLabelText('Remove workflow fesnyng/workspace-check')).toBeTruthy();
+  const firstRequest = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[0] as unknown as [RequestInfo | URL, RequestInit];
+  const firstAdmission = new Headers(firstRequest[1].headers).get('Idempotency-Key');
+
+  rerender(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} onError={() => {}} />);
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Check the changed workspace.');
+  expect(screen.getByLabelText('Remove workflow fesnyng/workspace-check')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })).toHaveLength(2));
+  const retryRequest = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[1] as unknown as [RequestInfo | URL, RequestInit];
+  expect(new Headers(retryRequest[1].headers).get('Idempotency-Key')).toBe(firstAdmission);
+});
+
+test('retries the first accepted delivery mode and admission across idle and active transitions', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const encoder = new TextEncoder();
+  let events: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const emit = (type: string, properties: Record<string, unknown>) => {
+    events?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`));
+  };
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.endsWith('/event')) return new Response(new ReadableStream({
+      start(controller) {
+        events = controller;
+        emit('session.status', { sessionID: 'session-one', status: { type: 'busy' } });
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+    if (url.includes('/prompt_async')) return new Response(JSON.stringify({ detail: 'Retry later.' }), {
+      status: 422, headers: { 'content-type': 'application/json' },
+    });
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Release review', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? []
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Release review', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} />);
+  expect(await screen.findByRole('button', { name: 'Steer agent' })).toBeTruthy();
+  let composer = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Preserve steering.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Steer agent' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })).toHaveLength(1));
+  const steeringRequest = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[0] as unknown as [RequestInfo | URL, RequestInit];
+
+  emit('session.idle', { sessionID: 'session-one' });
+  expect(await screen.findByRole('button', { name: 'Send message' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })).toHaveLength(2));
+  const steeringRetry = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[1] as unknown as [RequestInfo | URL, RequestInit];
+  expect(new Headers(steeringRetry[1].headers).get('Idempotency-Key')).toBe(new Headers(steeringRequest[1].headers).get('Idempotency-Key'));
+  expect(JSON.parse(String(steeringRetry[1].body)).mode).toBe('steering');
+
+  composer = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Preserve queue.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })).toHaveLength(3));
+  const queuedRequest = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[2] as unknown as [RequestInfo | URL, RequestInit];
+
+  emit('session.status', { sessionID: 'session-one', status: { type: 'busy' } });
+  expect(await screen.findByRole('button', { name: 'Steer agent' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Steer agent' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })).toHaveLength(4));
+  const queuedRetry = fetchMock.mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/prompt_async');
+  })[3] as unknown as [RequestInfo | URL, RequestInit];
+  expect(new Headers(queuedRetry[1].headers).get('Idempotency-Key')).toBe(new Headers(queuedRequest[1].headers).get('Idempotency-Key'));
+  expect(JSON.parse(String(queuedRetry[1].body)).mode).toBe('queued');
+});
+
+test('keeps a replacement workflow when an earlier workflow submission settles', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  let settleFirst: (response: Response) => void = () => {};
+  const firstResponse = new Promise<Response>((resolve) => { settleFirst = resolve; });
+  let promptCalls = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.endsWith('/opencode/command')) return new Response(JSON.stringify([
+      { name: 'fesnyng/first', description: 'first' },
+      { name: 'fesnyng/replacement', description: 'replacement' },
+    ]), { headers: { 'content-type': 'application/json' } });
+    if (url.includes('/prompt_async')) {
+      promptCalls += 1;
+      return promptCalls === 1 ? firstResponse : new Response('{}');
+    }
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Release review', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? []
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Release review', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} />);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Message input' }), { target: { value: '/first' } });
+  expect(await screen.findByRole('listbox', { name: 'Configured workflows' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message input' }), { key: 'Enter' });
+  expect(await screen.findByLabelText('Remove workflow fesnyng/first')).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Start first.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
+  await waitFor(() => expect(promptCalls).toBe(1));
+
+  fireEvent.click(screen.getByLabelText('Remove workflow fesnyng/first'));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: '/replacement' } });
+  expect(await screen.findByRole('listbox', { name: 'Configured workflows' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message input' }), { key: 'Enter' });
+  expect(await screen.findByLabelText('Remove workflow fesnyng/replacement')).toBeTruthy();
+
+  settleFirst(new Response('{}'));
+  await waitFor(() => expect(screen.getByLabelText('Remove workflow fesnyng/replacement')).toBeTruthy());
 });
