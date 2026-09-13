@@ -56,8 +56,13 @@ applied revisions. While an agent is working, the same conversation composer
 steers on Enter; Queue remains a secondary action and Stop stays beside it. Type
 `/` in that composer to choose a configured explicit workflow. A rejected or
 uncertain submission retains its draft and selected workflow for retry without
-creating a second delivery. The Files panel reads text artifacts relative to the
-selected thread's workspace. Selection is preserved in the page fragment so a
+creating a second delivery. Files in each thread's menu opens that thread's
+authorized workspace in a resizable read-only panel, including when another
+conversation is selected. Browse folders and breadcrumbs, filter and order the
+current listing, inspect metadata, refresh, preview supported files, and download
+their original bytes. Large and unsupported content has an explicit preview
+state. Opening or closing the panel preserves the conversation and draft; the
+resize separator supports keyboard control. Selection is preserved in the page fragment so a
 reload can reattach to the same authorized conversation.
 
 The sidebar identifies the current organization with its configured icon and name.

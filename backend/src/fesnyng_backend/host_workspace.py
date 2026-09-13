@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import base64
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -90,6 +92,14 @@ class NativeRuntime(Protocol):
     async def workspace_path(
         self, organization_id: str, agent_id: str, directory: str, path: str
     ) -> str: ...
+
+    async def workspace_metadata_many(
+        self, organization_id: str, agent_id: str, directory: str, paths: list[str]
+    ) -> dict[str, dict[str, Any]]: ...
+
+    def workspace_download(
+        self, organization_id: str, agent_id: str, directory: str, path: str
+    ) -> Any: ...
 
     async def fork_workspace(
         self, organization_id: str, agent_id: str, source_directory: str
@@ -535,20 +545,121 @@ class Workspace:
             "permission": envelope.policy.default_permission,
         }
 
-    async def artifact(
-        self, org: str, agent: str, session_id: str, path: str, *, content: bool
-    ) -> Any:
-        if path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
-            raise ValueError("Artifact path must be relative to its mapped workspace")
-        session = self.host.session(org, agent, session_id)
+    async def files(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
+        path = self._artifact_path(path, allow_root=True)
+        session = await self._scoped_session(org, agent, session_id)
         await self.runtime.workspace_path(org, agent, session["directory"], path)
-        return await self.runtime.request_with_query(
-            org,
-            agent,
-            "/file/content" if content else "/file",
-            {"path": path},
-            directory=session["directory"],
+        native = await self.runtime.request_with_query(
+            org, agent, "/file", {"path": path}, directory=session["directory"]
         )
+        if not isinstance(native, list):
+            raise RuntimeUnavailable("Native file listing response is invalid")
+        candidates: list[tuple[str, str]] = []
+        for item in native:
+            if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
+                continue
+            name = item["name"].rstrip("/")
+            if not name or "/" in name or name in {".", ".."}:
+                continue
+            entry_path = f"{path}/{name}" if path else name
+            candidates.append((name, entry_path))
+        # Native listings are untrusted. Bound each Docker operation while retaining
+        # every entry rather than turning a large repository into N round trips.
+        metadata_by_path: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(candidates), 512):
+            batch = candidates[start : start + 512]
+            metadata_by_path.update(
+                await self.runtime.workspace_metadata_many(
+                    org, agent, session["directory"], [entry_path for _, entry_path in batch]
+                )
+            )
+        entries: list[dict[str, Any]] = []
+        for name, entry_path in candidates:
+            metadata = metadata_by_path.get(entry_path)
+            if metadata is None or metadata.get("type") not in {"file", "directory"}:
+                continue
+            size, modified_at = metadata.get("size"), metadata.get("modifiedAt")
+            if not isinstance(size, int) or not isinstance(modified_at, int):
+                raise RuntimeUnavailable("Workspace file metadata is invalid")
+            entries.append(
+                {
+                    "name": name,
+                    "path": entry_path,
+                    "type": metadata["type"],
+                    "size": size,
+                    "modifiedAt": modified_at,
+                }
+            )
+        entries.sort(key=lambda item: (item["type"] != "directory", item["name"].casefold()))
+        return {
+            "rootSessionID": session["root_session_id"],
+            "sessionID": session_id,
+            "path": path,
+            "entries": entries,
+        }
+
+    async def preview(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
+        path = self._artifact_path(path)
+        session = await self._scoped_session(org, agent, session_id)
+        async with self.runtime.workspace_download(org, agent, session["directory"], path) as (
+            metadata,
+            stream,
+        ):
+            data = bytearray()
+            async for chunk in stream:
+                data.extend(chunk)
+                if len(data) > 128 * 1024:
+                    del data[128 * 1024 :]
+                    break
+        content = bytes(data)
+        try:
+            text = content.decode("utf-8")
+            binary = "\x00" in text
+        except UnicodeDecodeError:
+            text, binary = "", True
+        content_type = _content_type(content, not binary)
+        return {
+            "rootSessionID": session["root_session_id"],
+            "sessionID": session_id,
+            "path": path,
+            "type": "binary" if binary else "text",
+            "content": base64.b64encode(content).decode() if binary else text,
+            "encoding": "base64" if binary else "utf-8",
+            "size": metadata["size"],
+            "truncated": metadata["size"] > len(content),
+            "contentType": content_type,
+        }
+
+    @asynccontextmanager
+    async def download(
+        self, org: str, agent: str, session_id: str, path: str
+    ) -> AsyncIterator[tuple[dict[str, Any], AsyncIterator[bytes]]]:
+        path = self._artifact_path(path)
+        session = await self._scoped_session(org, agent, session_id)
+        async with self.runtime.workspace_download(org, agent, session["directory"], path) as (
+            metadata,
+            stream,
+        ):
+            yield (
+                {
+                    "rootSessionID": session["root_session_id"],
+                    "sessionID": session_id,
+                    "path": path,
+                    **metadata,
+                },
+                stream,
+            )
+
+    @staticmethod
+    def _artifact_path(path: str, *, allow_root: bool = False) -> str:
+        normalized = path.rstrip("/")
+        if (
+            (not normalized and not allow_root)
+            or normalized.startswith("/")
+            or (normalized and any(part in {"", ".", ".."} for part in normalized.split("/")))
+        ):
+            raise ValueError("Artifact path must be relative to its mapped workspace")
+        return normalized
 
     async def event_authorized(
         self, org: str, agent: str, session_id: object, directory: str
@@ -675,15 +786,16 @@ class Workspace:
     async def _scoped_session(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         """Resolve a root mapping or a child proven by its mapped root's native tree."""
         try:
-            return self.host.session(org, agent, session_id)
+            root = self.host.session(org, agent, session_id)
+            return {**root, "root_session_id": root["session_id"]}
         except LookupError:
             pass
         roots = self.host.sessions(org, agent)
         mapped = {row["session_id"]: row for row in roots}
-        pending = [(row["session_id"], row["directory"]) for row in roots]
-        seen = {root for root, _ in pending}
+        pending = [(row["session_id"], row["directory"], row["session_id"]) for row in roots]
+        seen = {root for root, _, _ in pending}
         while pending:
-            parent, directory = pending.pop()
+            parent, directory, root_session_id = pending.pop()
             children = await self.runtime.request(
                 org, agent, f"/session/{parent}/children", directory=directory
             )
@@ -703,9 +815,13 @@ class Workspace:
                 if child_id in seen:
                     raise RuntimeUnavailable("Native child session ancestry is invalid")
                 if child_id == session_id:
-                    return {"session_id": child_id, "directory": child_directory}
+                    return {
+                        "session_id": child_id,
+                        "directory": child_directory,
+                        "root_session_id": root_session_id,
+                    }
                 seen.add(child_id)
-                pending.append((child_id, child_directory))
+                pending.append((child_id, child_directory, root_session_id))
         raise LookupError("Thread not found")
 
     @staticmethod
@@ -742,6 +858,16 @@ class Workspace:
             time["archived"] = session["archived_at"]
         projected["time"] = time
         return projected
+
+
+def _content_type(data: bytes, text: bool) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "text/plain; charset=utf-8" if text else "application/octet-stream"
 
 
 def _event_session_id(data: object) -> str | None:

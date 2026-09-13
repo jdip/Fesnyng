@@ -14,7 +14,8 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type P
 import { ThreadPinsProvider } from './ThreadPins';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
-import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadList, type ThreadFileTarget } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadArtifactPanel } from './ThreadArtifact';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
 import {
@@ -72,6 +73,21 @@ export function Conversation({
   threadPageSize = 6,
   onThreadSelect,
 }: ConversationProps) {
+  const [files, setFiles] = useState<ThreadFileTarget>();
+  const [fileFocusRequest, setFileFocusRequest] = useState(0);
+  const fileTrigger = useRef<HTMLButtonElement | null>(null);
+  const conversationElement = useRef<HTMLElement>(null);
+  const openFiles = (target: ThreadFileTarget, trigger: HTMLButtonElement | null) => {
+    fileTrigger.current = trigger;
+    setFiles(target);
+    setFileFocusRequest((current) => current + 1);
+    onThreadSelect?.();
+  };
+  const closeFiles = () => {
+    setFiles(undefined);
+    fileTrigger.current?.focus();
+    if (document.activeElement !== fileTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
+  };
   const client = useMemo(
     () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
     [baseUrl, csrfToken],
@@ -109,9 +125,10 @@ export function Conversation({
     <AssistantRuntimeProvider runtime={runtime}>
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
-        <section className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} /></aside>}
+        <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
+          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} /></aside>}
           <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
+          {files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>

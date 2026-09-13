@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import { agentPath, api, errorMessage, type Rule } from './workspace-api';
-import { ThreadArtifact } from './ThreadArtifact';
 import { RuleEditor } from './RuleEditor';
 
 export function ThreadContext({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {
   const [panel, setPanel] = useState('');
-  return <div className="thread-context"><div className="app-actions">{[['policy', 'Thread permissions'], ['files', 'Files']].map(([key, title]) => <button key={key} className="app-button quiet" aria-expanded={panel === key} onClick={() => setPanel(panel === key ? '' : key)}>{title}</button>)}</div>{panel === 'policy' && <ThreadPolicy organization={organization} agent={agent} session={session} csrf={csrf} />}{panel === 'files' && <ThreadArtifact organization={organization} agent={agent} session={session} />}</div>;
+  return <div className="thread-context"><button className="app-button quiet" aria-expanded={panel === 'policy'} onClick={() => setPanel(panel === 'policy' ? '' : 'policy')}>Thread permissions</button>{panel === 'policy' && <ThreadPolicy organization={organization} agent={agent} session={session} csrf={csrf} />}</div>;
 }
 type ThreadPolicyRecord = { desired_revision: number; applied_revision: number; rules: Rule[]; effective_rules: Rule[] };
 function ThreadPolicy({ organization, agent, session, csrf }: { organization: string; agent: string; session: string; csrf: string }) {

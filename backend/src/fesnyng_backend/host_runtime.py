@@ -282,7 +282,9 @@ class DockerRuntime:
         self, organization_id: str, agent_id: str, directory: str, path: str
     ) -> str:
         """Resolve an artifact path in-container and reject symlink/workspace escapes."""
-        if path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
+        if path and (
+            path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
             raise ValueError("Artifact path must be relative to its mapped workspace")
         await self.inspect(organization_id, agent_id)
         target = await self.docker(
@@ -290,7 +292,7 @@ class DockerRuntime:
             self.name(agent_id),
             "sh",
             "-c",
-            'base="$(realpath -- "$1")" || exit 1; target="$(realpath -- "$base/$2")" || exit 1; case "$target" in "$base"/*) printf %s "$target";; *) exit 1;; esac',
+            'base="$(realpath -- "$1")" || exit 1; test "$base" = "$1" || exit 1; target="$(realpath -- "$base/$2")" || exit 1; case "$target" in "$base"|"$base"/*) printf %s "$target";; *) exit 1;; esac',
             "workspace-path",
             directory,
             path,
@@ -299,6 +301,140 @@ class DockerRuntime:
         if not resolved:
             raise RuntimeUnavailable("Artifact path is unavailable")
         return resolved
+
+    @asynccontextmanager
+    async def workspace_download(
+        self, organization_id: str, agent_id: str, directory: str, path: str
+    ) -> AsyncIterator[tuple[dict[str, int | str], AsyncIterator[bytes]]]:
+        """Stream a regular workspace file after validating its opened descriptor."""
+        if path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
+            raise ValueError("Artifact path must be relative to its mapped workspace")
+        await self.inspect(organization_id, agent_id)
+        script = (
+            'base="$(realpath -- "$1")" || exit 1; test "$base" = "$1" || exit 1; test -f "$base/$2" || exit 1; exec 3< "$base/$2" || exit 1; '
+            'opened="$(realpath -- /proc/self/fd/3)" || exit 1; '
+            'case "$opened" in "$base"/*) ;; *) exit 1;; esac; '
+            "[ -f /proc/self/fd/3 ] || exit 1; "
+            'printf "file\\0%s\\0%s\\0" "$(stat -Lc %s /proc/self/fd/3)" '
+            '"$(stat -Lc %Y /proc/self/fd/3)"; cat /proc/self/fd/3'
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                self.name(agent_id),
+                "timeout",
+                "120",
+                "sh",
+                "-c",
+                script,
+                "workspace-download",
+                directory,
+                path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            raise RuntimeUnavailable(
+                "Docker operation unavailable; check host operations"
+            ) from None
+        stdout = process.stdout
+        assert stdout is not None
+
+        async def close_process() -> None:
+            if process.returncode is not None:
+                return
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except TimeoutError:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        return
+                await process.wait()
+
+        try:
+            fields = [
+                (await asyncio.wait_for(stdout.readuntil(b"\0"), timeout=2)).removesuffix(b"\0")
+                for _ in range(3)
+            ]
+            if fields[0] != b"file":
+                raise ValueError
+            metadata = {"type": "file", "size": int(fields[1]), "modifiedAt": int(fields[2]) * 1000}
+        except asyncio.CancelledError:
+            await close_process()
+            raise
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, ValueError):
+            await close_process()
+            raise RuntimeUnavailable("Artifact path is unavailable") from None
+
+        async def chunks() -> AsyncIterator[bytes]:
+            while chunk := await stdout.read(64 * 1024):
+                yield chunk
+            if await process.wait() != 0:
+                raise RuntimeUnavailable("Artifact download failed")
+
+        try:
+            yield metadata, chunks()
+        finally:
+            await close_process()
+
+    async def workspace_metadata_many(
+        self, organization_id: str, agent_id: str, directory: str, paths: list[str]
+    ) -> dict[str, dict[str, int | str]]:
+        """Read native-listing metadata in one bounded, descriptor-safe operation."""
+        if len(paths) > 512 or any(
+            path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in paths
+        ):
+            raise ValueError("Artifact path must be relative to its mapped workspace")
+        if not paths:
+            return {}
+        await self.inspect(organization_id, agent_id)
+        script = (
+            'base="$(realpath -- "$1")" || exit 1; test "$base" = "$1" || exit 1; shift; '
+            'for path do test -f "$base/$path" || test -d "$base/$path" || continue; '
+            'exec 3< "$base/$path" || continue; opened="$(realpath -- /proc/self/fd/3)" || continue; '
+            'case "$opened" in "$base"/*) ;; *) exec 3<&-; continue;; esac; '
+            "if [ -d /proc/self/fd/3 ]; then kind=directory; elif [ -f /proc/self/fd/3 ]; then kind=file; "
+            'else exec 3<&-; continue; fi; printf "%s\\0%s\\0%s\\0%s\\0" "$path" "$kind" '
+            '"$(stat -Lc %s /proc/self/fd/3)" "$(stat -Lc %Y /proc/self/fd/3)"; exec 3<&-; done'
+        )
+        try:
+            result = await self.docker(
+                "exec",
+                self.name(agent_id),
+                "timeout",
+                "20",
+                "sh",
+                "-c",
+                script,
+                "workspace-metadata",
+                directory,
+                *paths,
+            )
+            fields = result.split(b"\0")
+            if fields.pop() != b"" or len(fields) % 4:
+                return {}
+            allowed = set(paths)
+            entries: dict[str, dict[str, int | str]] = {}
+            for raw_path, kind, size, modified_at in zip(*[iter(fields)] * 4, strict=True):
+                path = raw_path.decode()
+                if path not in allowed or kind not in {b"file", b"directory"}:
+                    continue
+                entries[path] = {
+                    "type": kind.decode(),
+                    "size": int(size),
+                    "modifiedAt": int(modified_at) * 1000,
+                }
+            return entries
+        except (ValueError, UnicodeDecodeError):
+            return {}
 
     async def fork_workspace(
         self, organization_id: str, agent_id: str, source_directory: str
