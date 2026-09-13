@@ -685,10 +685,14 @@ class Interactions:
         statuses = await self.runtime.request(
             organization_id, agent_id, "/session/status", directory=directory
         )
-        if not isinstance(statuses, dict):
+        if not isinstance(statuses, Mapping):
             raise RuntimeUnavailable("Native thread status response is invalid")
-        state = statuses.get(session_id, {})
-        return isinstance(state, dict) and state.get("type", "idle") == "idle"
+        if session_id not in statuses:
+            return True
+        state = statuses[session_id]
+        if not isinstance(state, Mapping) or state.get("type") not in {"idle", "busy", "retry"}:
+            raise RuntimeUnavailable("Native thread status response is invalid")
+        return state["type"] == "idle"
 
     async def _pending_native(
         self,

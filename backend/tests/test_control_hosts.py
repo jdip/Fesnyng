@@ -183,9 +183,15 @@ def test_runtime_routes_deny_unauthorized_requests_before_host_network(organizat
             await _sign_in(member_client, "member", "a separate member password")
             member_csrf = member_client.headers["X-CSRF-Token"]
             apply_path = f"/organizations/{org.id}/agents/{agent['id']}/apply"
+            lifecycle_path = f"/organizations/{org.id}/agents/{agent['id']}/lifecycle"
             session_path = f"/organizations/{org.id}/agents/{agent['id']}/sessions"
             login_path = f"/organizations/{org.id}/hosts/{host_id}/profiles/{profile['id']}/login"
             assert (await member_client.post(apply_path)).status_code == 403
+            assert (
+                await member_client.post(
+                    lifecycle_path, json={"action": "start", "confirmed": False}
+                )
+            ).status_code == 403
             assert (await member_client.post(login_path)).status_code == 403
             member_client.headers.pop("X-CSRF-Token")
             assert (
@@ -200,5 +206,52 @@ def test_runtime_routes_deny_unauthorized_requests_before_host_network(organizat
             ).status_code == 404
             owner_client.headers.pop("X-CSRF-Token")
             assert (await owner_client.post(apply_path)).status_code == 403
+
+    asyncio.run(exercise())
+
+
+def test_manager_lifecycle_action_forwards_authenticated_actor(organization, monkeypatch) -> None:
+    async def exercise() -> None:
+        settings, _, owner, org, agents, host_id = organization
+        agents.set_host_credential(org.id, host_id, "host-binding-token-that-is-never-returned")
+        agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+        forwarded = {}
+
+        def host(request: httpx.Request) -> httpx.Response:
+            forwarded.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "agent_id": agent["id"],
+                    "desired_state": "running",
+                    "lifecycle_state": "running",
+                    "container_state": "running",
+                    "confirmation_required": True,
+                    "message": "Confirm stop for this agent.",
+                },
+            )
+
+        client = HostClient(agents, transport=httpx.MockTransport(host))
+        monkeypatch.setattr(control_host_routes, "host_client", lambda _: client)
+        app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=ORIGIN,
+            headers={"Origin": ORIGIN},
+        ) as browser:
+            await _sign_in(browser, "owner", "correct horse battery staple")
+            response = await browser.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/lifecycle",
+                json={"action": "stop", "confirmed": False},
+            )
+
+        assert response.status_code == 200
+        assert forwarded["action"] == "stop" and forwarded["confirmed"] is False
+        assert forwarded["author"] == {
+            "kind": "human",
+            "id": owner.id,
+            "name": owner.display_name,
+            "session_id": None,
+        }
 
     asyncio.run(exercise())

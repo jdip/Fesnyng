@@ -129,6 +129,28 @@ The host is the only login and refresh owner. It derives the assigned profile fr
 
 Applied agents use labeled Docker volumes for `/home/agent` and `/workspace`; the native OpenCode server binds its port only to loopback. The host writes the agent's configuration, skill files, and broker configuration with a private umask. Docker receives no socket mount from this runtime.
 
+Organization owners and admins manage **Start**, **Stop**, **Restart**, and
+**Rebuild** from Agent settings. The control-plane
+`POST /organizations/{organization}/agents/{agent}/lifecycle` endpoint accepts
+`action`, `confirmed`, and an optional `code`; it supplies authenticated actor
+provenance to the owning host. Stop, Restart, and Rebuild require confirmation.
+Active work additionally requires a short, expiring, one-use random code, and
+the host rechecks activity before acting. Interruption uses native abort and
+delivery reconciliation. A code never authorizes discarding uncertain effects.
+
+Stop is durable: reconciliation and saving configuration do not silently start
+the container. Start applies pending configuration; Restart restarts the existing
+container. Runtime status distinguishes desired state from actual container
+availability and exposes transition and recovery states.
+
+Rebuild creates a replacement from the configured runtime image and keeps the
+agent identity, ownership-validated home/workspace volumes, and host-owned OAuth
+binding. It cannot recover a missing container's writable layer. New submissions
+remain gated while retained native history and delivery effects are reconciled.
+If the result remains uncertain, investigate the affected thread and reconcile
+available evidence before recording an attributed human outcome. Rebuild never
+replays an uncertain delivery or copies OAuth credentials between hosts.
+
 The organization-bound host API provides `POST /organizations/{organization_id}/agents/{agent_id}/replace`. It waits for native sessions to be idle, stops the container, commits a checkpoint image, removes the container, and starts the replacement from that checkpoint while retaining the labeled home and workspace volumes. If an already-applied container is missing without a recorded checkpoint, the host retains state for inspection and refuses replacement.
 
 Replacement also requires durable delivery effects to be reconciled. An idle native session alone does not authorize discarding uncertain work.

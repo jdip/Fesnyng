@@ -91,21 +91,26 @@ test('a scoped workspace event refreshes context through the native event stream
   }
 });
 
-test('the role-row plus uses maintained new-thread navigation without activating the surrounding row', async () => {
+test('a shell new-thread request uses maintained navigation without discarding an existing draft', async () => {
   serve();
-  const outer = vi.fn();
+  const sessionChanged = vi.fn();
+  const events: string[] = [];
   function Harness() {
-    const [target, setTarget] = useState<HTMLDivElement | null>(null);
-    return <ConversationDraftsProvider organization="org"><div onClick={outer} role="group" aria-label="Agent role"><div ref={setTarget} /></div><Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="one" newThreadTarget={target} /></ConversationDraftsProvider>;
+    const [newThreadRequest, setNewThreadRequest] = useState<number>();
+    const [threadListTarget, setThreadListTarget] = useState<HTMLDivElement | null>(null);
+    return <ConversationDraftsProvider organization="org"><button onClick={() => setNewThreadRequest((current) => (current ?? 0) + 1)}>New thread for Researcher</button><div ref={setThreadListTarget} role="region" aria-label="Researcher threads" /><Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="one" threadListTarget={threadListTarget} showThreadList={false} newThreadRequest={newThreadRequest} onNewThreadStarted={(request) => { events.push('accepted'); setNewThreadRequest((current) => current === request ? undefined : current); }} onSessionChange={(id) => { events.push('session'); sessionChanged(id); }} /></ConversationDraftsProvider>;
   }
   render(<Harness />);
   await screen.findByRole('region', { name: 'Thread information' });
+  expect(within(screen.getByRole('region', { name: 'Researcher threads' })).queryByRole('button', { name: 'New Thread' })).toBeNull();
   const composer = screen.getByRole('textbox', { name: 'Message input' });
   fireEvent.change(composer, { target: { value: 'Keep the old draft' } });
-  const plus = within(screen.getByRole('group', { name: 'Agent role' })).getByRole('button', { name: 'New thread' });
-  fireEvent.click(plus);
-  expect(outer).not.toHaveBeenCalled();
-  expect(screen.queryByRole('button', { name: 'New Thread' })).toBeNull();
+  events.length = 0;
+  sessionChanged.mockClear();
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Researcher' }));
+  await waitFor(() => expect(sessionChanged).toHaveBeenCalledWith(undefined));
+  await waitFor(() => expect(events[0]).toBe('session'));
+  expect(events.indexOf('accepted')).toBeGreaterThan(0);
   await waitFor(() => expect(screen.queryByRole('region', { name: 'Thread information' })).toBeNull());
   fireEvent.click(screen.getByRole('button', { name: 'Layout work' }));
   await waitFor(() => expect((screen.getByRole('textbox', { name: 'Message input' }) as HTMLTextAreaElement).value).toBe('Keep the old draft'));

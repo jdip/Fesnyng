@@ -4,6 +4,19 @@ import { AgentSettings } from './AgentSettings';
 import type { Agent } from './workspace-api';
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const agent: Agent = { id: 'agent', organization_id: 'org', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 4, applied_version: 4, configuration_status: 'applied', configuration: { execution_type: 'docker', provider: 'openai', model: 'gpt-5.6-luna', profile_id: 'profile', instructions: 'Investigate carefully.', workspace: 'default', skills: [] } };
+test('saves department membership independently of reporting', async () => {
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (options.method === 'PATCH') return new Response(JSON.stringify({ detail: 'Stop after observing the save' }), { status: 409 });
+    return new Response(JSON.stringify(url.endsWith('/departments') ? [{ id: 'research', name: 'Research department', parent_id: null }] : []));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf" onSaved={() => {}} />);
+  await screen.findByRole('option', { name: 'Research department' });
+  fireEvent.change(screen.getByLabelText('Department'), { target: { value: 'research' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save and apply' }));
+  await screen.findByRole('alert');
+  expect(JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'PATCH')![1]!.body as string)).toMatchObject({ department_id: 'research', reports_to_agent_id: null });
+});
 test('saves the expected configuration version and applies only after a successful save', async () => {
   const request = vi.fn().mockImplementation(async (url: string, options: RequestInit) => {
     if (options.method === 'PATCH') return new Response(JSON.stringify({detail: 'Configuration changed; reload before editing.'}), { status: 409 });

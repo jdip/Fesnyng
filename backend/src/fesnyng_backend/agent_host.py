@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from fesnyng_backend.agent_lifecycle import AgentLifecycle
 from fesnyng_backend.application import create_service_app
 from fesnyng_backend.host_auth_routes import router as credential_router
 from fesnyng_backend.host_configuration import HostConfiguration
@@ -91,6 +92,12 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.state.host_configuration = HostConfiguration(
         store, app.state.host_runtime, credentials, app.state.interactions, app.state.dispatch_store
     )
+    app.state.agent_lifecycle = AgentLifecycle(
+        store,
+        app.state.host_runtime,
+        app.state.dispatcher,
+        app.state.host_configuration,
+    )
 
     async def reconcile_configuration():
         while True:
@@ -103,6 +110,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         with exclusive_host(resolved.database_path):
             credentials.recover_interrupted()
             application.state.interactions.recover_interrupted()
+            application.state.agent_lifecycle.recover_interrupted()
             async with (
                 httpx.AsyncClient(
                     timeout=30, follow_redirects=False, headers={"User-Agent": "opencode/1.18.30"}

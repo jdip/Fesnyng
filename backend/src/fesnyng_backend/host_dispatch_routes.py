@@ -84,18 +84,18 @@ def stop(
 
 
 @router.post("/agents/{agent_id}/sessions/{session_id}/dispatches/{delivery_id}/reconcile")
-def reconcile_dispatch(
+async def reconcile_dispatch(
     request: Request,
     organization_id: UUID,
     agent_id: UUID,
     session_id: NativeID,
     delivery_id: UUID,
 ):
-    receipt = _receipt_for_thread(
-        request, str(organization_id), str(agent_id), session_id, str(delivery_id)
-    )
-    request.app.state.dispatcher.wake()
-    return receipt
+    organization, agent = str(organization_id), str(agent_id)
+    _receipt_for_thread(request, organization, agent, session_id, str(delivery_id))
+    with host_errors():
+        await request.app.state.dispatcher.reconcile_agent_effects(organization, agent)
+        return request.app.state.dispatch_store.get(organization, agent, str(delivery_id))
 
 
 @router.post("/agents/{agent_id}/sessions/{session_id}/dispatches/{delivery_id}/resolve")

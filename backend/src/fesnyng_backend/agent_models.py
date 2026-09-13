@@ -40,6 +40,7 @@ class AgentCreate(Contract):
     title: str = Field(default="", max_length=120)
     host_id: UUID
     reports_to_agent_id: UUID | None = None
+    department_id: UUID | None = None
     configuration: AgentConfiguration = Field(default_factory=AgentConfiguration)
 
 
@@ -48,6 +49,7 @@ class AgentUpdate(Contract):
     name: Name | None = None
     title: str | None = Field(default=None, max_length=120)
     reports_to_agent_id: UUID | None = None
+    department_id: UUID | None = None
     configuration: AgentConfiguration | None = None
 
 
@@ -74,10 +76,31 @@ class AgentResponse(Contract):
     title: str
     host_id: UUID
     reports_to_agent_id: UUID | None
+    department_id: UUID | None
     desired_version: int
     applied_version: int | None
     configuration_status: Literal["pending", "applied"]
     configuration: AgentConfiguration
+
+
+class DepartmentCreate(Contract):
+    name: Name
+    parent_id: UUID | None = None
+    head_agent_id: UUID | None = None
+
+
+class DepartmentUpdate(Contract):
+    name: Name | None = None
+    parent_id: UUID | None = None
+    head_agent_id: UUID | None = None
+
+
+class DepartmentResponse(Contract):
+    id: UUID
+    organization_id: UUID
+    name: str
+    parent_id: UUID | None
+    head_agent_id: UUID | None
 
 
 class ProfileResponse(CredentialProfileCreate):

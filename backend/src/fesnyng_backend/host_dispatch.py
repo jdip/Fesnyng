@@ -8,17 +8,17 @@ import re
 import secrets
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from fesnyng_backend.agent_models import Contract
 from fesnyng_backend.host_effects import native_tools_settled
 from fesnyng_backend.host_interactions import Interactions
-from fesnyng_backend.host_models import Actor, HostAgentConfiguration
+from fesnyng_backend.host_models import Actor, HostAgentConfiguration, NativeID
 from fesnyng_backend.host_native_evidence import NativeEvidence
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
@@ -48,6 +48,9 @@ class HostSubmission(Submission):
     author: Actor
 
 
+_native_id = TypeAdapter(NativeID)
+
+
 class DispatchStore:
     def __init__(self, host: HostStore):
         self.host = host
@@ -69,7 +72,14 @@ class DispatchStore:
             """)
 
     def enqueue(
-        self, org: str, agent: str, session: str, submission: Submission, author: Actor
+        self,
+        org: str,
+        agent: str,
+        session: str,
+        submission: Submission,
+        author: Actor,
+        *,
+        lifecycle_operation: bool = False,
     ) -> dict[str, Any]:
         self.host.session(org, agent, session)
         payload = submission.model_dump_json()
@@ -89,6 +99,19 @@ class DispatchStore:
                 ) != (org, agent, session, payload, attribution):
                     raise ValueError("Delivery identity conflict")
                 return self._record(previous)
+            lifecycle = connection.execute(
+                "SELECT lifecycle_state FROM host_agents WHERE organization_id=? AND agent_id=?",
+                (org, agent),
+            ).fetchone()
+            if lifecycle is None:
+                raise LookupError("Agent not found")
+            if not lifecycle_operation and lifecycle["lifecycle_state"] in {
+                "transitioning",
+                "recovering",
+                "recovery_required",
+                "failed",
+            }:
+                raise RuntimeUnavailable("Agent lifecycle transition is holding new work")
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence),0)+1 FROM host_dispatches WHERE session_id=?",
                 (session,),
@@ -268,6 +291,9 @@ class Dispatcher:
                     probe.result()
         groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in self.store.pending():
+            agent = self.store.host.agent(row["organization_id"], row["agent_id"])
+            if agent["desired_state"] != "running" or agent["lifecycle_state"] != "running":
+                continue
             key = (row["organization_id"], row["agent_id"], row["session_id"])
             groups.setdefault(key, []).append(row)
         for key, rows in groups.items():
@@ -443,10 +469,14 @@ class Dispatcher:
                 self._require_current_policy(org, agent, session["session_id"])
                 configured = self.store.host.agent(org, agent)
                 if (
-                    not configured["applied_envelope"]
+                    configured["desired_state"] != "running"
+                    or configured["lifecycle_state"] != "running"
+                    or not configured["applied_envelope"]
                     or configured["applied_envelope"] != configured["desired_envelope"]
                 ):
-                    raise RuntimeUnavailable("Agent configuration changed before native submission")
+                    raise RuntimeUnavailable(
+                        "Agent lifecycle or configuration changed before native submission"
+                    )
                 envelope = HostAgentConfiguration.model_validate_json(
                     configured["applied_envelope"]
                 )
@@ -501,7 +531,12 @@ class Dispatcher:
         finally:
             self.wake()
 
-    async def _stop(self, row: dict[str, Any], session: dict[str, Any]) -> None:
+    async def _stop(
+        self,
+        row: dict[str, Any],
+        session: dict[str, Any],
+        descendants: list[tuple[str, str]] | None = None,
+    ) -> None:
         org, agent = row["organization_id"], row["agent_id"]
         if not self.store.change(row, "stopping"):
             return
@@ -529,13 +564,47 @@ class Dispatcher:
         )
         if acknowledged is not True:
             raise RuntimeUnavailable("Native abort has no verified receipt")
+        for native_id, directory in reversed(descendants or []):
+            acknowledged = await self.runtime.request(
+                org,
+                agent,
+                f"/session/{native_id}/abort",
+                method="POST",
+                body={},
+                directory=directory,
+            )
+            if acknowledged is not True:
+                raise RuntimeUnavailable("Native abort has no verified receipt")
         await self._settle_after_stop(row, session)
+        await self._settle_native_sessions(org, agent, descendants or [])
         current = self.store.get(org, agent, row["id"])
         self.store.change(
             current,
             "completed",
             outcome={"kind": "abort_acknowledged", "stop_id": row["id"]},
         )
+
+    async def _settle_native_sessions(
+        self, organization_id: str, agent_id: str, sessions: list[tuple[str, str]]
+    ) -> None:
+        for _ in range(30):
+            if all(
+                [
+                    not self._thread_busy(
+                        await self.runtime.request(
+                            organization_id,
+                            agent_id,
+                            "/session/status",
+                            directory=directory,
+                        ),
+                        native_id,
+                    )
+                    for native_id, directory in sessions
+                ]
+            ):
+                return
+            await asyncio.sleep(0.1)
+        raise RuntimeUnavailable("Agent lifecycle change is waiting for native sessions to stop")
 
     def _earlier_tasks(self, stop: dict[str, Any]) -> list[asyncio.Task]:
         pending_deliveries = {delivery["id"]: delivery for delivery in self.store.pending()}
@@ -673,14 +742,187 @@ class Dispatcher:
             for delivery_id, task in self.tasks.items()
         )
 
+    async def agent_active(self, organization_id: str, agent_id: str) -> bool:
+        return bool(await self.agent_activity(organization_id, agent_id))
+
+    async def agent_activity(self, organization_id: str, agent_id: str) -> str:
+        active: list[str] = []
+        directories = {
+            session["directory"] for session in self.store.host.sessions(organization_id, agent_id)
+        }
+        for directory in [None, *sorted(directories)]:
+            statuses = await self.runtime.request(
+                organization_id, agent_id, "/session/status", directory=directory
+            )
+            active.extend(
+                f"{directory or '<default>'}:{native_id}:{statuses[native_id]['type']}"
+                for native_id in self._active_native_ids(statuses)
+            )
+        return "|".join(sorted(set(active)))
+
+    async def quiesce_agent(self, organization_id: str, agent_id: str, author: Actor) -> None:
+        mapped = {
+            session["session_id"]: session
+            for session in self.store.host.sessions(organization_id, agent_id)
+        }
+        families = {
+            session_id: await self._session_family(organization_id, agent_id, session, mapped)
+            for session_id, session in mapped.items()
+        }
+        known_ids = {native_id for family in families.values() for native_id, _ in family}
+        for session_id, session in mapped.items():
+            family = families[session_id]
+            statuses_by_directory = {
+                directory: await self.runtime.request(
+                    organization_id, agent_id, "/session/status", directory=directory
+                )
+                for directory in {directory for _, directory in family}
+            }
+            for statuses in statuses_by_directory.values():
+                if set(self._active_native_ids(statuses)) - known_ids:
+                    raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
+            active = {
+                native_id
+                for native_id, directory in family
+                if self._thread_busy(statuses_by_directory[directory], native_id)
+            }
+            if not active:
+                continue
+            stop = HostSubmission(id=UUID(int=secrets.randbits(128)), mode="stop", author=author)
+            receipt = self.store.enqueue(
+                organization_id,
+                agent_id,
+                session["session_id"],
+                stop,
+                author,
+                lifecycle_operation=True,
+            )
+            await self._stop(receipt, session, family[1:])
+        default_statuses = await self.runtime.request(organization_id, agent_id, "/session/status")
+        unowned = set(self._active_native_ids(default_statuses)) - known_ids
+        if unowned:
+            raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
+        for _ in range(30):
+            if not await self.agent_active(organization_id, agent_id):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise RuntimeUnavailable(
+                "Agent lifecycle change is waiting for native sessions to stop"
+            )
+        await self.reconcile_agent_effects(organization_id, agent_id)
+        if not self.agent_effects_settled(organization_id, agent_id):
+            raise RuntimeUnavailable("Agent lifecycle change needs delivery reconciliation")
+
+    async def _session_family(
+        self,
+        organization_id: str,
+        agent_id: str,
+        root: dict[str, Any],
+        mapped: dict[str, dict[str, Any]],
+    ) -> list[tuple[str, str]]:
+        root_id, root_directory = root["session_id"], root["directory"]
+        family = [(root_id, root_directory)]
+        seen = {root_id}
+        pending = [(root_id, root_directory)]
+        while pending:
+            parent_id, directory = pending.pop()
+            children = await self.runtime.request(
+                organization_id,
+                agent_id,
+                f"/session/{parent_id}/children",
+                directory=directory,
+            )
+            if not isinstance(children, list):
+                raise RuntimeUnavailable("Native child sessions response is invalid")
+            for child in children:
+                if not isinstance(child, Mapping):
+                    raise RuntimeUnavailable("Native child session receipt is invalid")
+                try:
+                    child_id = _native_id.validate_python(child.get("id"))
+                except ValidationError:
+                    raise RuntimeUnavailable("Native child session receipt is invalid") from None
+                child_directory = child.get("directory")
+                if (
+                    child.get("parentID") != parent_id
+                    or child_id in seen
+                    or not isinstance(child_directory, str)
+                    or not child_directory
+                ):
+                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+                seen.add(child_id)
+                if child_id in mapped:
+                    if mapped[child_id]["directory"] != child_directory:
+                        raise RuntimeUnavailable("Native child session ancestry is invalid")
+                    continue
+                family.append((child_id, child_directory))
+                pending.append((child_id, child_directory))
+        return family
+
+    async def reconcile_agent_effects(self, organization_id: str, agent_id: str) -> None:
+        async with self.runtime.lock(agent_id):
+            rows = [
+                row
+                for row in self.store.pending()
+                if row["organization_id"] == organization_id and row["agent_id"] == agent_id
+            ]
+            for session_id in {row["session_id"] for row in rows}:
+                session = self.store.host.session(organization_id, agent_id, session_id)
+                statuses = await self.runtime.request(
+                    organization_id, agent_id, "/session/status", directory=session["directory"]
+                )
+                busy = self._thread_busy(statuses, session_id)
+                history = await self.runtime.request(
+                    organization_id,
+                    agent_id,
+                    f"/session/{session_id}/message",
+                    directory=session["directory"],
+                )
+                self._validate_history(history)
+                for row in rows:
+                    if row["session_id"] == session_id and row["native_message_id"]:
+                        await self._reconcile(row, history, busy, session["directory"])
+
+    def agent_effects_settled(self, organization_id: str, agent_id: str) -> bool:
+        unsettled = [
+            row
+            for row in self.store.pending()
+            if row["organization_id"] == organization_id
+            and row["agent_id"] == agent_id
+            and row["state"] != "queued"
+        ]
+        active_ids = {row["id"] for row in unsettled}
+        return not unsettled and not any(
+            delivery_id in active_ids and not task.done()
+            for delivery_id, task in self.tasks.items()
+        )
+
     @staticmethod
     def _thread_busy(statuses: Any, session_id: str) -> bool:
         if not isinstance(statuses, dict):
             raise RuntimeUnavailable("Native thread status response is invalid")
-        state = statuses.get(session_id, {})
-        if not isinstance(state, dict) or not isinstance(state.get("type", "idle"), str):
+        if session_id not in statuses:
+            return False
+        state = statuses[session_id]
+        if not isinstance(state, dict) or state.get("type") not in {"idle", "busy", "retry"}:
             raise RuntimeUnavailable("Native thread status response is invalid")
-        return state.get("type", "idle") != "idle"
+        return state["type"] != "idle"
+
+    @staticmethod
+    def _active_native_ids(statuses: Any) -> list[str]:
+        if not isinstance(statuses, dict):
+            raise RuntimeUnavailable("Native thread status response is invalid")
+        active: list[str] = []
+        for native_id, state in statuses.items():
+            if (
+                not isinstance(native_id, str)
+                or not isinstance(state, dict)
+                or state.get("type") not in {"idle", "busy", "retry"}
+            ):
+                raise RuntimeUnavailable("Native thread status response is invalid")
+            if state["type"] != "idle":
+                active.append(native_id)
+        return active
 
     @staticmethod
     def _validate_history(history: Any) -> None:

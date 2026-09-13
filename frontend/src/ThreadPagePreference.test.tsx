@@ -17,8 +17,10 @@ test('loads and saves the personal page size without applying a failed write', a
   fireEvent.change(screen.getByLabelText('Threads per page'), { target: { value: '12' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save page size' }));
   await waitFor(() => expect(changed).toHaveBeenCalledWith(12));
-  fail = true;
+  expect(await screen.findByRole('status')).toHaveProperty('textContent', 'Preference saved.');
   fireEvent.change(screen.getByLabelText('Threads per page'), { target: { value: '24' } });
+  expect(screen.queryByRole('status')).toBeNull();
+  fail = true;
   fireEvent.click(screen.getByRole('button', { name: 'Save page size' }));
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Save unavailable');
   expect(changed).not.toHaveBeenCalledWith(24);
@@ -32,4 +34,18 @@ test('loads the personal page size while its panel remains closed', async () => 
   expect(screen.queryByLabelText('Threads per page')).toBeNull();
   rendered.rerender(<PreferenceHarness onChange={changed} />);
   expect(screen.getByLabelText('Threads per page')).toHaveProperty('value', '12');
+});
+
+test('shows saving progress until the personal preference write settles', async () => {
+  let settle: (response: Response) => void = () => {};
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    if (init.method !== 'PUT') return new Response(JSON.stringify({ thread_list_page_size: 6 }));
+    return new Promise<Response>((resolve) => { settle = resolve; });
+  }));
+  render(<PreferenceHarness onChange={() => {}} />);
+  await screen.findByDisplayValue('6');
+  fireEvent.click(screen.getByRole('button', { name: 'Save page size' }));
+  expect(screen.getByRole('button', { name: 'Save page size' })).toHaveProperty('textContent', 'Saving…');
+  settle(new Response(JSON.stringify({ thread_list_page_size: 6 })));
+  expect(await screen.findByRole('status')).toHaveProperty('textContent', 'Preference saved.');
 });
