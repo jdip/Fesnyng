@@ -60,6 +60,9 @@ import {
 import {
   createContext,
   useContext,
+  useEffect,
+  useRef,
+  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -77,6 +80,8 @@ export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
+  /** A narrow product composer slot that retains the maintained input and thread lifecycle. */
+  Composer?: ComponentType<ThreadComposerProps> | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -86,6 +91,11 @@ export type ThreadComponents = {
     | undefined;
   /** A native runtime action rendered beside maintained assistant actions. */
   MessageAction?: ComponentType | undefined;
+};
+
+export type ThreadComposerProps = {
+  autoFocus: boolean;
+  allowAttachments: boolean;
 };
 
 export type ThreadProps = {
@@ -217,7 +227,7 @@ const ThreadRoot: FC<{
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer autoFocus={autoFocus} allowAttachments={allowAttachments} />
+            <ThreadComposer autoFocus={autoFocus} allowAttachments={allowAttachments} />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -290,7 +300,30 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
-const Composer: FC<{ autoFocus: boolean; allowAttachments: boolean }> = ({
+const ThreadComposer: FC<ThreadComposerProps> = ({
+  autoFocus,
+  allowAttachments,
+}) => {
+  const { Composer = DefaultComposer } = useContext(ThreadComponentsContext);
+  const externalId = useAuiState((state) => state.threadListItem.externalId);
+  const initialExternalIdRef = useRef<string | undefined>(undefined);
+  const [composerKey, setComposerKey] = useState(0);
+  useEffect(() => {
+    if (!externalId) return;
+    if (!initialExternalIdRef.current) {
+      initialExternalIdRef.current = externalId;
+      return;
+    }
+    if (externalId !== initialExternalIdRef.current) {
+      initialExternalIdRef.current = externalId;
+      queueMicrotask(() => setComposerKey((current) => current + 1));
+    }
+  }, [externalId]);
+  // A composer owns only one thread's draft, workflow choice, and admission.
+  return <Composer key={composerKey} autoFocus={autoFocus} allowAttachments={allowAttachments} />;
+};
+
+const DefaultComposer: FC<ThreadComposerProps> = ({
   autoFocus,
   allowAttachments,
 }) => {

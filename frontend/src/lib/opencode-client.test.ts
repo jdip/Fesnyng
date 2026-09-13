@@ -30,3 +30,15 @@ test('does not invent idempotency for a native read', async () => {
   expect(new Headers(request.headers).get('X-CSRF-Token')).toBeNull();
   expect(new Headers(request.headers).get('Idempotency-Key')).toBeNull();
 });
+
+test('preserves a caller-supplied idempotency key for a durable retry', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response('{}'));
+  const fetchWithFesnyngAuth = createFesnyngOpenCodeFetch('csrf-example', fetchMock);
+
+  await fetchWithFesnyngAuth('/session/example/prompt_async', {
+    method: 'POST', headers: { 'Idempotency-Key': 'retained-admission-id' },
+  });
+
+  const request = fetchMock.mock.calls[0][1] as RequestInit;
+  expect(new Headers(request.headers).get('Idempotency-Key')).toBe('retained-admission-id');
+});

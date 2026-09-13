@@ -28,9 +28,11 @@ Mandatory organization limits retain precedence.
 Thread activity links an agent contribution to its originating thread. Activity
 reports results, failures, and pending input while preserving healthy-host
 results when another host is unavailable. Thread permissions expose desired and
-applied revisions. The steering/workflow panel submits through the existing
-host-owned durable queue; an uncertain outcome must be investigated before
-recording its resolution. The Files panel reads text artifacts relative to the
+applied revisions. While an agent is working, the same conversation composer
+steers on Enter; Queue remains a secondary action and Stop stays beside it. Type
+`/` in that composer to choose a configured explicit workflow. A rejected or
+uncertain submission retains its draft and selected workflow for retry without
+creating a second delivery. The Files panel reads text artifacts relative to the
 selected thread's workspace. Selection is preserved in the page fragment so a
 reload can reattach to the same authorized conversation.
 

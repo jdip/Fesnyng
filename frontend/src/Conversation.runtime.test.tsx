@@ -227,3 +227,148 @@ test('refreshes externally created threads without discarding composer text', as
   expect(await screen.findByRole('button', { name: 'Colleague investigation' })).toBeTruthy();
   expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Unsent work instructions');
 });
+
+test('steers an active native thread from its maintained composer and keeps queue and stop available', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.endsWith('/event')) return new Response(`data: ${JSON.stringify({
+      type: 'session.status', properties: { sessionID: 'session-one', status: { type: 'busy' } },
+    })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Release review', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? []
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Release review', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      sessionId="session-one"
+      showThreadList={false}
+    />,
+  );
+
+  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  expect(await screen.findByRole('button', { name: 'Steer agent' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Queue message' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Stop generating' })).toBeTruthy();
+
+  fireEvent.change(composer, { target: { value: 'Keep composing.' } });
+  fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true });
+  fireEvent.keyDown(composer, { key: 'Enter', isComposing: true });
+  expect(fetchMock.mock.calls.some(([input]) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    return url.includes('/dispatches');
+  })).toBe(false);
+
+  fireEvent.change(composer, { target: { value: 'Queue this after the current work.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Queue message' }));
+  await waitFor(() => {
+    const dispatches = fetchMock.mock.calls.filter(([input]) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      return url.includes('/dispatches');
+    });
+    expect(dispatches).toHaveLength(1);
+    const init = (dispatches[0] as unknown as [RequestInfo | URL, RequestInit?])[1] ?? {};
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      text: 'Queue this after the current work.', mode: 'queued', command: null,
+    });
+  });
+
+  fireEvent.change(composer, { target: { value: 'Check the migration evidence.' } });
+  fireEvent.keyDown(composer, { key: 'Enter' });
+
+  await waitFor(() => {
+    const dispatches = fetchMock.mock.calls.filter(([input]) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      return url.includes('/dispatches');
+    });
+    expect(dispatches).toHaveLength(2);
+    const init = (dispatches[1] as unknown as [RequestInfo | URL, RequestInit?])[1] ?? {};
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      text: 'Check the migration evidence.', mode: 'steering', command: null,
+    });
+  });
+});
+
+test('restores an idle native-send draft when the host rejects it', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.includes('/prompt_async')) return new Response(JSON.stringify({ detail: 'The host rejected this prompt.' }), {
+      status: 422, headers: { 'content-type': 'application/json' },
+    });
+    const body = url.includes('/experimental/session')
+      ? []
+      : request?.method === 'POST' && url.endsWith('/session')
+        ? { id: 'session-one', title: 'New session', time: {} }
+        : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" showThreadList={false} />);
+  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Keep this draft after rejection.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep this draft after rejection.'));
+});
+
+test('selects a namespaced workflow with slash keyboard input and preserves it with its draft after rejection', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (url.endsWith('/opencode/command')) return new Response(JSON.stringify([
+      { name: 'fesnyng/workspace-check', description: 'workspace-check' },
+    ]), { headers: { 'content-type': 'application/json' } });
+    if (url.includes('/prompt_async')) return new Response(JSON.stringify({ detail: 'Workflow arguments were rejected.' }), {
+      status: 422, headers: { 'content-type': 'application/json' },
+    });
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Release review', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? []
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Release review', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} />);
+  const composer = await screen.findByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: '/' } });
+  expect(await screen.findByRole('listbox', { name: 'Configured workflows' })).toBeTruthy();
+  fireEvent.keyDown(composer, { key: 'Enter' });
+  expect(await screen.findByLabelText('Remove workflow fesnyng/workspace-check')).toBeTruthy();
+  fireEvent.change(composer, { target: { value: 'Check the changed workspace.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
+
+  await waitFor(() => {
+    const command = fetchMock.mock.calls.find(([input]) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      return url.includes('/prompt_async');
+    });
+    expect(command).toBeTruthy();
+    const init = (command as unknown as [RequestInfo | URL, RequestInit?])[1] ?? {};
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      command: 'fesnyng/workspace-check',
+      parts: [{ type: 'text', text: 'Check the changed workspace.' }],
+    });
+  });
+  expect((await screen.findByRole('alert')).textContent).toContain('Workflow arguments were rejected.');
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Check the changed workspace.');
+  expect(screen.getByLabelText('Remove workflow fesnyng/workspace-check')).toBeTruthy();
+});

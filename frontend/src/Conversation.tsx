@@ -20,6 +20,7 @@ import {
   ToolGroupTrigger,
 } from './components/assistant-ui/elements/tool-group.aui';
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
+import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
 import './assistant.css';
 
@@ -70,10 +71,11 @@ export function Conversation({
     void runtime.threads.reload().catch((error: unknown) => onError?.(error));
   }, [refreshKey, runtime, onError]);
   const components = useMemo(() => ({
+    Composer: () => <InlineComposer baseUrl={baseUrl} csrfToken={csrfToken} sessionId={sessionId} autoFocus allowAttachments={false} />,
     ToolFallback: OpenCodeToolFallback,
     ToolGroup: PendingApprovalToolGroup,
     MessageAction: () => <OpenCodeForkAction runtime={runtime} onError={onError} />,
-  }), [onError, runtime]);
+  }), [baseUrl, csrfToken, onError, runtime, sessionId]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
