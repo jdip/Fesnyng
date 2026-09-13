@@ -488,6 +488,158 @@ def test_later_rejection_after_an_uncertain_transport_outcome_stays_uncertain(tm
     assert len(dispatch.for_thread(organization_id, str(source_agent), "ses_source")) == 1
 
 
+def test_restart_404_after_an_interrupted_transport_attempt_stays_uncertain(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    started = asyncio.Event()
+
+    async def interrupted_after_remote_acceptance(origin, token, envelope):
+        started.set()
+        await asyncio.Event().wait()
+
+    service.transport = interrupted_after_remote_acceptance
+    request = PeerSend(
+        id=uuid4(), target_agent=target_agent, text="Do not forget unknown acceptance"
+    )
+
+    async def interrupt_delivery():
+        sending = asyncio.create_task(
+            service.send(organization_id, str(source_agent), "ses_source", request)
+        )
+        await started.wait()
+        sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+
+    asyncio.run(interrupt_delivery())
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
+    recovered = PeerDeliveryService(service.store, service.config, Native(), dispatch, Waker())
+    recovered.initialize()
+
+    async def rejected_after_restart(origin, token, envelope):
+        raise _http_status_error(404)
+
+    recovered.transport = rejected_after_restart
+    with recovered.store.connect() as connection:
+        connection.execute("UPDATE peer_outbox SET next_attempt=0 WHERE id=?", (str(request.id),))
+
+    async def wait_for_uncertainty():
+        async with recovered.run():
+            for _ in range(100):
+                recovered.changed.set()
+                receipt = recovered.status(organization_id, str(source_agent), str(request.id))
+                if receipt["state"] == "uncertain":
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the recovered uncertain outcome")
+
+    receipt = asyncio.run(wait_for_uncertainty())
+    assert receipt["attempts"] == 2
+    assert "outcome is uncertain" in receipt["error"]
+
+
+def test_legacy_pending_outbox_is_conservatively_uncertain_after_recovery(tmp_path):
+    service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
+    request = PeerSend(
+        id=uuid4(), target_agent=target_agent, text="Recover a legacy outbound delivery"
+    )
+    envelope = PeerEnvelope(
+        **request.model_dump(),
+        organization_id=organization_id,
+        source_host=service.store.instance_id,
+        source_agent=source_agent,
+        source_session="ses_source",
+    )
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    with service.store.connect() as connection:
+        connection.execute("DROP TABLE peer_outbox")
+        connection.execute(
+            """CREATE TABLE peer_outbox (
+                id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_agent TEXT NOT NULL,
+                source_session TEXT NOT NULL, target_host TEXT NOT NULL, envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', receipt TEXT, error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO peer_outbox(id,organization_id,source_agent,source_session,target_host,envelope) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                str(request.id),
+                organization_id,
+                str(source_agent),
+                "ses_source",
+                target_host,
+                envelope.model_dump_json(),
+            ),
+        )
+    service.initialize()
+    assert service.status(organization_id, str(source_agent), str(request.id))["attempts"] == 1
+
+    async def rejected_after_restart(origin, token, envelope):
+        raise _http_status_error(404)
+
+    service.transport = rejected_after_restart
+
+    async def wait_for_uncertainty():
+        async with service.run():
+            for _ in range(100):
+                service.changed.set()
+                receipt = service.status(organization_id, str(source_agent), str(request.id))
+                if receipt["state"] == "uncertain":
+                    return receipt
+                await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for the legacy uncertain outcome")
+
+    receipt = asyncio.run(wait_for_uncertainty())
+    assert receipt["attempts"] == 2
+    assert "outcome is uncertain" in receipt["error"]
+
+
+def test_direct_send_and_retry_worker_share_one_outbound_delivery_attempt(tmp_path):
+    service, organization_id, source_agent, target_agent, dispatch = _remote_sender(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def accepted(origin, token, envelope):
+        calls.append(envelope)
+        started.set()
+        service.changed.set()
+        await release.wait()
+        return {
+            "id": str(envelope["id"]),
+            "organization_id": envelope["organization_id"],
+            "source_host": envelope["source_host"],
+            "source_agent": envelope["source_agent"],
+            "source_session": envelope["source_session"],
+            "target_host": str(target_host),
+            "target_agent": envelope["target_agent"],
+            "target_session": "ses_target",
+            "dispatch_id": str(envelope["id"]),
+            "state": "accepted",
+        }
+
+    target_host = service.config.agent(organization_id, str(target_agent))["host_id"]
+    service.transport = accepted
+    request = PeerSend(id=uuid4(), target_agent=target_agent, text="Serialize this one delivery")
+
+    async def race():
+        async with service.run():
+            direct = asyncio.create_task(
+                service.send(organization_id, str(source_agent), "ses_source", request)
+            )
+            await started.wait()
+            await asyncio.sleep(0.05)
+            release.set()
+            return await direct
+
+    receipt = asyncio.run(race())
+    assert receipt["state"] == "accepted"
+    assert len(calls) == 1
+    assert dispatch.for_thread(organization_id, str(source_agent), "ses_source") == []
+
+
 def test_transient_peer_outage_remains_pending_for_a_later_retry(tmp_path):
     service, organization_id, source_agent, target_agent, _ = _remote_sender(tmp_path)
     calls = []
