@@ -9,6 +9,7 @@ from fesnyng_backend.control_dispatch_routes import router as dispatch_router
 from fesnyng_backend.control_host_routes import router as host_router
 from fesnyng_backend.control_interaction_routes import router as interaction_router
 from fesnyng_backend.control_memory_routes import router as memory_router
+from fesnyng_backend.control_peer_routes import router as peer_router
 from fesnyng_backend.control_store import ControlPlaneStore
 from fesnyng_backend.organizations import router as organizations_router
 from fesnyng_backend.settings import (
@@ -42,4 +43,5 @@ def create_app(
     app.include_router(memory_router)
     app.include_router(dispatch_router)
     app.include_router(interaction_router)
+    app.include_router(peer_router)
     return app

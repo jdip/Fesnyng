@@ -338,7 +338,14 @@ class DockerRuntime:
             self.store.set_runtime_state(organization_id, agent_id, "running")
 
     async def create_session(
-        self, organization_id: str, agent_id: str, title: str, workspace: str
+        self,
+        organization_id: str,
+        agent_id: str,
+        title: str,
+        workspace: str,
+        *,
+        directory: str | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         agent = self.store.agent(organization_id, agent_id)
         if not agent["applied_envelope"]:
@@ -346,14 +353,18 @@ class DockerRuntime:
         envelope = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
         if workspace != envelope.configuration.workspace:
             raise ValueError("Workspace is not assigned to this agent")
-        directory = f"/workspace/{workspace}/threads/{uuid4().hex}"
+        directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"
         await self.docker("exec", self.name(agent_id), "mkdir", "-p", directory)
         session = await self.request(
             organization_id,
             agent_id,
             "/session",
             method="POST",
-            body={"title": title, "permission": permission_rules(envelope)},
+            body={
+                "title": title,
+                "permission": permission_rules(envelope),
+                **({"metadata": metadata} if metadata else {}),
+            },
             directory=directory,
         )
         self.store.save_session(organization_id, agent_id, session["id"], directory, title)

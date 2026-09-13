@@ -17,12 +17,18 @@ from fesnyng_backend.host_dispatch_routes import router as dispatch_router
 from fesnyng_backend.host_interaction_routes import router as interaction_router
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_lifecycle import exclusive_host
-from fesnyng_backend.host_mcp import create_memory_mcp
+from fesnyng_backend.host_mcp import create_memory_mcp, register_collaboration_tools
 from fesnyng_backend.host_memory import MemoryStore
 from fesnyng_backend.host_memory_routes import router as memory_router
 from fesnyng_backend.host_routes import router
 from fesnyng_backend.host_runtime import DockerRuntime
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.peer_configuration import PeerConfigurationStore
+from fesnyng_backend.peer_configuration_routes import router as peer_configuration_router
+from fesnyng_backend.peer_delivery import PeerDeliveryService
+from fesnyng_backend.peer_delivery_routes import router as peer_delivery_router
+from fesnyng_backend.peer_discovery import PeerDiscovery
+from fesnyng_backend.peer_discovery_routes import router as peer_discovery_router
 from fesnyng_backend.settings import ServiceSettings, settings_from_environment
 
 
@@ -56,8 +62,24 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.state.dispatch_resolution = DispatchResolutionService(
         store, app.state.dispatch_store, app.state.dispatcher, app.state.host_runtime
     )
+    app.state.peer_configuration = PeerConfigurationStore(store)
+    app.state.peer_configuration.initialize()
+    app.state.peer_discovery = PeerDiscovery(
+        store, app.state.peer_configuration, app.state.host_runtime
+    )
+    app.state.peer_delivery = PeerDeliveryService(
+        store,
+        app.state.peer_configuration,
+        app.state.host_runtime,
+        app.state.dispatch_store,
+        app.state.dispatcher,
+    )
+    app.state.peer_delivery.initialize()
     mcp_server, mcp_app = create_memory_mcp(
         store, app.state.host_memory, app.state.host_runtime.credential_url
+    )
+    register_collaboration_tools(
+        mcp_server, store, app.state.peer_discovery, app.state.peer_delivery
     )
     app.state.mcp_server = mcp_server
     app.mount("/mcp", mcp_app)
@@ -86,6 +108,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
                 ) as client,
                 mcp_server.session_manager.run(),
                 application.state.dispatcher.run(),
+                application.state.peer_delivery.run(),
                 asyncio.TaskGroup() as background,
             ):
                 application.state.provider_client = client
@@ -106,4 +129,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.include_router(memory_router)
     app.include_router(dispatch_router)
     app.include_router(interaction_router)
+    app.include_router(peer_configuration_router)
+    app.include_router(peer_delivery_router)
+    app.include_router(peer_discovery_router)
     return app
