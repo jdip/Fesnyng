@@ -1,6 +1,6 @@
 """Native MCP tools for host-owned agent memory."""
 
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -13,8 +13,10 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from fesnyng_backend.host_memory import MemoryStore
-from fesnyng_backend.host_models import Actor
+from fesnyng_backend.host_models import Actor, NativeID
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.peer_delivery import PeerDeliveryService, PeerSend
+from fesnyng_backend.peer_discovery import DiscoveryQuery, PeerDiscovery
 
 
 class HostAgentTokenVerifier(TokenVerifier):
@@ -102,9 +104,118 @@ def create_memory_mcp(
     return server, app
 
 
+def register_collaboration_tools(
+    server: MCPServer,
+    host: HostStore,
+    discovery: PeerDiscovery,
+    delivery: PeerDeliveryService,
+) -> None:
+    """Register authenticated, attributable organization collaboration tools.
+
+    Native MCP does not provide the current OpenCode thread ID.  Calls that
+    create peer work therefore require a caller-supplied source session and
+    validate that the authenticated agent owns it before any delivery is made.
+    """
+
+    @server.tool(description="Discover organization threads visible to this authenticated agent.")
+    async def discover_threads(
+        agent_id: UUID | None = None,
+        workspace: str | None = None,
+        topic: str = "",
+        active: bool | None = None,
+    ) -> dict[str, Any]:
+        identity = _authenticated_agent(host)
+        return await discovery.discover(
+            identity["organization_id"],
+            identity["agent_id"],
+            DiscoveryQuery(agent_id=agent_id, workspace=workspace, topic=topic, active=active),
+        )
+
+    @server.tool(description="Read an organization thread visible to this authenticated agent.")
+    async def read_thread(target_agent: UUID, session_id: NativeID) -> list[dict[str, Any]]:
+        identity = _authenticated_agent(host)
+        return await discovery.read(
+            identity["organization_id"], identity["agent_id"], str(target_agent), session_id
+        )
+
+    @server.tool(
+        description=(
+            "Contribute to an existing thread. source_session is caller-supplied attribution and must "
+            "belong to this authenticated agent. Reuse the same stable id for an identical retry."
+        )
+    )
+    async def contribute_to_thread(
+        id: UUID,
+        source_session: NativeID,
+        target_agent: UUID,
+        target_session: NativeID,
+        text: str,
+        mode: Literal["queued", "steering"] = "queued",
+        origin_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        identity = _authenticated_agent(host)
+        _owned_source_session(host, identity, source_session)
+        return await delivery.send(
+            identity["organization_id"],
+            identity["agent_id"],
+            source_session,
+            PeerSend(
+                id=id,
+                target_agent=target_agent,
+                target_session=target_session,
+                text=text,
+                mode=mode,
+                origin_id=origin_id,
+            ),
+        )
+
+    @server.tool(
+        description=(
+            "Delegate new peer work. source_session is caller-supplied attribution and must belong "
+            "to this authenticated agent. Reuse the same stable id for an identical retry."
+        )
+    )
+    async def delegate(
+        id: UUID,
+        source_session: NativeID,
+        target_agent: UUID,
+        text: str,
+        workspace: str = "default",
+        title: str = "Peer collaboration",
+        origin_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        identity = _authenticated_agent(host)
+        _owned_source_session(host, identity, source_session)
+        return await delivery.send(
+            identity["organization_id"],
+            identity["agent_id"],
+            source_session,
+            PeerSend(
+                id=id,
+                target_agent=target_agent,
+                text=text,
+                workspace=workspace,
+                title=title,
+                origin_id=origin_id,
+            ),
+        )
+
+    @server.tool(description="Read this authenticated agent's peer delivery receipt by stable id.")
+    def collaboration_status(delivery_id: UUID) -> dict[str, Any]:
+        identity = _authenticated_agent(host)
+        return delivery.status(identity["organization_id"], identity["agent_id"], str(delivery_id))
+
+
 def _authenticated_agent(host_store: HostStore) -> dict[str, str]:
     access_token = get_access_token()
     identity = host_store.authenticate_agent(access_token.token) if access_token else None
     if identity is None:
         raise ToolError("Agent authentication required")
     return identity
+
+
+def _owned_source_session(host: HostStore, identity: dict[str, str], session_id: str) -> None:
+    try:
+        host.session(identity["organization_id"], identity["agent_id"], session_id)
+    except LookupError:
+        raise ToolError("Source thread does not belong to the authenticated agent") from None
