@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import httpx
 
-from fesnyng_backend.host_models import HostAgentConfiguration
+from fesnyng_backend.host_models import HostAgentConfiguration, permission_rules
 from fesnyng_backend.host_store import HostStore
 
 
@@ -249,20 +249,10 @@ class DockerRuntime:
             if configuration.profile_id
             else "unassigned",
         }
-        permissions: dict[str, Any] = {"*": envelope.policy.default_permission}
-        for rule in envelope.policy.mandatory_permissions:
-            if rule.permission == "*":
-                if rule.pattern != "*":
-                    raise ValueError("A wildcard permission requires a wildcard pattern")
-                permissions["*"] = rule.action
-                continue
-            permissions.setdefault(rule.permission, {"*": envelope.policy.default_permission})[
-                rule.pattern
-            ] = rule.action
         config = {
             "plugin": plugins,
             "model": f"{configuration.provider}/{configuration.model}",
-            "permission": permissions,
+            "permission": envelope.policy.default_permission,
             "instructions": [
                 *dict.fromkeys([*current.get("instructions", []), "/home/agent/AGENTS.md"])
             ],
@@ -272,6 +262,14 @@ class DockerRuntime:
                         [*current.get("skills", {}).get("paths", []), "/home/agent/fesnyng-skills"]
                     )
                 ]
+            },
+            "mcp": {
+                "fesnyng": {
+                    "type": "remote",
+                    "url": self.credential_url.rstrip("/") + "/mcp/",
+                    "headers": {"Authorization": f"Bearer {agent['agent_token']}"},
+                    "oauth": False,
+                }
             },
             "autoupdate": False,
             "share": "disabled",
@@ -355,7 +353,7 @@ class DockerRuntime:
             agent_id,
             "/session",
             method="POST",
-            body={"title": title},
+            body={"title": title, "permission": permission_rules(envelope)},
             directory=directory,
         )
         self.store.save_session(organization_id, agent_id, session["id"], directory, title)

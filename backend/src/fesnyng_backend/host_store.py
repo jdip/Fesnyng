@@ -83,6 +83,20 @@ class HostStore:
             ).fetchone()
         return row[0] if row else None
 
+    def authenticate_agent(self, token: str) -> dict[str, str] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT organization_id,agent_id,desired_envelope FROM host_agents WHERE agent_token=?",
+                (token,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "organization_id": row["organization_id"],
+            "agent_id": row["agent_id"],
+            "name": json.loads(row["desired_envelope"])["name"],
+        }
+
     def stage_agent(self, envelope: HostAgentConfiguration) -> bool:
         if envelope.host_id != self.instance_id:
             raise ValueError("Configuration belongs to another host")

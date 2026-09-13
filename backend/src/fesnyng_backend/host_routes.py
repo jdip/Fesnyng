@@ -53,30 +53,12 @@ async def agent_status(request: Request, organization_id: UUID, agent_id: UUID):
 async def apply_agent(
     request: Request, organization_id: UUID, agent_id: UUID, body: HostAgentConfiguration
 ):
-    org, aid = str(organization_id), str(agent_id)
+    org = str(organization_id)
     require_binding(request, org)
     if body.organization_id != organization_id or body.agent_id != agent_id:
         raise HTTPException(409, "Configuration identity mismatch")
-    store, runtime = request.app.state.host_store, request.app.state.host_runtime
     with host_errors():
-        async with runtime.lock(aid):
-            changed = store.stage_agent(body)
-            if changed:
-                await runtime.assert_quiet(org, aid)
-                profile = body.configuration.profile_id
-                if profile is not None:
-                    request.app.state.credential_store.assign_agent(
-                        org, aid, str(profile), store.agent(org, aid)["agent_token"]
-                    )
-                else:
-                    request.app.state.credential_store.unassign_agent(org, aid)
-                try:
-                    await runtime.configure(body)
-                    store.mark_applied(body)
-                except RuntimeUnavailable as error:
-                    store.set_runtime_state(org, aid, "pending", str(error))
-                    raise
-            return store.agent_status(org, aid)
+        return await request.app.state.host_configuration.apply(body)
 
 
 @router.post("/agents/{agent_id}/replace")
@@ -84,6 +66,13 @@ async def replace_agent(request: Request, organization_id: UUID, agent_id: UUID)
     org, aid = str(organization_id), str(agent_id)
     require_binding(request, org)
     with host_errors():
+        if any(
+            receipt["organization_id"] == org
+            and receipt["agent_id"] == aid
+            and receipt["state"] != "queued"
+            for receipt in request.app.state.dispatch_store.pending()
+        ):
+            raise RuntimeUnavailable("Agent replacement needs delivery reconciliation")
         await request.app.state.host_runtime.replace(org, aid)
         return request.app.state.host_store.agent_status(org, aid)
 

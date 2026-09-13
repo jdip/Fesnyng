@@ -197,3 +197,73 @@ def test_uncertain_refresh_blocks_agent_access(tmp_path: Path) -> None:
         assert status["state"] == "refresh_uncertain"
 
     asyncio.run(exercise())
+
+
+def test_recover_interrupted_operations_preserves_tokens_and_rejects_stale_saves(
+    tmp_path: Path,
+) -> None:
+    store, _ = _ready_store(tmp_path)
+    before = store.profile_status("organization-a", "profile-a")
+    assert before is not None
+    stale = store.acquire_operation("organization-a", "profile-a", ["ready"], "refreshing")
+    assert stale is not None
+    store.ensure_profile("organization-a", "profile-ready", "Uninterrupted")
+    ready_operation = store.acquire_operation(
+        "organization-a", "profile-ready", ["login_required"], "login"
+    )
+    assert ready_operation is not None
+    store.save_tokens("organization-a", "profile-ready", _tokens("account-ready"), ready_operation)
+    ready = store.profile_status("organization-a", "profile-ready")
+    assert ready is not None and ready["state"] == "ready"
+
+    store.recover_interrupted()
+
+    recovered = store.profile_status("organization-a", "profile-a")
+    assert recovered is not None
+    assert recovered["state"] == "refresh_uncertain"
+    assert recovered["account_id"] == before["account_id"]
+    assert recovered["generation"] == before["generation"]
+    assert store.profile_status("organization-a", "profile-ready") == ready
+    with pytest.raises(RuntimeError, match="Stale"):
+        store.save_tokens("organization-a", "profile-a", _tokens("account-a"), stale)
+    fresh = store.acquire_operation(
+        "organization-a", "profile-a", ["refresh_uncertain"], "login_pending"
+    )
+    assert fresh is not None and fresh != stale
+
+
+def test_cancelled_refresh_becomes_uncertain_and_can_be_reauthenticated(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        store, _ = _ready_store(tmp_path)
+        with store.connect() as connection:
+            connection.execute(
+                "UPDATE credential_profiles SET expires=0 WHERE organization_id=? AND profile_id=?",
+                ("organization-a", "profile-a"),
+            )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked(request: httpx.Request) -> httpx.Response:
+            started.set()
+            await release.wait()
+            raise AssertionError("cancelled request resumed")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(blocked)) as client:
+            refresh = asyncio.create_task(
+                CredentialService(store, client).refresh_profile("organization-a", "profile-a")
+            )
+            await started.wait()
+            refresh.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await refresh
+
+        status = store.profile_status("organization-a", "profile-a")
+        assert status is not None and status["state"] == "refresh_uncertain"
+        assert (
+            store.acquire_operation(
+                "organization-a", "profile-a", ["refresh_uncertain"], "login_pending"
+            )
+            is not None
+        )
+
+    asyncio.run(exercise())
