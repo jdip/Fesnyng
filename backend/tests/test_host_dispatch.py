@@ -191,11 +191,15 @@ def test_lifecycle_quiesce_records_actor_and_aborts_verified_native_descendants(
 
     class DescendantNative:
         def __init__(self):
+            self.locks = {}
             self.statuses = {
                 "ses_root": {"type": "busy"},
                 "ses_child": {"type": "busy"},
             }
             self.aborted = []
+
+        def lock(self, agent_id):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
 
         async def request(
             self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
@@ -588,6 +592,31 @@ def test_pending_configuration_blocks_native_model_submission(tmp_path):
     assert calls == 0
     assert receipt["state"] == "queued"
     assert receipt["native_message_id"] is None
+
+
+def test_lifecycle_transition_after_probe_keeps_queued_work_out_of_native_submission(tmp_path):
+    org, agent, store, native, author = interaction_system(tmp_path)
+    receipt = store.enqueue(
+        org, agent, "ses_one", Submission(id=uuid4(), text="Must remain queued"), author
+    )
+
+    async def race():
+        lock = native.lock(agent)
+        await lock.acquire()
+        runner = Dispatcher(store, native)
+        await runner._thread((org, agent, "ses_one"), [receipt])
+        await eventually(lambda: receipt["id"] in runner.tasks)
+        store.host.set_lifecycle_state(org, agent, state="transitioning")
+        lock.release()
+        await runner.tasks[receipt["id"]]
+
+    asyncio.run(race())
+
+    retained = store.get(org, agent, receipt["id"])
+    assert retained["state"] == "queued"
+    assert retained["native_message_id"] is None
+    assert "lifecycle" in retained["error"]
+    assert native.received == []
 
 
 def test_steering_joins_native_run_without_claiming_separate_fulfillment(tmp_path):

@@ -90,8 +90,10 @@ class DispatchResolutionService:
         )
         if not isinstance(statuses, dict):
             raise RuntimeUnavailable("Native runtime returned invalid status")
-        status = statuses.get(session_id, {})
-        if not isinstance(status, dict) or status.get("type", "idle") != "idle":
+        status = statuses.get(session_id, {"type": "idle"})
+        if not isinstance(status, dict) or status.get("type") not in {"idle", "busy", "retry"}:
+            raise RuntimeUnavailable("Native runtime returned invalid status")
+        if status["type"] != "idle":
             raise ValueError("Native session is not idle")
         history = await self.runtime.request(
             organization_id,

@@ -102,8 +102,8 @@ class NativeEvidence:
             )
             if not isinstance(statuses, dict):
                 return False
-            status = statuses.get(child, {})
-            if not isinstance(status, dict) or status.get("type", "idle") != "idle":
+            status = statuses.get(child, {"type": "idle"})
+            if not isinstance(status, dict) or status.get("type") != "idle":
                 return False
             history = await self.runtime.request(
                 org, agent, f"/session/{child}/message", directory=directory

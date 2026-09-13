@@ -6,6 +6,7 @@ type LifecycleAction = 'start' | 'stop' | 'restart' | 'rebuild';
 type RuntimeState = {
   desired_state?: 'running' | 'stopped';
   lifecycle_state?: 'running' | 'stopped' | 'pending' | 'transitioning' | 'recovering' | 'recovery_required' | 'missing' | 'unreachable' | 'failed';
+  container_state?: string;
   retry_action?: 'start' | 'rebuild';
   confirmation_required?: boolean;
   confirmation_code?: string;
@@ -17,10 +18,26 @@ const actionLabel: Record<LifecycleAction, string> = {
   start: 'Start', stop: 'Stop', restart: 'Restart', rebuild: 'Rebuild',
 };
 
+function containerAvailability(state?: string) {
+  switch (state) {
+    case 'running': return 'Running';
+    case 'exited':
+    case 'dead':
+    case 'stopped': return 'Stopped';
+    case 'missing': return 'Missing';
+    case 'created':
+    case 'restarting':
+    case 'paused': return 'Not ready';
+    default: return state;
+  }
+}
+
 function statusFor(runtime?: RuntimeState) {
   switch (runtime?.lifecycle_state) {
     case 'running': return ['Running', 'The agent container is running.'];
-    case 'stopped': return ['Stopped', 'The agent was intentionally stopped. Start applies any pending configuration.'];
+    case 'stopped': return runtime.desired_state === 'stopped'
+      ? ['Stopped', 'The agent was intentionally stopped. Start applies any pending configuration.']
+      : ['Stopped', 'The container stopped despite a requested running state. Start can recover it.'];
     case 'missing': return ['Missing', 'The agent container is missing. Rebuild creates a replacement after verifying retained resources.'];
     case 'pending':
     case 'transitioning': return ['Transitioning', 'A lifecycle change is in progress. New work remains paused until it settles.'];
@@ -112,6 +129,7 @@ export function LifecycleControls({ organization, agent, agentName, csrf }: { or
     <h3 id="agent-lifecycle-heading">Agent lifecycle</h3>
     <p><strong>{loading ? 'Loading runtime status…' : status}</strong></p>
     {!loading && <p className="muted">{description}</p>}
+    {runtime?.container_state && <p className="muted">Container availability: {containerAvailability(runtime.container_state)}.</p>}
     {runtime?.desired_state && <p className="muted">Requested state: {runtime.desired_state}.</p>}
     {hostMessage && <p className="muted" role="status">{hostMessage}</p>}
     {!action && error && <p className="app-error" role="alert">{error}</p>}

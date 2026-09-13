@@ -37,6 +37,16 @@ test('starts a stopped agent through its organization-scoped lifecycle endpoint'
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Refresh' })));
 });
 
+test('identifies a stopped container whose requested state is still running as an unexpected exit', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...runtime('stopped', 'running'), container_state: 'exited' }))));
+  render(<LifecycleControls organization="org" agent="agent" agentName="Researcher" csrf="csrf" />);
+
+  expect(await screen.findByText('Stopped')).toBeTruthy();
+  expect(screen.getByText('The container stopped despite a requested running state. Start can recover it.')).toBeTruthy();
+  expect(screen.getByText('Container availability: Stopped.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Start' })).toBeTruthy();
+});
+
 test('does not send an ordinary lifecycle action when its confirmation is cancelled', async () => {
   const request = vi.fn(async (url: string) => {
     void url;
@@ -99,7 +109,7 @@ test('returns keyboard focus to the opener on close and Refresh after a successf
 test('offers only the host-validated recovery retry and keeps its action explicit', async () => {
   const request = vi.fn(async (url: string, options: RequestInit = {}) => {
     void options;
-    if (url === path) return new Response(JSON.stringify({ ...runtime('recovery_required', 'running'), retry_action: 'start', error: 'Reconcile retained delivery effects before restarting.' }));
+    if (url === path) return new Response(JSON.stringify({ ...runtime('recovery_required', 'running'), container_state: 'running', retry_action: 'start', error: 'Reconcile retained delivery effects before restarting.' }));
     if (url === lifecyclePath) return new Response(JSON.stringify(runtime('running')));
     throw new Error(`Unexpected request: ${url}`);
   });
@@ -107,6 +117,7 @@ test('offers only the host-validated recovery retry and keeps its action explici
   render(<LifecycleControls organization="org" agent="agent" agentName="Researcher" csrf="csrf" />);
 
   expect(await screen.findByText('Recovery required')).toBeTruthy();
+  expect(screen.getByText('Container availability: Running.')).toBeTruthy();
   expect(screen.getByText('Reconcile retained delivery effects before restarting.')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Retry start' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Rebuild' })).toBeNull();

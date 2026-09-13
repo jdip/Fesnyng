@@ -62,7 +62,9 @@ class HostConfiguration:
                 """SELECT desired_envelope FROM host_agents
                 WHERE desired_state='running'
                   AND lifecycle_state IN ('running','pending')
-                  AND (applied_envelope IS NULL OR desired_envelope != applied_envelope)"""
+                  AND (lifecycle_state='pending'
+                       OR applied_envelope IS NULL
+                       OR desired_envelope != applied_envelope)"""
             ).fetchall()
         reconciled = await asyncio.gather(
             *(

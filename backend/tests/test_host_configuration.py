@@ -176,6 +176,28 @@ def test_stopped_agent_retains_pending_configuration_until_started(tmp_path):
     assert asyncio.run(configuration.reconcile_once()) == {}
 
 
+def test_pending_lifecycle_retries_same_version_configuration_after_start(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+    )
+    asyncio.run(configuration.apply(envelope))
+    host.set_lifecycle_state(organization_id, agent_id, desired="running", state="pending")
+    runtime.events.clear()
+
+    result = asyncio.run(configuration.reconcile_once())
+
+    assert result == {agent_id: "applied"}
+    assert "configure" in runtime.events
+    status = host.agent_status(organization_id, agent_id)
+    assert status["desired_version"] == status["applied_version"] == 1
+    assert status["lifecycle_state"] == "running"
+
+
 def test_apply_waiting_for_runtime_lock_cannot_restart_an_agent_stopped_in_the_race(tmp_path):
     host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
     baseline = HostAgentConfiguration(

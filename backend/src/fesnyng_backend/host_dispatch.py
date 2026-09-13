@@ -469,10 +469,14 @@ class Dispatcher:
                 self._require_current_policy(org, agent, session["session_id"])
                 configured = self.store.host.agent(org, agent)
                 if (
-                    not configured["applied_envelope"]
+                    configured["desired_state"] != "running"
+                    or configured["lifecycle_state"] != "running"
+                    or not configured["applied_envelope"]
                     or configured["applied_envelope"] != configured["desired_envelope"]
                 ):
-                    raise RuntimeUnavailable("Agent configuration changed before native submission")
+                    raise RuntimeUnavailable(
+                        "Agent lifecycle or configuration changed before native submission"
+                    )
                 envelope = HostAgentConfiguration.model_validate_json(
                     configured["applied_envelope"]
                 )

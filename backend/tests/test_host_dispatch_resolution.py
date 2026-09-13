@@ -15,6 +15,7 @@ from fesnyng_backend.host_dispatch_resolution import (
     HostDispatchResolution,
 )
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
+from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.settings import ControlPlaneSessionSettings, ServiceSettings
 
@@ -157,6 +158,29 @@ def test_operator_resolution_requires_idle_no_local_task_and_no_running_tools(tm
     asyncio.run(check_local_task())
 
 
+@pytest.mark.parametrize(
+    "statuses", [[], {"ses_primary": {}}, {"ses_primary": {"type": "unknown"}}]
+)
+def test_operator_resolution_preserves_unknown_outcome_when_native_status_is_invalid(
+    tmp_path, monkeypatch, statuses
+):
+    org, agent, dispatches, _, native, resolver, author, receipt = _system(tmp_path)
+    original_request = native.request
+
+    async def request(*args, **kwargs):
+        if args[2] == "/session/status":
+            return statuses
+        return await original_request(*args, **kwargs)
+
+    monkeypatch.setattr(native, "request", request)
+    resolution = HostDispatchResolution(
+        operation_id=uuid4(), outcome="failed", evidence="Reviewed externally.", author=author
+    )
+    with pytest.raises(RuntimeUnavailable, match="invalid status"):
+        asyncio.run(resolver.resolve(org, agent, "ses_primary", UUID(receipt["id"]), resolution))
+    assert dispatches.get(org, agent, receipt["id"])["state"] == "uncertain"
+
+
 def test_resolution_routes_scope_target_and_derive_the_control_plane_human_actor(
     organization, monkeypatch, tmp_path
 ):
@@ -240,7 +264,10 @@ def test_resolution_routes_scope_target_and_derive_the_control_plane_human_actor
     asyncio.run(check())
 
 
-def test_resolution_waits_for_a_running_native_child_even_when_parent_tool_ended(tmp_path):
+@pytest.mark.parametrize("child_status", [{"type": "busy"}, {}, {"type": "unknown"}])
+def test_resolution_waits_for_a_running_native_child_even_when_parent_tool_ended(
+    tmp_path, child_status
+):
     org, agent, dispatches, dispatcher, _, _, author, receipt = _system(tmp_path)
 
     class ChildNative(Native):
@@ -252,7 +279,7 @@ def test_resolution_waits_for_a_running_native_child_even_when_parent_tool_ended
             self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
         ):
             if path == "/session/status":
-                return {"ses_child": {"type": "busy"}} if self.child_busy else {}
+                return {"ses_child": child_status} if self.child_busy else {}
             if path == "/session/ses_primary/message":
                 return [
                     {
