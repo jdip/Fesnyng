@@ -57,6 +57,63 @@ test('reads an accepted image into a preview and saves its data URL', async () =
   })));
 });
 
+test('keeps save disabled until a selected image has finished reading, then submits that image', async () => {
+  let finishRead: (() => void) | undefined;
+  class Reader {
+    result: string | ArrayBuffer | null = null;
+    onload: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() {
+      finishRead = () => {
+        this.result = 'data:image/png;base64,c2VsZWN0ZWQ=';
+        this.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>);
+      };
+    }
+  }
+  vi.stubGlobal('FileReader', Reader);
+  const request = vi.fn(async (_url: string, options?: RequestInit) => response(options?.method === 'PUT'
+    ? organization('org', { kind: 'image', value: 'data:image/png;base64,c2VsZWN0ZWQ=' })
+    : organization()));
+  vi.stubGlobal('fetch', request);
+  renderSettings();
+  fireEvent.change(await screen.findByLabelText('Organization image'), { target: { files: [new File(['png'], 'icon.png', { type: 'image/png' })] } });
+  const save = screen.getByRole('button', { name: 'Save icon' });
+  expect(save).toHaveProperty('disabled', true);
+  expect(screen.getByRole('status').textContent).toContain('Reading image');
+  finishRead?.();
+  await waitFor(() => expect(save).toHaveProperty('disabled', false));
+  fireEvent.click(save);
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/api/organizations/org/icon', expect.objectContaining({
+    body: JSON.stringify({ icon: { kind: 'image', value: 'data:image/png;base64,c2VsZWN0ZWQ=' } }),
+  })));
+});
+
+test('cancels a pending read when its file selection is cleared', async () => {
+  let finishRead: (() => void) | undefined;
+  class Reader {
+    result: string | ArrayBuffer | null = null;
+    onload: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() {
+      finishRead = () => {
+        this.result = 'data:image/png;base64,b2xk';
+        this.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>);
+      };
+    }
+  }
+  vi.stubGlobal('FileReader', Reader);
+  vi.stubGlobal('fetch', vi.fn(async () => response(organization())));
+  const rendered = renderSettings();
+  const input = await screen.findByLabelText('Organization image');
+  fireEvent.change(input, { target: { files: [new File(['png'], 'icon.png', { type: 'image/png' })] } });
+  expect(screen.getByRole('button', { name: 'Save icon' })).toHaveProperty('disabled', true);
+  fireEvent.change(input, { target: { files: [] } });
+  expect(screen.getByRole('button', { name: 'Save icon' })).toHaveProperty('disabled', false);
+  expect(screen.queryByRole('status')).toBeNull();
+  finishRead?.();
+  await waitFor(() => expect(rendered.container.querySelector('img')).toBeNull());
+});
+
 test('rejects unsupported and oversized client uploads before saving', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => response(organization())));
   renderSettings();
@@ -65,6 +122,31 @@ test('rejects unsupported and oversized client uploads before saving', async () 
   expect(screen.getByRole('alert').textContent).toContain('PNG, JPEG, or WebP');
   fireEvent.change(input, { target: { files: [new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'icon.png', { type: 'image/png' })] } });
   expect(screen.getByRole('alert').textContent).toContain('no larger than 2 MiB');
+});
+
+test('does not let an invalid replacement revive an older image read', async () => {
+  let finishRead: (() => void) | undefined;
+  class Reader {
+    result: string | ArrayBuffer | null = null;
+    onload: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((event: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() {
+      finishRead = () => {
+        this.result = 'data:image/png;base64,b2xk';
+        this.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>);
+      };
+    }
+  }
+  vi.stubGlobal('FileReader', Reader);
+  vi.stubGlobal('fetch', vi.fn(async () => response(organization())));
+  const rendered = renderSettings();
+  const input = await screen.findByLabelText('Organization image');
+  fireEvent.change(input, { target: { files: [new File(['png'], 'first.png', { type: 'image/png' })] } });
+  fireEvent.change(input, { target: { files: [new File(['gif'], 'replacement.gif', { type: 'image/gif' })] } });
+  expect(screen.getByRole('alert').textContent).toContain('PNG, JPEG, or WebP');
+  finishRead?.();
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('PNG, JPEG, or WebP'));
+  expect(rendered.container.querySelector('img')).toBeNull();
 });
 
 test('resets an unsaved emoji and saves a cleared icon as null', async () => {
@@ -98,6 +180,24 @@ test('retries a failed identity load without requiring a settings-page reload', 
   renderSettings();
   expect((await screen.findByRole('alert')).textContent).toContain('Identity unavailable');
   fireEvent.click(screen.getByRole('button', { name: 'Retry identity' }));
+  expect(await screen.findByDisplayValue('🌿')).toBeTruthy();
+});
+
+test('keeps identity controls unavailable while a retry request is pending', async () => {
+  let retry: (value: Response) => void = () => { throw new Error('Retry request was not started'); };
+  let attempts = 0;
+  vi.stubGlobal('fetch', vi.fn(() => {
+    attempts += 1;
+    return attempts === 1
+      ? Promise.resolve(response({ detail: 'Identity unavailable' }, 503))
+      : new Promise<Response>((resolve) => { retry = resolve; });
+  }));
+  renderSettings();
+  await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Retry identity' }));
+  expect(screen.getByRole('status').textContent).toContain('Loading organization identity');
+  expect(screen.queryByLabelText('Organization emoji')).toBeNull();
+  retry(response(organization('org', { kind: 'emoji', value: '🌿' })));
   expect(await screen.findByDisplayValue('🌿')).toBeTruthy();
 });
 
