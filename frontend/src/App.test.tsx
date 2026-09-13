@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from './App';
 vi.mock('./Conversation', async () => {
   const { createPortal } = await import('react-dom');
@@ -63,17 +63,17 @@ test('uses the reporting chart as the default overview with compact settings nav
   render(<App />);
 
   expect(await screen.findByRole('heading', { name: 'Reporting chart' })).toBeTruthy();
-  const settings = await screen.findByRole('button', { name: 'Organization settings' });
-  expect(screen.getByText('Create your first agent to get started.')).toBeTruthy();
+  expect(await screen.findByText('Create your first agent to get started.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Overview' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
-  const chart = screen.getByRole('button', { name: 'Reporting chart' });
+  const switcher = screen.getByRole('button', { name: 'Switch organization: First organization' });
+  fireEvent.keyDown(switcher, { key: 'ArrowDown' });
+  const chart = await screen.findByRole('menuitem', { name: 'Reporting chart for First organization' });
   expect(chart.getAttribute('title')).toBe('Reporting chart');
-  expect(chart.getAttribute('aria-current')).toBe('page');
+  const settings = await screen.findByRole('menuitem', { name: 'Organization settings for First organization' });
   expect(settings.getAttribute('title')).toBe('Organization settings');
   fireEvent.click(settings);
   expect(await screen.findByRole('heading', { name: 'Organization settings', level: 1 })).toBeTruthy();
-  expect(settings.getAttribute('aria-current')).toBe('page');
 });
 
 test('restores a selected native thread after reloading an authorized organization', async () => {
@@ -128,7 +128,40 @@ test('shows an unread result on its agent without a standalone Activity view', a
   render(<App />);
   const pip = await screen.findByRole('img', { name: 'Unread result' });
   expect(pip.closest('button')?.textContent).toContain('Researcher');
+  expect(pip.parentElement?.parentElement?.className).toContain('agent-name-row');
   expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
+});
+
+test('uses accessible shell icons, orders search before agents, and restores focus after preferences', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'owner', display_name: 'Owner' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'owner', role: 'owner' }]
+      : input.endsWith('/agents') ? [{ id: 'agent', name: 'Researcher', title: 'Research', configuration: { workspace: 'default' } }]
+      : input.endsWith('/policy') ? { desired_version: 1, configuration: { default_permission: 'allow', mandatory_permissions: [], allow_thread_overrides: true } }
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+  render(<App />);
+  await screen.findByRole('button', { name: /Researcher/, pressed: false });
+  const search = screen.getByRole('searchbox', { name: 'Search organization threads' });
+  const heading = screen.getByText('Agents · 1');
+  expect(search.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /Researcher/, pressed: false }));
+  expect(screen.queryByRole('button', { name: 'Threads' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Memory' }).getAttribute('title')).toBe('Memory');
+  expect((await screen.findByRole('button', { name: 'Agent settings' })).getAttribute('title')).toBe('Agent settings');
+  expect(screen.getByRole('button', { name: 'Refresh workspace' }).getAttribute('title')).toBe('Refresh workspace');
+  const preferences = screen.getByRole('button', { name: 'User preferences' });
+  expect(screen.getByRole('button', { name: 'Sign out' }).getAttribute('title')).toBe('Sign out');
+  preferences.focus();
+  fireEvent.click(preferences);
+  expect(await screen.findByRole('dialog', { name: 'User preferences' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+  expect(screen.queryByRole('dialog', { name: 'User preferences' })).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(preferences));
 });
 
 test('expands only the selected agent and searches titles beyond the sidebar page', async () => {
@@ -152,11 +185,14 @@ test('expands only the selected agent and searches titles beyond the sidebar pag
   fireEvent.change(screen.getByRole('searchbox', { name: 'Search organization threads' }), { target: { value: '' } });
   expect(await screen.findByRole('region', { name: 'Beta threads' })).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Alpha threads' })).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  const switcher = screen.getByRole('button', { name: 'Switch organization: Organization' });
+  fireEvent.keyDown(switcher, { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Reporting chart for Organization' }));
   expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Open sidebar thread' }));
   expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Reporting chart' }));
+  fireEvent.keyDown(switcher, { key: 'ArrowDown' });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Reporting chart for Organization' }));
   fireEvent.click(screen.getByRole('button', { name: 'Create sidebar thread' }));
   expect(screen.getByText('Native conversation thread-8').closest('[hidden]')).toBeNull();
 });

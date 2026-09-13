@@ -8,9 +8,11 @@ const createFesnyngOpenCodeClient = vi.fn(() => client);
 
 vi.mock('@assistant-ui/react', () => ({
   AssistantRuntimeProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useAuiState: () => undefined,
 }));
 vi.mock('@assistant-ui/react-opencode', () => ({
   useOpenCodeRuntime,
+  useOpenCodeThreadState: () => '',
   useOpenCodeQuestions: () => [],
   useOpenCodeRuntimeExtras: () => ({
     replyToQuestion: vi.fn(),

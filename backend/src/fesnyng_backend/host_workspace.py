@@ -93,6 +93,10 @@ class NativeRuntime(Protocol):
         self, organization_id: str, agent_id: str, directory: str, path: str
     ) -> str: ...
 
+    async def workspace_context(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> dict[str, dict[str, int | str | None]]: ...
+
     async def workspace_metadata_many(
         self, organization_id: str, agent_id: str, directory: str, paths: list[str]
     ) -> dict[str, dict[str, Any]]: ...
@@ -181,6 +185,31 @@ class Workspace:
         return self._project_session(
             session, self._session_receipt(result, session_id, session["directory"])
         )
+
+    async def context(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
+        """Return safe workspace context for one mapped native thread."""
+        session = await self._scoped_session(org, agent, session_id)
+        try:
+            context = await self.runtime.workspace_context(org, agent, session["directory"])
+        except RuntimeUnavailable:
+            context = {
+                "repository": {"state": "unavailable"},
+                "branch": {"state": "unavailable"},
+                "changes": {"state": "unavailable"},
+            }
+        try:
+            subagents = {
+                "state": "available",
+                "count": await self._child_count(org, agent, session),
+            }
+        except RuntimeUnavailable:
+            subagents = {"state": "unavailable"}
+        return {
+            **context,
+            "subagents": subagents,
+            # OpenCode PTYs are runtime-wide and do not provide trustworthy session attribution.
+            "backgroundProcesses": {"state": "unavailable"},
+        }
 
     async def messages(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = await self._scoped_session(org, agent, session_id)
@@ -782,6 +811,32 @@ class Workspace:
                 result.append(record)
                 pending.append(record)
         return result
+
+    async def _child_count(self, org: str, agent: str, session: dict[str, Any]) -> int:
+        """Count only descendants whose native ancestry is verified from this session."""
+        count = 0
+        seen = {session["session_id"]}
+        pending = [(session["session_id"], session["directory"])]
+        while pending:
+            parent_id, directory = pending.pop()
+            children = await self.runtime.request(
+                org, agent, f"/session/{parent_id}/children", directory=directory
+            )
+            if not isinstance(children, list):
+                raise RuntimeUnavailable("Native child sessions response is invalid")
+            for child in children:
+                if not isinstance(child, Mapping):
+                    raise RuntimeUnavailable("Native child session receipt is invalid")
+                child_id = self._native_id(child.get("id"))
+                child_directory = child.get("directory")
+                if child.get("parentID") != parent_id or not isinstance(child_directory, str):
+                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+                if child_id in seen:
+                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+                seen.add(child_id)
+                count += 1
+                pending.append((child_id, child_directory))
+        return count
 
     async def _scoped_session(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         """Resolve a root mapping or a child proven by its mapped root's native tree."""

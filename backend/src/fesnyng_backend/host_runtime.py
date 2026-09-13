@@ -20,6 +20,88 @@ class RuntimeUnavailable(RuntimeError):
     pass
 
 
+def _workspace_context(result: bytes) -> dict[str, dict[str, int | str | None]]:
+    """Validate the fixed, path-free context receipt from one container command."""
+    try:
+        fields = result.decode().split("\0")
+    except UnicodeDecodeError:
+        raise RuntimeUnavailable("Workspace context is unavailable") from None
+    if not fields or fields.pop() != "" or len(fields) != 10:
+        raise RuntimeUnavailable("Workspace context is unavailable")
+    (
+        repository_state,
+        repository_name,
+        branch_state,
+        branch_name,
+        changes_state,
+        added,
+        deleted,
+        binary_files,
+        untracked,
+        reason,
+    ) = fields
+    if repository_state == "absent":
+        if (
+            any(
+                value
+                for value in (
+                    repository_name,
+                    branch_name,
+                    added,
+                    deleted,
+                    binary_files,
+                    untracked,
+                    reason,
+                )
+            )
+            or branch_state != "not_applicable"
+            or changes_state != "not_applicable"
+        ):
+            raise RuntimeUnavailable("Workspace context is unavailable")
+        return {
+            "repository": {"state": "absent"},
+            "branch": {"state": "not_applicable"},
+            "changes": {"state": "not_applicable"},
+        }
+    if (
+        repository_state != "available"
+        or not repository_name
+        or "/" in repository_name
+        or branch_state != "available"
+    ):
+        raise RuntimeUnavailable("Workspace context is unavailable")
+    repository: dict[str, int | str | None] = {"state": "available", "name": repository_name}
+    branch: dict[str, int | str | None] = {
+        "state": "available",
+        "name": branch_name or None,
+    }
+    if changes_state == "unavailable" and reason == "unborn":
+        if any((added, deleted, binary_files, untracked)):
+            raise RuntimeUnavailable("Workspace context is unavailable")
+        return {
+            "repository": repository,
+            "branch": branch,
+            "changes": {"state": "unavailable", "reason": "unborn"},
+        }
+    if (
+        changes_state != "available"
+        or reason
+        or not all(value.isdecimal() for value in (added, deleted, binary_files, untracked))
+    ):
+        raise RuntimeUnavailable("Workspace context is unavailable")
+    return {
+        "repository": repository,
+        "branch": branch,
+        "changes": {
+            "state": "available",
+            "added": int(added),
+            "deleted": int(deleted),
+            "binaryFiles": int(binary_files),
+            "untracked": int(untracked),
+        },
+    }
+
+
 _WORKSPACE_GUIDANCE = (
     "Use the working directory in the current native environment as this thread's workspace. "
     "Historical absolute paths and tool workdirs may refer to a parent; resolve this thread's work "
@@ -301,6 +383,77 @@ class DockerRuntime:
         if not resolved:
             raise RuntimeUnavailable("Artifact path is unavailable")
         return resolved
+
+    async def workspace_context(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> dict[str, dict[str, int | str | None]]:
+        """Read only the mapped checkout's display-safe Git context."""
+        await self.inspect(organization_id, agent_id)
+        script = r'''base="$(realpath -- "$1")" || exit 1
+test "$base" = "$1" && test -d "$base" || exit 1
+if [ ! -e "$base/.git" ]; then
+    printf "absent\0\0not_applicable\0\0not_applicable\0\0\0\0\0\0"
+    exit 0
+fi
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+root="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --show-toplevel 2>/dev/null)" || exit 1
+test "$root" = "$base" || exit 1
+git_dir="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --absolute-git-dir 2>/dev/null)" || exit 1
+common_dir="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || exit 1
+git_dir="$(realpath -- "$git_dir")" || exit 1
+common_dir="$(realpath -- "$common_dir")" || exit 1
+case "$git_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+case "$common_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+name="${root##*/}"
+if origin="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" config --get remote.origin.url 2>/dev/null)"; then
+    case "$origin" in
+        https://*|http://*|ssh://*|git://*|*@*:*)
+            candidate="${origin%/}"
+            candidate="${candidate##*/}"
+            case "$candidate" in *:*) candidate="${candidate##*:}";; esac
+            candidate="${candidate%.git}"
+            case "$candidate" in ""|*[!A-Za-z0-9._-]*) ;; *) name="$candidate";; esac
+            ;;
+    esac
+else
+    status=$?
+    test "$status" = 1 || exit "$status"
+fi
+test -n "$name" || exit 1
+if branch="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" symbolic-ref --quiet --short HEAD 2>/dev/null)"; then :
+else
+    status=$?
+    test "$status" = 1 || exit "$status"
+    branch=""
+fi
+if ! git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    printf "available\0%s\0available\0%s\0unavailable\0\0\0\0\0unborn\0" "$name" "$branch"
+    exit 0
+fi
+receipt="$(mktemp)" || exit 1
+trap 'rm -f "$receipt"' EXIT HUP INT TERM
+git --no-optional-locks -c core.fsmonitor=false -c diff.external= -C "$base" diff --no-ext-diff --no-textconv --numstat -z HEAD -- > "$receipt" || exit 1
+stats="$(awk -v RS="\0" -F "\t" '$1 == "-" || $2 == "-" { binary += 1; next }
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { added += $1; deleted += $2 }
+    END { printf "%d %d %d", added, deleted, binary }' "$receipt")" || exit 1
+set -- $stats
+test "$#" = 3 || exit 1
+git --no-optional-locks -c core.fsmonitor=false -C "$base" ls-files --others --exclude-standard -z > "$receipt" || exit 1
+untracked="$(awk -v RS="\0" 'END { print NR }' "$receipt")" || exit 1
+printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
+    "$name" "$branch" "$1" "$2" "$3" "$untracked"'''
+        result = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "20",
+            "sh",
+            "-c",
+            script,
+            "workspace-context",
+            directory,
+        )
+        return _workspace_context(result)
 
     @asynccontextmanager
     async def workspace_download(

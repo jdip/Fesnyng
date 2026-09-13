@@ -38,6 +38,13 @@ class Native:
     async def workspace_path(self, organization_id, agent_id, directory, path):
         return f"{directory}/{path}"
 
+    async def workspace_context(self, organization_id, agent_id, directory):
+        return {
+            "repository": {"state": "absent"},
+            "branch": {"state": "not_applicable"},
+            "changes": {"state": "not_applicable"},
+        }
+
     async def request_with_query(self, organization_id, agent_id, path, query, *, directory):
         self.calls.append((organization_id, agent_id, path, "GET", query, directory))
         if path == "/file":
@@ -258,6 +265,84 @@ def test_workspace_lists_threads_by_attributed_incoming_message_recency(tmp_path
         )
     refreshed = workspace.sessions(org, agent)
     assert [session["id"] for session in refreshed[:2]] == ["ses_peer", "ses_human"]
+
+
+def test_workspace_context_is_scoped_and_counts_verified_native_child_sessions(tmp_path):
+    """Thread context never exposes a host path or counts unrelated native sessions."""
+
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    thread_directory = "/workspace/default/threads/main"
+    store.save_session(org, agent, "ses_main", thread_directory, "Main")
+
+    class ContextNative(Native):
+        async def workspace_context(self, organization_id, agent_id, directory):
+            assert (organization_id, agent_id, directory) == (org, agent, thread_directory)
+            return {
+                "repository": {"state": "available", "name": "example-project"},
+                "branch": {"state": "available", "name": "feature/context"},
+                "changes": {
+                    "state": "available",
+                    "added": 12,
+                    "deleted": 3,
+                    "binaryFiles": 1,
+                    "untracked": 2,
+                },
+            }
+
+    native = ContextNative()
+    native.children = {
+        "/session/ses_main/children": [
+            {
+                "id": "ses_child",
+                "parentID": "ses_main",
+                "directory": thread_directory,
+            }
+        ],
+        "/session/ses_child/children": [
+            {
+                "id": "ses_grandchild",
+                "parentID": "ses_child",
+                "directory": thread_directory,
+            }
+        ],
+        "/session/ses_grandchild/children": [],
+    }
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+
+    context = asyncio.run(
+        Workspace(store, native, dispatches, interactions).context(org, agent, "ses_main")
+    )
+
+    assert context == {
+        "repository": {"state": "available", "name": "example-project"},
+        "branch": {"state": "available", "name": "feature/context"},
+        "changes": {
+            "state": "available",
+            "added": 12,
+            "deleted": 3,
+            "binaryFiles": 1,
+            "untracked": 2,
+        },
+        "subagents": {"state": "available", "count": 2},
+        "backgroundProcesses": {"state": "unavailable"},
+    }
 
 
 def test_workspace_facade_scopes_native_history_and_persists_text_prompt(tmp_path):

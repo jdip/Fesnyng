@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { NetworkIcon, SettingsIcon } from 'lucide-react';
+import { BrainCircuitIcon, LogOutIcon, PanelsTopLeftIcon, RefreshCwIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react';
 import { readWorkspaceLocation, saveWorkspaceLocation } from './workspace-location';
 import { ConversationBoundary } from './ConversationBoundary';
 import { ThreadNotificationsProvider, useThreadNotifications } from './ThreadNotifications';
@@ -7,7 +7,8 @@ import { ThreadNotificationBadge } from './ThreadNotificationBadge';
 import { ConversationDraftsProvider } from './ConversationDrafts';
 import { OrganizationSwitcher } from './OrganizationSwitcher';
 import { OrganizationThreadSearch } from './OrganizationThreadSearch';
-import { ThreadPagePreference } from './ThreadPagePreference';
+import { ThreadPagePreferenceForm, useThreadPagePreference } from './ThreadPagePreference';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from './components/ui/dialog';
 import { ConversationDeliveryProvider } from './ConversationDelivery';
 const Conversation = lazy(async () => ({ default: (await import('./Conversation')).Conversation }));
 import { AgentSettings } from './AgentSettings';
@@ -47,6 +48,8 @@ function SignIn({ onLogin, initialError }: { onLogin: (session: LoginSession) =>
 function Workspace({ session, onLogout }: { session: LoginSession; onLogout: () => void }) {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [organization, setOrganization] = useState('');
+  const [organizationView, setOrganizationView] = useState<'chart' | 'organization'>();
+  const [managerOrganizationIds, setManagerOrganizationIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [focusIdentity, setFocusIdentity] = useState(false);
@@ -59,15 +62,29 @@ function Workspace({ session, onLogout }: { session: LoginSession; onLogout: () 
     }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
     return () => controller.abort();
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.all(organizations.map(async (item) => {
+      try {
+        const members = await api<Member[]>(`/organizations/${item.id}/members`, { signal: controller.signal });
+        return ['owner', 'admin'].includes(members.find((member) => member.user_id === session.user.id)?.role ?? '') ? item.id : undefined;
+      } catch {
+        return undefined;
+      }
+    })).then((items) => {
+      if (!controller.signal.aborted) setManagerOrganizationIds(items.filter((item): item is string => Boolean(item)));
+    });
+    return () => controller.abort();
+  }, [organizations, session.user.id]);
   if (error) return <main className="workspace-page"><p className="app-error" role="alert">{error}</p><button className="app-button" onClick={onLogout}>Sign in again</button></main>;
   if (loading) return <div className="app-empty" role="status">Loading organizations…</div>;
   if (!organization) return <main className="sign-in"><div className="sign-in-card"><Brand /><h1>Create your organization</h1><p className="page-intro">Bring your persistent agents together.</p><form className="app-form" onSubmit={(event) => {
     event.preventDefault(); const name = new FormData(event.currentTarget).get('name'); setCreating(true);
     void api<Organization>('/organizations', { method: 'POST', csrf: session.csrf_token, body: { name } }).then((created) => { setOrganizations((items) => [...items, created]); saveWorkspaceLocation(created.id); setOrganization(created.id); }).catch((cause: unknown) => setError(errorMessage(cause)));
   }}><label>Organization name<input className="app-input" name="name" required maxLength={120} /></label><button className="app-button primary" disabled={creating}>Create organization</button>{organizations.length > 0 && <button className="app-button quiet" type="button" onClick={() => setOrganization(organizations[0].id)}>Cancel</button>}</form></div></main>;
-  return <OrganizationWorkspace key={organization} focusIdentity={focusIdentity} organization={organization} organizations={organizations} onIdentityChanged={(updated) => setOrganizations((items) => items.map((item) => item.id === updated.id ? updated : item))} onOrganization={(id) => { setFocusIdentity(true); setCreating(false); saveWorkspaceLocation(id === '__new__' ? '' : id); setOrganization(id === '__new__' ? '' : id); }} session={session} onLogout={onLogout} />;
+  return <OrganizationWorkspace key={`${organization}:${organizationView ?? 'default'}`} focusIdentity={focusIdentity} initialView={organizationView} managerOrganizationIds={managerOrganizationIds} organization={organization} organizations={organizations} onIdentityChanged={(updated) => setOrganizations((items) => items.map((item) => item.id === updated.id ? updated : item))} onOrganization={(id, view) => { setOrganizationView(view); setFocusIdentity(true); setCreating(false); saveWorkspaceLocation(id === '__new__' ? '' : id); setOrganization(id === '__new__' ? '' : id); }} session={session} onLogout={onLogout} />;
 }
-function OrganizationWorkspace({ organization, organizations, onOrganization, onIdentityChanged, focusIdentity, session, onLogout }: { focusIdentity: boolean; organization: string; organizations: Organization[]; onIdentityChanged: (updated: Organization) => void; onOrganization: (id: string) => void; session: LoginSession; onLogout: () => void }) {
+function OrganizationWorkspace({ organization, organizations, managerOrganizationIds, initialView, onOrganization, onIdentityChanged, focusIdentity, session, onLogout }: { focusIdentity: boolean; initialView?: 'chart' | 'organization'; managerOrganizationIds: string[]; organization: string; organizations: Organization[]; onIdentityChanged: (updated: Organization) => void; onOrganization: (id: string, view?: 'chart' | 'organization') => void; session: LoginSession; onLogout: () => void }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (focusIdentity) headingRef.current?.focus(); }, [focusIdentity]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -76,8 +93,9 @@ function OrganizationWorkspace({ organization, organizations, onOrganization, on
   const [thread, setThread] = useState<string | undefined>(() => readWorkspaceLocation().organization === organization ? readWorkspaceLocation().thread : undefined);
   const lastThreads = useRef<Record<string, string | undefined>>({});
   const [threadListTarget, setThreadListTarget] = useState<HTMLDivElement | null>(null);
+  const [newThreadTarget, setNewThreadTarget] = useState<HTMLDivElement | null>(null);
   const [threadPageSize, setThreadPageSize] = useState(6);
-  const [view, setView] = useState(() => readWorkspaceLocation().organization === organization && readWorkspaceLocation().agent ? 'conversation' : 'chart');
+  const [view, setView] = useState(() => initialView ?? (readWorkspaceLocation().organization === organization && readWorkspaceLocation().agent ? 'conversation' : 'chart'));
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [mobile, setMobile] = useState(false);
@@ -93,23 +111,23 @@ function OrganizationWorkspace({ organization, organizations, onOrganization, on
   const agent = agents.find((item) => item.id === selected);
   const navigate = (next: string) => { setView(next); setMobile(false); setError(''); };
   const openAgent = (id: string, nativeSession?: string) => { if (selected) lastThreads.current[selected] = thread; const nextThread = nativeSession ?? (id === selected ? thread : lastThreads.current[id]); saveWorkspaceLocation(organization, id, nextThread); setSelected(id); setThread(nextThread); navigate('conversation'); };
-  return <ConversationDraftsProvider organization={organization}><ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><OrganizationSwitcher organizations={organizations} selected={organization} onSelect={onOrganization} />
-    <div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
+  const openOrganizationView = (id: string, next: 'chart' | 'organization') => { if (id === organization) navigate(next); else onOrganization(id, next); };
+  return <ConversationDraftsProvider organization={organization}><ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><OrganizationSwitcher organizations={organizations} selected={organization} managerOrganizationIds={managerOrganizationIds} onSelect={onOrganization} onOpen={openOrganizationView} />
     <input type="search" className="app-input" aria-label="Search organization threads" placeholder="Search all threads…" value={search} onChange={(event) => setSearch(event.target.value)} />
+    <div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
     <div className="sidebar-thread-navigation">
       {search.trim() && <OrganizationThreadSearch organization={organization} agents={agents} query={search} onOpen={openAgent} />}
-      <div className="agent-list" hidden={Boolean(search.trim())}>{agents.map((item) => <div key={item.id}>
-        <button className="agent-choice" aria-pressed={selected === item.id} aria-expanded={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><span>{item.name}<small>{item.title || 'Agent'}</small></span><ThreadNotificationBadge agent={item.id} /></button>
+      <div className="agent-list" hidden={Boolean(search.trim())}>{agents.map((item) => <div className="agent-entry" key={item.id}>
+        <button className="agent-choice" aria-pressed={selected === item.id} aria-expanded={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><span className="agent-name-row"><span className="agent-name">{item.name}</span><ThreadNotificationBadge agent={item.id} /></span></button>
+        <div className="agent-role-row"><small>{item.title || 'Agent'}</small>{selected === item.id && <div className="agent-new-thread-target" ref={setNewThreadTarget} />}</div>
         {selected === item.id && <div className="sidebar-agent-threads" role="region" aria-label={`${item.name} threads`} ref={setThreadListTarget} />}
       </div>)}</div>
     </div>
-    <ThreadPagePreference organization={organization} csrf={session.csrf_token} onChange={setThreadPageSize} />
-    <div className="sidebar-utilities" aria-label="Organization navigation"><button className="sidebar-icon-button" aria-label="Reporting chart" aria-current={view === 'chart' ? 'page' : undefined} title="Reporting chart" onClick={() => navigate('chart')}><NetworkIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Reporting chart</span></button>{manager && <button className="sidebar-icon-button" aria-label="Organization settings" aria-current={view === 'organization' ? 'page' : undefined} title="Organization settings" onClick={() => navigate('organization')}><SettingsIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Organization settings</span></button>}</div>
-    <div className="sidebar-footer"><span>{session.user.display_name}</span><button className="app-button quiet" onClick={() => { void api('/auth/logout', { method: 'POST', csrf: session.csrf_token }).then(onLogout).catch((cause: unknown) => setError(errorMessage(cause))); }}>Sign out</button></div>
+    <div className="sidebar-footer"><span>{session.user.display_name}</span><div className="sidebar-footer-actions"><UserPreferencesPanel organization={organization} csrf={session.csrf_token} onChange={setThreadPageSize} /><button className="sidebar-icon-button" aria-label="Sign out" title="Sign out" onClick={() => { void api('/auth/logout', { method: 'POST', csrf: session.csrf_token }).then(onLogout).catch((cause: unknown) => setError(errorMessage(cause))); }}><LogOutIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">Sign out</span></button></div></div>
   </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1 ref={headingRef} tabIndex={-1}>{view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['chart', 'organization'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
-    <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button" onClick={() => navigate('conversation')}>Threads</button><button className="app-button" onClick={() => navigate('memory')}>Memory</button>{manager && <button className="app-button" onClick={() => navigate('agent-settings')}>Agent settings</button>}</>}<button className="app-button quiet" onClick={() => setVersion((current) => current + 1)}>Refresh</button></div></header>
+    <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button quiet header-icon-button" aria-label="Memory" title="Memory" onClick={() => navigate('memory')}><BrainCircuitIcon aria-hidden="true" /></button>{manager && <button className="app-button quiet header-icon-button" aria-label="Agent settings" title="Agent settings" onClick={() => navigate('agent-settings')}><PanelsTopLeftIcon aria-hidden="true" /></button>}</>}<button className="app-button quiet header-icon-button" aria-label="Refresh workspace" title="Refresh workspace" onClick={() => setVersion((current) => current + 1)}><RefreshCwIcon aria-hidden="true" /></button></div></header>
     {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content"><NotificationErrors />
-    {agent && <ConversationDeliveryProvider organization={organization} agent={agent.id} session={thread} csrf={session.csrf_token} onOpen={openAgent}><div className="conversation-region" hidden={view !== 'conversation'}><ConversationBoundary key={agent.id}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}><Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={session.csrf_token} refreshKey={version} sessionId={thread} showThreadList={false} threadListTarget={threadListTarget} threadPageSize={threadPageSize} onThreadSelect={() => { navigate('conversation'); setMobile(false); }} onSessionChange={(id) => { setMobile(false); setThread(id); lastThreads.current[agent.id] = id; saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} /></Suspense></ConversationBoundary></div></ConversationDeliveryProvider>}
+    {agent && <ConversationDeliveryProvider organization={organization} agent={agent.id} session={thread} csrf={session.csrf_token} onOpen={openAgent}><div className="conversation-region" hidden={view !== 'conversation'}><ConversationBoundary key={agent.id}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}><Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={session.csrf_token} refreshKey={version} sessionId={thread} showThreadList={false} threadListTarget={threadListTarget} newThreadTarget={newThreadTarget} threadPageSize={threadPageSize} onThreadSelect={() => { navigate('conversation'); setMobile(false); }} onSessionChange={(id) => { setMobile(false); setThread(id); lastThreads.current[agent.id] = id; saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} /></Suspense></ConversationBoundary></div></ConversationDeliveryProvider>}
     {view === 'agent-settings' && manager && <AgentSettings key={agent?.id ?? 'new'} organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} onSaved={(saved) => { setAgents((items) => [...items.filter((item) => item.id !== saved.id), saved]); setSelected(saved.id); }} />}
     {view === 'organization' && manager && <OrganizationSettings onIdentityChanged={onIdentityChanged} organization={organization} csrf={session.csrf_token} agents={agents} onChanged={() => setVersion((current) => current + 1)} />}
     {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
@@ -121,6 +139,13 @@ function ReportingChart({ agents, onOpen }: { agents: Agent[]; onOpen: (id: stri
     return <ul className="chart-list">{agents.filter((agent) => (agent.reports_to_agent_id ?? null) === parent && !seen.has(agent.id)).map((agent) => <li key={agent.id}><button className="chart-node" onClick={() => onOpen(agent.id)}><span className="agent-avatar">{agent.name.slice(0, 2).toUpperCase()}</span><span>{agent.name}<small>{agent.title || 'Agent'}</small></span></button>{agents.some((item) => item.reports_to_agent_id === agent.id) && branch(agent.id, new Set([...seen, agent.id]))}</li>)}</ul>;
   }
   return branch(null, new Set());
+}
+function UserPreferencesPanel({ organization, csrf, onChange }: { organization: string; csrf: string; onChange: (size: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const preference = useThreadPagePreference({ organization, csrf, onChange });
+  return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild><button className="sidebar-icon-button" aria-label="User preferences" title="User preferences"><SlidersHorizontalIcon aria-hidden="true" /><span className="sidebar-icon-tooltip" aria-hidden="true">User preferences</span></button></DialogTrigger>
+      <DialogContent aria-label="User preferences" className="preferences-panel" showCloseButton={false}><DialogHeader className="preferences-panel-header"><DialogTitle>User preferences</DialogTitle><DialogClose asChild><button className="sidebar-icon-button" aria-label="Close preferences" title="Close preferences"><XIcon aria-hidden="true" /></button></DialogClose></DialogHeader><ThreadPagePreferenceForm preference={preference} /></DialogContent>
+    </Dialog>;
 }
 function NotificationErrors() {
   const notifications = useThreadNotifications();

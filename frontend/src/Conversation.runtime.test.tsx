@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { Conversation } from './Conversation';
 
@@ -248,7 +248,7 @@ test('refreshes incoming-message order on return to the app without losing the a
   await screen.findByRole('button', { name: 'Second thread' });
   const composer = await screen.findByRole('textbox', { name: 'Message input' });
   fireEvent.change(composer, { target: { value: 'Keep this draft' } });
-  const titles = () => screen.getAllByRole('button', { name: /^(First|Second) thread$/ }).map((item) => item.textContent);
+  const titles = () => screen.getAllByRole('button', { name: /^(First|Second) thread$/ }).map((item) => within(item).getByText(/^(First|Second) thread$/).textContent);
   expect(titles()).toEqual(['First thread', 'Second thread']);
   // The host orders by incoming authorship even when native creation order differs.
   threads = [second, first];

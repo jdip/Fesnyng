@@ -139,6 +139,23 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
 
     def native(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        if request.url.path.endswith("/opencode/session/ses_main/context"):
+            return httpx.Response(
+                200,
+                json={
+                    "repository": {"state": "available", "name": "example-project"},
+                    "branch": {"state": "available", "name": "feature/context"},
+                    "changes": {
+                        "state": "available",
+                        "added": 3,
+                        "deleted": 1,
+                        "binaryFiles": 0,
+                        "untracked": 2,
+                    },
+                    "subagents": {"state": "available", "count": 0},
+                    "backgroundProcesses": {"state": "unavailable"},
+                },
+            )
         if request.url.path.endswith("/command"):
             return httpx.Response(200, json=[{"name": "fesnyng/review", "description": "review"}])
         if request.url.path.endswith("/provider"):
@@ -188,6 +205,13 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
                 f"/organizations/{org.id}/agents/{agent['id']}/opencode/experimental/session"
             )
             assert sessions.json() == [{"id": "ses_main", "title": "Main"}]
+            context_path = (
+                f"/organizations/{org.id}/agents/{agent['id']}/opencode/session/ses_main/context"
+            )
+            context = await client.get(context_path)
+            assert context.status_code == 200
+            assert context.json()["repository"] == {"state": "available", "name": "example-project"}
+            assert "directory" not in context.text
             listed = await client.get(
                 f"/organizations/{org.id}/agents/{agent['id']}/opencode/session"
             )
@@ -252,7 +276,7 @@ def test_workspace_facade_scopes_native_reads_and_preserves_native_error_shape(
             ).status_code == 404
 
     asyncio.run(exercise())
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert all(request.headers["authorization"].startswith("Bearer ") for request in calls)
 
 

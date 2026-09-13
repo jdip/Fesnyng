@@ -131,6 +131,16 @@ async def session(request: Request, organization_id: UUID, agent_id: UUID, sessi
         return await _workspace(request).get(org, agent, session_id)
 
 
+@router.get("/agents/{agent_id}/opencode/session/{session_id}/context")
+async def session_context(
+    request: Request, organization_id: UUID, agent_id: UUID, session_id: NativeID
+):
+    org, agent = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        return await _workspace(request).context(org, agent, session_id)
+
+
 @router.patch("/agents/{agent_id}/opencode/session/{session_id}")
 async def update_session(
     request: Request,

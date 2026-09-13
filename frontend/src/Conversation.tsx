@@ -7,16 +7,19 @@ import {
   useOpenCodeQuestions,
   useOpenCodeRuntime,
   useOpenCodeRuntimeExtras,
+  useOpenCodeThreadState,
 } from '@assistant-ui/react-opencode';
 import { createPortal } from 'react-dom';
-import { GitForkIcon } from 'lucide-react';
+import { GitForkIcon, PlusIcon } from 'lucide-react';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { ThreadPinsProvider } from './ThreadPins';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
-import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadList, ThreadListNew, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
 import { ThreadPolicyDialog } from './ThreadPolicyDialog';
+import { ThreadInformation } from './ThreadInformation';
+import { ThreadWorkspaceContext, useThreadWorkspace } from './thread-context';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
 import {
@@ -45,6 +48,7 @@ export type ConversationProps = {
   /** Reloads the maintained thread inventory without remounting the composer. */
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
+  newThreadTarget?: HTMLElement | null;
   threadPageSize?: number;
   onThreadSelect?: () => void;
 };
@@ -71,6 +75,7 @@ export function Conversation({
   showThreadList = true,
   refreshKey = 0,
   threadListTarget,
+  newThreadTarget,
   threadPageSize = 6,
   onThreadSelect,
 }: ConversationProps) {
@@ -135,18 +140,40 @@ export function Conversation({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadWorkspaceProvider baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey}>
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} /></aside>}
-          <div className="fesnyng-thread-pane"><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
+          {newThreadTarget && createPortal(<ThreadListNew className="agent-new-thread" aria-label="New thread" title="New thread" onClick={(event) => { event.stopPropagation(); onThreadSelect?.(); }}><PlusIcon aria-hidden="true" size={16} /></ThreadListNew>, newThreadTarget)}
+          {threadListTarget ? createPortal(<ThreadList showNew={!newThreadTarget} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} />, threadListTarget) : showThreadList && <aside><ThreadList showNew={!newThreadTarget} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={openFiles} onOpenPermissions={openPermissions} /></aside>}
+          <div className="fesnyng-thread-pane"><ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} /><Thread allowAttachments={false} components={components} /><PendingQuestions /></div>
           {files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>
+      </ThreadWorkspaceProvider>
     </AssistantRuntimeProvider>
   );
+}
+
+function ThreadWorkspaceProvider({ baseUrl, csrfToken, refreshKey, children }: PropsWithChildren<{ baseUrl: string; csrfToken: string; refreshKey: number }>) {
+  const revision = useOpenCodeThreadState((state) => [
+    state.session?.time?.updated, state.runState.type, Object.keys(state.childSessionsById).join(','),
+    state.unhandledEvents.filter((event) => ['session.diff', 'vcs.branch.updated', 'file.edited'].includes(event.type)).at(-1)?.seenAt,
+  ].join(':'));
+  const value = useMemo(() => ({ baseUrl, csrfToken, refreshKey: `${refreshKey}:${revision}` }), [baseUrl, csrfToken, refreshKey, revision]);
+  return <ThreadWorkspaceContext.Provider value={value}>{children}</ThreadWorkspaceContext.Provider>;
+}
+
+function ActiveThreadInformation({ runtime, baseUrl, csrfToken, refreshKey }: {
+  runtime: ReturnType<typeof useOpenCodeRuntime>; baseUrl: string; csrfToken: string; refreshKey: number;
+}) {
+  const item = useAuiState((state) => state.threads.threadItems.find((item) => item.id === state.threads.mainThreadId));
+  const workspace = useThreadWorkspace();
+  const session = item?.externalId ?? item?.remoteId;
+  if (!session || !item) return null;
+  return <ThreadInformation key={session} baseUrl={baseUrl} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={workspace?.refreshKey ?? refreshKey} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
 }
 
 const OpenCodeToolFallback: ToolCallMessagePartComponent = (props) => {
