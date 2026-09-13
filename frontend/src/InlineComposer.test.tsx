@@ -170,7 +170,9 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
     const url = request?.url ?? input.toString();
     if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
     if (url.includes('/prompt_async')) return response({ detail: 'Retry later.' }, 422);
-    return response(url.includes('/experimental/session') ? [] : []);
+    if (url.includes('/session/session-one/message')) return response([{ info: { id: 'user-one', sessionID: 'session-one', role: 'user', time: { created: 1 } }, parts: [{ id: 'part-one', sessionID: 'session-one', messageID: 'user-one', type: 'text', text: 'Native session is attached.' }] }]);
+    if (url.endsWith('/session/session-one')) return response({ id: 'session-one', title: 'New session', time: {} });
+    return response([]);
   });
   vi.stubGlobal('fetch', fetchMock);
   const { rerender } = render(<ComposerHarness show sessionId={undefined} />);
@@ -197,4 +199,9 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
     return (input instanceof Request ? input.headers : new Headers(init.headers)).get('Idempotency-Key');
   });
   expect(new Set(admissions).size).toBe(1);
+  expect(await screen.findByText('Native session is attached.')).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Continue in the created session.' } });
+  rerender(<ComposerHarness show={false} sessionId="session-one" />);
+  rerender(<ComposerHarness show sessionId="session-one" />);
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Continue in the created session.'));
 });

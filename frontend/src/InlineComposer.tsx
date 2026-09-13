@@ -194,6 +194,13 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         workflow: isCurrentThread(requestThreadIdentity) ? selectedWorkflowRef.current : latest?.workflow ?? workflow,
         admissions: withAdmission(latest, currentAdmission),
       });
+      // A remount can await another runtime's initialization. Attach this
+      // still-active maintained thread before posting so its conversation and
+      // restored draft use the resolved native session. A user navigation has
+      // a different local identity and is deliberately left alone.
+      if (isCurrentThread(requestThreadIdentity) && aui.threadListItem.getState().externalId !== resolvedSessionId) {
+        await aui.threads.switchToThread(resolvedSessionId);
+      }
       const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(resolvedSessionId)}/prompt_async`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
         body: JSON.stringify({
