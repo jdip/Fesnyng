@@ -413,7 +413,15 @@ class Dispatcher:
                 if not self.store.change(row, "submitting", message_id=message_id):
                     return
             path = f"/session/{session['session_id']}/message"
-            body = {"messageID": message_id, "parts": [{"type": "text", "text": payload["text"]}]}
+            body = {
+                "messageID": message_id,
+                "parts": [{"type": "text", "text": payload["text"]}],
+                "system": (
+                    f"Current thread workspace: {json.dumps(session['directory'])}. "
+                    "Use this directory for this thread file work and tool workdir; parent-history "
+                    "paths are historical unless the current task explicitly requires another location."
+                ),
+            }
             if payload["command"]:
                 path = f"/session/{session['session_id']}/command"
                 body = {
