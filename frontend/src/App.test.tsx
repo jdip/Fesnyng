@@ -90,6 +90,7 @@ test('restores a selected native thread after reloading an authorized organizati
   }));
   render(<App />);
   expect(await screen.findByText('Native conversation thread-one')).toBeTruthy();
+  expect(document.querySelector('.thread-context')).toBeNull();
 });
 
 test('lets an existing member create another organization without losing the original membership', async () => {
