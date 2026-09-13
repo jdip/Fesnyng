@@ -211,6 +211,41 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Continue in the created session.'));
 });
 
+test('does not clear a retyped draft when a duplicate admission response settles', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  let resolveInitialization: (response: Response) => void = () => {};
+  const initialization = new Promise<Response>((resolve) => { resolveInitialization = resolve; });
+  const promptResolvers: Array<(response: Response) => void> = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : undefined;
+    const url = request?.url ?? input.toString();
+    if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
+    if (url.includes('/prompt_async')) return new Promise<Response>((resolve) => { promptResolvers.push(resolve); });
+    if (url.includes('/session/session-one/message')) return response([]);
+    if (url.endsWith('/session/session-one')) return response({ id: 'session-one', title: 'New session', time: {} });
+    return response([]);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  const { rerender } = render(<ComposerHarness show sessionId={undefined} />);
+  fireEvent.change(await currentComposer(), { target: { value: 'Send this exact text.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => input instanceof Request && input.method === 'POST' && input.url.endsWith('/session'))).toHaveLength(1));
+
+  rerender(<ComposerHarness show={false} sessionId={undefined} />);
+  rerender(<ComposerHarness show sessionId={undefined} />);
+  fireEvent.click(await currentComposer().then(() => screen.getByRole('button', { name: 'Send message' })));
+  resolveInitialization(response({ id: 'session-one', title: 'New session', time: {} }));
+  await waitFor(() => expect(promptResolvers).toHaveLength(2));
+
+  promptResolvers[0](response({ accepted: true }));
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', ''));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Send this exact text.' } });
+  promptResolvers[1](response({ accepted: true }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Send this exact text.');
+});
+
 test('does not replay an old completion against a later identical draft', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   let finish: (response: Response) => void = () => {};

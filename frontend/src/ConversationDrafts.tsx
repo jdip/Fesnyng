@@ -82,12 +82,11 @@ export function ConversationDraftsProvider({
     const key = draftStorageKey(baseUrl, threadKey);
     const draft = draftsRef.current.get(key);
     const admissions = draft?.admissions?.filter((admission) => admission.id !== admissionId);
-    if (draft && admissions?.length !== draft.admissions?.length) {
-      if (draftKey(draft) === admissionKey) {
-        draftsRef.current.delete(key);
-      } else if (!draft.text && !draft.workflow && !admissions?.length) draftsRef.current.delete(key);
-      else draftsRef.current.set(key, { ...draft, admissions });
-    }
+    if (!draft || !admissions || admissions.length === draft.admissions?.length) return;
+    if (draftKey(draft) === admissionKey) {
+      draftsRef.current.delete(key);
+    } else if (!draft.text && !draft.workflow && !admissions.length) draftsRef.current.delete(key);
+    else draftsRef.current.set(key, { ...draft, admissions });
 
     const listeners = settlementListenersRef.current.get(key);
     listeners?.forEach((listener) => listener(admissionKey));
