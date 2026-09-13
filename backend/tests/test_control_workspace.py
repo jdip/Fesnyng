@@ -353,6 +353,32 @@ def test_workspace_event_route_forwards_events_while_access_remains_valid(
     asyncio.run(exercise())
 
 
+def test_workspace_event_route_finishes_response_after_host_disconnect(organization, monkeypatch):
+    app, _, _, org, agent, _, token, stream = _event_context(organization, monkeypatch)
+
+    async def disconnected_events():
+        await stream.response.release.wait()
+        yield b": connected\n\n"
+        raise httpx.RemoteProtocolError("Upstream connection interrupted")
+
+    monkeypatch.setattr(stream.response, "aiter_bytes", disconnected_events)
+
+    async def exercise():
+        task, messages = await _open_event_route(
+            app, f"/organizations/{org.id}/agents/{agent['id']}/opencode/event", token
+        )
+        stream.response.release.set()
+        await task
+        bodies = [message for message in messages if message["type"] == "http.response.body"]
+        assert bodies[0]["body"] == b": connected\n\n"
+        assert bodies[-1]["body"] == b""
+        assert bodies[-1]["more_body"] is False
+        assert stream.closed
+        assert stream.response.closed
+
+    asyncio.run(exercise())
+
+
 def test_workspace_facade_reaches_the_real_host_router_with_agent_scope(
     organization, monkeypatch, tmp_path
 ):
