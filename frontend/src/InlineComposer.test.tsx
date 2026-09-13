@@ -138,7 +138,7 @@ test('keeps an edit made while native-session initialization is in flight', asyn
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? input.toString();
-    if (request?.method === 'POST' && url.endsWith('/session')) return initialization;
+    if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
     if (url.includes('/prompt_async')) return response({ detail: 'Retry later.' }, 422);
     return response(url.includes('/experimental/session') ? [] : []);
   });
@@ -168,7 +168,7 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? input.toString();
-    if (request?.method === 'POST' && url.endsWith('/session')) return initialization;
+    if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
     if (url.includes('/prompt_async')) return response({ detail: 'Retry later.' }, 422);
     return response(url.includes('/experimental/session') ? [] : []);
   });
@@ -191,6 +191,7 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
 
   resolveInitialization(response({ id: 'session-one', title: 'New session', time: {} }));
   await waitFor(() => expect(fetchMock.mock.calls.filter(isPrompt)).toHaveLength(2));
+  expect(fetchMock.mock.calls.filter(([input]) => input instanceof Request && input.method === 'POST' && input.url.endsWith('/session'))).toHaveLength(1);
   const admissions = fetchMock.mock.calls.filter(isPrompt).map((call) => {
     const [input, init] = call as unknown as [RequestInfo | URL, RequestInit];
     return (input instanceof Request ? input.headers : new Headers(init.headers)).get('Idempotency-Key');
