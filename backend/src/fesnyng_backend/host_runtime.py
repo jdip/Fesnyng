@@ -20,6 +20,14 @@ class RuntimeUnavailable(RuntimeError):
     pass
 
 
+_WORKSPACE_GUIDANCE = (
+    "Use the working directory in the current native environment as this thread's workspace. "
+    "Historical absolute paths and tool workdirs may refer to a parent; resolve this thread's work "
+    "under the current working directory and pass it to tools unless the current task explicitly "
+    "requires another location."
+)
+
+
 class DockerRuntime:
     def __init__(self, store: HostStore, credential_url: str, image: str = "fesnyng-agent:local"):
         self.store = store
@@ -387,7 +395,10 @@ class DockerRuntime:
             "enabled_providers": ["openai"],
         }
         await self.write_file(org, agent_id, "/home/agent/host-auth.json", json.dumps(auth))
-        await self.write_file(org, agent_id, "/home/agent/AGENTS.md", configuration.instructions)
+        managed_instructions = _WORKSPACE_GUIDANCE
+        if configuration.instructions:
+            managed_instructions += f"\n\n{configuration.instructions}"
+        await self.write_file(org, agent_id, "/home/agent/AGENTS.md", managed_instructions)
         # Only this directory contains Fesnyng-managed native skill assignments.
         await self.docker("exec", self.name(agent_id), "rm", "-rf", "/home/agent/fesnyng-skills")
         await self.docker(
