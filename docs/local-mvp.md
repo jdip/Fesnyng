@@ -1,10 +1,10 @@
-# Run the local retained-MVP proof
+# Run the local MVP
 
 This guide starts one control plane, two independent agent-host APIs, and the
 browser workspace on one macOS machine. Each applied agent receives one
 Docker-managed OpenCode container. It is the local installation and recovery
-guide for the MVP; it does not mark the retained full-system acceptance in
-[issue #18](https://github.com/jdip/Fesnyng/issues/18) complete.
+guide for the MVP. [Issue #18](https://github.com/jdip/Fesnyng/issues/18) records
+the retained full-system acceptance and delivery evidence.
 
 The proof has four durable state owners:
 
@@ -312,5 +312,4 @@ That test creates isolated resources and retains failed resources for diagnosis.
 It does not establish an authenticated provider request. The retained MVP proof
 also requires live browser, device-login, Docker, host-restart, direct-peer, and
 provider evidence under [issue #18](https://github.com/jdip/Fesnyng/issues/18).
-Acceptance remains pending until its final live evidence and delivery review are
-recorded.
+Use that record to distinguish verified behavior from remaining limitations.

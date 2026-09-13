@@ -231,7 +231,7 @@ Public-safe examples should be the default rather than something cleaned up late
 
 ## Status
 
-The application foundation is implemented against the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). [Development instructions](docs/development.md) describe the runnable components and checks, and the [local retained-MVP guide](docs/local-mvp.md) starts one control plane, two local hosts, Docker agents, and the browser workspace. Retained end-to-end acceptance is still active in [issue #18](https://github.com/jdip/Fesnyng/issues/18); the guide is not an acceptance record. [PLAN.md](PLAN.md) remains the initial architecture source, amended by the confirmed primary map.
+The local application is implemented against the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10). [Development instructions](docs/development.md) describe the runnable components and checks, and the [local retained-MVP guide](docs/local-mvp.md) starts one control plane, two local hosts, Docker agents, and the browser workspace. [Issue #18](https://github.com/jdip/Fesnyng/issues/18) records retained end-to-end acceptance and delivery evidence. [PLAN.md](PLAN.md) remains the initial architecture source, amended by the confirmed primary map.
 
 The first implementation target is a minimal proof of concept with:
 
