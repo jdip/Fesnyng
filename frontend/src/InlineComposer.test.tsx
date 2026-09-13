@@ -139,7 +139,7 @@ test('keeps an edit made while native-session initialization is in flight', asyn
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? input.toString();
     if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
-    if (url.includes('/prompt_async')) return response({ detail: 'Retry later.' }, 422);
+    if (url.includes('/prompt_async')) return response({ accepted: true });
     return response(url.includes('/experimental/session') ? [] : []);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -165,11 +165,13 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   let resolveInitialization: (response: Response) => void = () => {};
   const initialization = new Promise<Response>((resolve) => { resolveInitialization = resolve; });
+  let resolvePrompt: (response: Response) => void = () => {};
+  const prompt = new Promise<Response>((resolve) => { resolvePrompt = resolve; });
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? input.toString();
     if (request?.method === 'POST' && url.endsWith('/session')) return initialization.then((result) => result.clone());
-    if (url.includes('/prompt_async')) return response({ detail: 'Retry later.' }, 422);
+    if (url.includes('/prompt_async')) return prompt.then((result) => result.clone());
     if (url.includes('/session/session-one/message')) return response([{ info: { id: 'user-one', sessionID: 'session-one', role: 'user', time: { created: 1 } }, parts: [{ id: 'part-one', sessionID: 'session-one', messageID: 'user-one', type: 'text', text: 'Native session is attached.' }] }]);
     if (url.endsWith('/session/session-one')) return response({ id: 'session-one', title: 'New session', time: {} });
     return response([]);
@@ -200,8 +202,28 @@ test('reuses an in-flight new-thread initialization after a remount retry', asyn
   });
   expect(new Set(admissions).size).toBe(1);
   expect(await screen.findByText('Native session is attached.')).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Initialize once.');
+  resolvePrompt(response({ accepted: true }));
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', ''));
   fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Continue in the created session.' } });
   rerender(<ComposerHarness show={false} sessionId="session-one" />);
   rerender(<ComposerHarness show sessionId="session-one" />);
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Continue in the created session.'));
+});
+
+test('does not replay an old completion against a later identical draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  let finish: (response: Response) => void = () => {};
+  const pending = new Promise<Response>((resolve) => { finish = resolve; });
+  vi.stubGlobal('fetch', installFetch(() => pending));
+  const { rerender } = render(<ComposerHarness show sessionId="session-one" />);
+  fireEvent.change(await currentComposer(), { target: { value: 'Original instructions.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Different next draft.' } });
+  finish(response({ accepted: true }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toHaveProperty('disabled', false));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message input' }), { target: { value: 'Original instructions.' } });
+  rerender(<ComposerHarness show={false} sessionId="session-one" />);
+  rerender(<ComposerHarness show sessionId="session-one" />);
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Original instructions.'));
 });

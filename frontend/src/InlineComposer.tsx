@@ -42,6 +42,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const submittingRef = useRef(false);
   const auiRef = useRef(aui);
   const admissionRef = useRef<Admission | undefined>(undefined);
+  const textRef = useRef(text);
   const selectedWorkflowRef = useRef<Workflow | undefined>(undefined);
   const restoredKeyRef = useRef<string | undefined>(undefined);
   const previousDraftKeyRef = useRef<string | undefined>(undefined);
@@ -52,6 +53,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const fetchWithFesnyngAuth = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
 
   useEffect(() => { auiRef.current = aui; }, [aui]);
+  useEffect(() => { textRef.current = text; }, [text]);
   useEffect(() => { selectedWorkflowRef.current = selectedWorkflow; }, [selectedWorkflow]);
 
   // A new assistant-ui thread has a local ID that changes on a runtime remount.
@@ -75,8 +77,18 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
     restoredTextRef.current = restored?.text ?? '';
     skipFirstDraftWriteRef.current = true;
     admissionRef.current = admissionFor(restored, admissionKey(restoredTextRef.current, restored?.workflow));
+    textRef.current = restoredTextRef.current;
+    selectedWorkflowRef.current = restored?.workflow;
     auiRef.current.composer.setText(restoredTextRef.current);
     setSelectedWorkflow(restored?.workflow);
+    return drafts.subscribeDeliverySettlement(baseUrl, draftKey, (settledAdmissionKey) => {
+      if (!isMountedRef.current || admissionKey(textRef.current, selectedWorkflowRef.current) !== settledAdmissionKey) return;
+      admissionRef.current = undefined;
+      textRef.current = '';
+      selectedWorkflowRef.current = undefined;
+      auiRef.current.composer.setText('');
+      setSelectedWorkflow(undefined);
+    });
   }, [baseUrl, draftKey, drafts]);
 
   useEffect(() => {

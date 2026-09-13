@@ -19,6 +19,7 @@ type ConversationDrafts = {
   write: (baseUrl: string, threadKey: string, draft: ConversationDraft) => void;
   migrate: (baseUrl: string, fromThreadKey: string, toThreadKey: string) => ConversationDraft | undefined;
   clearDelivered: (baseUrl: string, threadKey: string, admissionId: string, admissionKey: string) => void;
+  subscribeDeliverySettlement: (baseUrl: string, threadKey: string, listener: (admissionKey: string) => void) => () => void;
   initialize: (baseUrl: string, threadKey: string, create: () => Promise<string>) => Promise<string>;
 };
 
@@ -43,6 +44,7 @@ export function ConversationDraftsProvider({
 }: PropsWithChildren<{ organization: string }>) {
   const draftsRef = useRef(new Map<string, ConversationDraft>());
   const initializationsRef = useRef(new Map<string, Promise<string>>());
+  const settlementListenersRef = useRef(new Map<string, Set<(admissionKey: string) => void>>());
 
   const read = useCallback((baseUrl: string, threadKey: string) => {
     const draft = draftsRef.current.get(draftStorageKey(baseUrl, threadKey));
@@ -79,15 +81,27 @@ export function ConversationDraftsProvider({
   const clearDelivered = useCallback((baseUrl: string, threadKey: string, admissionId: string, admissionKey: string) => {
     const key = draftStorageKey(baseUrl, threadKey);
     const draft = draftsRef.current.get(key);
-    if (!draft) return;
-    const admissions = draft.admissions?.filter((admission) => admission.id !== admissionId);
-    if (admissions?.length === draft.admissions?.length) return;
-    if (draftKey(draft) === admissionKey) {
-      draftsRef.current.delete(key);
-      return;
+    const admissions = draft?.admissions?.filter((admission) => admission.id !== admissionId);
+    if (draft && admissions?.length !== draft.admissions?.length) {
+      if (draftKey(draft) === admissionKey) {
+        draftsRef.current.delete(key);
+      } else if (!draft.text && !draft.workflow && !admissions?.length) draftsRef.current.delete(key);
+      else draftsRef.current.set(key, { ...draft, admissions });
     }
-    if (!draft.text && !draft.workflow && !admissions?.length) draftsRef.current.delete(key);
-    else draftsRef.current.set(key, { ...draft, admissions });
+
+    const listeners = settlementListenersRef.current.get(key);
+    listeners?.forEach((listener) => listener(admissionKey));
+  }, []);
+
+  const subscribeDeliverySettlement = useCallback((baseUrl: string, threadKey: string, listener: (admissionKey: string) => void) => {
+    const key = draftStorageKey(baseUrl, threadKey);
+    const listeners = settlementListenersRef.current.get(key) ?? new Set();
+    listeners.add(listener);
+    settlementListenersRef.current.set(key, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) settlementListenersRef.current.delete(key);
+    };
   }, []);
 
   const initialize = useCallback((baseUrl: string, threadKey: string, create: () => Promise<string>) => {
@@ -101,7 +115,7 @@ export function ConversationDraftsProvider({
 
   // organization is intentionally part of the provider boundary. App keys this
   // provider by organization, so no draft can cross an organization switch.
-  const value = useMemo<ConversationDrafts>(() => ({ read, write, migrate, clearDelivered, initialize }), [clearDelivered, initialize, migrate, read, write]);
+  const value = useMemo<ConversationDrafts>(() => ({ read, write, migrate, clearDelivered, subscribeDeliverySettlement, initialize }), [clearDelivered, initialize, migrate, read, subscribeDeliverySettlement, write]);
   return <ConversationDraftsContext.Provider key={organization} value={value}>{children}</ConversationDraftsContext.Provider>;
 }
 
