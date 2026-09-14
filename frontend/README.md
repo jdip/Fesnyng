@@ -10,7 +10,8 @@ for the static build and Python API, with the same authenticated origin.
 Sign in with an installation account, choose an organization, and open an agent.
 The maintained assistant-ui Thread and ThreadList own conversation rendering,
 Markdown, composer, actions, branches, scrolling, reasoning, and generic tools.
-The native OpenCode adapter owns session attachment and event reconciliation.
+The selected native OpenCode or Codex adapter owns session attachment and event
+reconciliation.
 Fesnyng supplies organization navigation, reporting relationships, settings,
 explicit memory, attributable delivery history, and the authorized connection.
 The reporting chart is the organization overview. Each entry in the organization
@@ -19,6 +20,42 @@ picker offers chart and authorized settings actions for that organization.
 New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
 model until an authorized configuration change. An agent is persistent identity,
 rules, tools, skills, and memory that can own multiple threads.
+
+## Harnesses and frozen history
+
+New employees choose **OpenCode** (the default) or **Codex** in Agent settings.
+An organization can use both, but every thread retains the immutable harness
+binding it received when created. The workspace selects that original renderer
+and facade URL from the thread inventory, rather than from the employee's
+current setting. This keeps mixed history readable after a harness change.
+
+Changing an existing employee is intentionally separate from an ordinary save.
+Choose the target harness, use **Switch to …**, and wait for the old history to
+be captured and permanently frozen. The target configuration is then pending:
+use **Apply selected harness** only after the control-plane selection is
+recorded. If the browser lost the switch acknowledgement, or the host reports a
+capturing recovery state, use **Retry harness switch** first. A `frozen` state
+also needs Retry when the target selection is not yet recorded; when the current
+harness already matches the target, use **Apply selected harness**. A pending
+target does not offer a new-thread composer; wait until settings show `applied`
+before starting work.
+
+Frozen history appears in the **Frozen history** section. It retains messages,
+tool output, diffs, contribution authorship, source-thread links, operator
+outcome evidence, and personal read acknowledgements. It is permanently
+read-only: no compose, retry, approval/reply, title/archive, regenerate, edit,
+or native recovery controls are available. A frozen snapshot does not require
+the old native container or native server to keep running, but it is stored by
+the originating agent host. That host must be reachable to read the snapshot;
+an unavailable host is shown as a read failure rather than replaced with new
+native history.
+
+Codex supports only the policy controls that the pinned App Server can enforce
+exactly: organization default permission `allow`, with no mandatory permission
+rules and no thread overrides. Unsupported Codex policy is left pending with
+the host's visible reason; it is never silently weakened. Credential profiles
+remain host-owned for both harnesses. The browser and agent containers receive
+neither a refresh credential nor an unmanaged provider login.
 
 Threads are ordered by their latest incoming human or other-agent message;
 the thread agent's own replies and tool activity do not bump them. Threads with

@@ -102,9 +102,18 @@ Each agent should be able to have its own:
 
 ### Native agent runtime
 
-The project should not implement another custom agent loop unless absolutely necessary.
+The project does not implement another custom agent loop. Each employee selects
+either the pinned **OpenCode** harness or the pinned **Codex App Server**
+harness when it is created; OpenCode remains the default. The chosen native
+harness owns sessions, model calls, tools, skills, and execution for that
+employee. Fesnyng owns the organization, host lifecycle, browser authorization,
+and durable harness binding around that native work.
 
-The initial runtime will be **OpenCode**, which already provides sessions, models, tools, shell execution, file editing, MCP, permissions, skills, primary agents, and subagents.
+Every host thread keeps the harness that created it. Changing an existing
+employee's harness is a deliberate, safe operation: Fesnyng first captures a
+complete host-owned snapshot and permanently freezes the old threads, then
+applies the target harness. The old thread remains readable through its original
+renderer and cannot be resumed, edited, replied to, or otherwise mutated.
 
 ### Clean interaction UX
 
@@ -117,7 +126,7 @@ The web interface should feel closer to the Codex Desktop app than a raw CLI tra
 - approvals and questions are first-class UI;
 - reasoning/tool noise should not overwhelm the conversation.
 
-The initial presentation layer will use **assistant-ui** with its OpenCode integration.
+The presentation layer uses **assistant-ui** with harness-specific native adapters.
 
 ### Skills remain the behavior layer
 
@@ -145,10 +154,10 @@ React application + assistant-ui
  Python host A ↔ Python host B
       │                 │
  Agent containers    Agent containers
-  (OpenCode)          (OpenCode)
+ (OpenCode or Codex) (OpenCode or Codex)
 ```
 
-The application above OpenCode is intentionally narrow.
+The application above the selected native harness is intentionally narrow.
 
 ### The application owns
 
@@ -166,7 +175,7 @@ The application above OpenCode is intentionally narrow.
 - delegation policy;
 - authentication and access to the management UI.
 
-### OpenCode owns
+### The selected native harness owns
 
 - agent execution;
 - conversations and sessions;
@@ -208,7 +217,10 @@ Example Organization
     └── Reviewer
 ```
 
-Each employee can be a persistent OpenCode-backed agent with its own identity, skills, account, and memory.
+Each employee can be a persistent OpenCode- or Codex-backed agent with its own
+identity, skills, account, and memory. A single organization may use both
+harnesses, while each thread remains bound to the harness that originally
+created it.
 
 ## Non-Goals
 
@@ -240,7 +252,7 @@ The first implementation target is a minimal proof of concept with:
 3. organizations shareable with multiple users through explicit membership;
 4. strict organization-scoped access boundaries;
 5. a small reporting hierarchy inside an organization;
-6. persistent OpenCode-backed agents;
+6. persistent OpenCode- or Codex-backed agents;
 7. assistant-ui as the conversation surface;
 8. per-agent skills and identity;
 9. direct interactive sessions without requiring a task object.
