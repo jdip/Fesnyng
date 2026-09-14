@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
@@ -18,6 +18,30 @@ from fesnyng_backend.host_store import HostStore
 
 class RuntimeUnavailable(RuntimeError):
     pass
+
+
+class RuntimeRouter:
+    """Resolve a thread's immutable harness binding to its native runtime.
+
+    OpenCode is the only installed harness in this delivery.  Keeping this
+    resolution next to the native boundary prevents a future thread binding
+    from accidentally falling through to the OpenCode client.
+    """
+
+    def __init__(self, opencode: Any):
+        self.opencode = opencode
+
+    def for_session(self, session: Mapping[str, Any]) -> Any:
+        self.require_supported(session.get("runtime_type"))
+        return self.opencode
+
+    @staticmethod
+    def require_supported(runtime_type: object) -> None:
+        if runtime_type == "opencode":
+            return
+        if runtime_type == "codex":
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        raise RuntimeUnavailable("Thread harness binding is invalid")
 
 
 def _workspace_context(result: bytes) -> dict[str, dict[str, int | str | None]]:

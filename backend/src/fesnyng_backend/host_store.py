@@ -66,6 +66,8 @@ class HostStore:
                 CREATE TABLE IF NOT EXISTS host_sessions (
                     session_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL,
+                    runtime_type TEXT NOT NULL DEFAULT 'opencode'
+                        CHECK(runtime_type IN ('opencode','codex')),
                     deleted_at INTEGER,
                     archived_at INTEGER,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -79,6 +81,10 @@ class HostStore:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN deleted_at INTEGER")
             if "archived_at" not in columns:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN archived_at INTEGER")
+            if "runtime_type" not in columns:
+                connection.execute(
+                    "ALTER TABLE host_sessions ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'opencode'"
+                )
             agent_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_agents)")
             }
@@ -157,9 +163,10 @@ class HostStore:
                     and envelope.policy != previous.policy
                 ):
                     raise ValueError("Policy version conflict")
-                if (
-                    previous == envelope
-                    and current["applied_envelope"] == envelope.model_dump_json()
+                if previous == envelope and (
+                    current["applied_envelope"] is not None
+                    and HostAgentConfiguration.model_validate_json(current["applied_envelope"])
+                    == envelope
                 ):
                     return False
                 connection.execute(
@@ -208,13 +215,23 @@ class HostStore:
 
     def mark_applied(self, envelope: HostAgentConfiguration) -> None:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT desired_envelope FROM host_agents WHERE agent_id=? AND organization_id=?",
+                (str(envelope.agent_id), str(envelope.organization_id)),
+            ).fetchone()
+            if (
+                current is None
+                or HostAgentConfiguration.model_validate_json(current["desired_envelope"])
+                != envelope
+            ):
+                raise ValueError("Configuration changed during runtime application")
             changed = connection.execute(
-                "UPDATE host_agents SET applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=? AND desired_envelope=?",
+                "UPDATE host_agents SET applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=?",
                 (
                     envelope.model_dump_json(),
                     str(envelope.agent_id),
                     str(envelope.organization_id),
-                    envelope.model_dump_json(),
                 ),
             ).rowcount
             if not changed:
@@ -294,13 +311,40 @@ class HostStore:
         return True
 
     def save_session(
-        self, organization_id: str, agent_id: str, session_id: str, directory: str, title: str
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        directory: str,
+        title: str,
+        *,
+        runtime_type: str = "opencode",
     ) -> None:
+        if runtime_type not in {"opencode", "codex"}:
+            raise ValueError("Unknown thread harness")
         self.agent(organization_id, agent_id)
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT organization_id,agent_id,directory,title,runtime_type FROM host_sessions "
+                "WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if current is not None:
+                if current["runtime_type"] != runtime_type:
+                    raise ValueError("Thread runtime provenance is immutable")
+                if (
+                    current["organization_id"],
+                    current["agent_id"],
+                    current["directory"],
+                    current["title"],
+                ) != (organization_id, agent_id, directory, title):
+                    raise ValueError("Thread binding is immutable")
+                return
             connection.execute(
-                "INSERT INTO host_sessions(session_id,organization_id,agent_id,directory,title) VALUES(?,?,?,?,?)",
-                (session_id, organization_id, agent_id, directory, title),
+                "INSERT INTO host_sessions(session_id,organization_id,agent_id,directory,title,runtime_type) "
+                "VALUES(?,?,?,?,?,?)",
+                (session_id, organization_id, agent_id, directory, title, runtime_type),
             )
 
     def session(self, organization_id: str, agent_id: str, session_id: str) -> dict[str, Any]:

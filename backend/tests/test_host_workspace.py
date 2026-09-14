@@ -267,6 +267,42 @@ def test_workspace_lists_threads_by_attributed_incoming_message_recency(tmp_path
     assert [session["id"] for session in refreshed[:2]] == ["ses_peer", "ses_human"]
 
 
+def test_workspace_rejects_an_uninstalled_thread_harness_before_native_read(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(
+        org,
+        agent,
+        "thr_codex",
+        "/workspace/default/codex",
+        "Codex",
+        runtime_type="codex",
+    )
+    native = Native()
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+        asyncio.run(workspace.get(org, agent, "thr_codex"))
+    assert native.calls == []
+
+
 def test_workspace_context_is_scoped_and_counts_verified_native_child_sessions(tmp_path):
     """Thread context never exposes a host path or counts unrelated native sessions."""
 

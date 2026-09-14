@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from fesnyng_backend.agent_models import (
+    AgentConfiguration,
     AgentCreate,
     AgentUpdate,
     CredentialProfileCreate,
@@ -233,7 +234,9 @@ class AgentStore:
         if row is None:
             raise LookupError("Agent not found")
         result = dict(row)
-        result["configuration"] = json.loads(result["configuration"])
+        result["configuration"] = AgentConfiguration.model_validate_json(
+            result["configuration"]
+        ).model_dump(mode="json")
         result["configuration_status"] = (
             "applied" if result["applied_version"] == result["desired_version"] else "pending"
         )

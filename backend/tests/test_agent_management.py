@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,25 @@ def test_agent_configuration_retains_identity_and_version_after_restart(organiza
     assert agent["desired_version"] == 1
     assert agent["applied_version"] is None
     assert agent["configuration_status"] == "pending"
+
+
+def test_legacy_agent_configuration_defaults_to_opencode_without_a_configuration_revision(
+    organization,
+):
+    _, control, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    legacy = dict(agent["configuration"])
+    del legacy["runtime_type"]
+    with control.connect() as connection:
+        connection.execute(
+            "UPDATE agent_configurations SET configuration=? WHERE agent_id=? AND version=1",
+            (json.dumps(legacy), agent["id"]),
+        )
+
+    restored = agents.get_agent(org.id, agent["id"])
+
+    assert restored["desired_version"] == 1
+    assert restored["configuration"]["runtime_type"] == "opencode"
 
 
 def test_configuration_update_is_versioned_and_rejects_a_stale_edit(organization):
@@ -82,6 +102,7 @@ def test_agent_defaults_and_configuration_input_limits(organization):
     _, _, owner, org, agents, host_id = organization
     agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
     assert agent["configuration"]["execution_type"] == "docker"
+    assert agent["configuration"]["runtime_type"] == "opencode"
     assert agent["configuration"]["model"] == "gpt-6-astra"
     with pytest.raises(ValueError):
         agents.create_agent(

@@ -59,6 +59,15 @@ The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/
 
 Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
+Agent configuration also identifies the harness with `runtime_type`, defaulting to
+`opencode` when omitted. Existing configurations and thread IDs remain valid.
+Each host thread retains its original runtime binding; saving thread metadata must
+not reassign that binding or its organization/agent ownership. The binding
+foundation does not enable Codex execution or harness switching: unsupported
+runtime requests fail rather than falling through to OpenCode. Codex execution
+and permanent thread freezing follow the approved
+[harness integration specification](https://github.com/jdip/Fesnyng/issues/83).
+
 The authorized `opencode/session/{id}/context` read exposes display-safe repository
 and branch metadata for the mapped thread workspace. Git changes compare tracked
 staged and unstaged files against HEAD, with binary and untracked file counts

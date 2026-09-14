@@ -15,7 +15,7 @@ from fesnyng_backend.agent_models import Contract, Name, PermissionRule
 from fesnyng_backend.host_dispatch import DispatchStore, HostSubmission
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
 _native_id = TypeAdapter(NativeID)
@@ -130,6 +130,7 @@ class Workspace:
     ):
         self.host = host
         self.runtime = runtime
+        self.runtime_router = RuntimeRouter(runtime)
         self.dispatches = dispatches
         self.interactions = interactions
 
@@ -179,7 +180,7 @@ class Workspace:
 
     async def get(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         session = await self._scoped_session(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await self.runtime_router.for_session(session).request(
             org, agent, f"/session/{session_id}", directory=session["directory"]
         )
         return self._project_session(
@@ -213,7 +214,7 @@ class Workspace:
 
     async def messages(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = await self._scoped_session(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await self.runtime_router.for_session(session).request(
             org, agent, f"/session/{session_id}/message", directory=session["directory"]
         )
         if not isinstance(result, list) or not all(
