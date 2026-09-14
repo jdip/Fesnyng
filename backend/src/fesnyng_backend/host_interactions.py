@@ -18,7 +18,7 @@ from fesnyng_backend.host_models import (
     NativeID,
     permission_rules,
 )
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
 InteractionKind = Literal["question", "permission"]
@@ -97,7 +97,7 @@ class Interactions:
     async def pending(
         self, organization_id: str, agent_id: str, session_id: str, kind: InteractionKind
     ) -> list[dict[str, Any]]:
-        session = self.host.session(organization_id, agent_id, session_id)
+        session = self._opencode_session(organization_id, agent_id, session_id)
         result = await self.runtime.request(
             organization_id, agent_id, f"/{kind}", directory=session["directory"]
         )
@@ -119,7 +119,7 @@ class Interactions:
         if kind not in {"question", "permission"}:
             raise ValueError("Unknown native interaction kind")
         payload, path = _reply_request(kind, request_id, answer)
-        session = self.host.session(organization_id, agent_id, session_id)
+        session = self._opencode_session(organization_id, agent_id, session_id)
         async with self.runtime.lock(agent_id):
             if self._has_operation(str(operation_id)):
                 return self._start_reply(
@@ -218,7 +218,7 @@ class Interactions:
         if kind not in {"question", "permission"}:
             raise ValueError("Unknown native interaction kind")
         payload, path = _reply_request(kind, request_id, answer)
-        self.host.session(organization_id, agent_id, owner_session_id)
+        self._opencode_session(organization_id, agent_id, owner_session_id)
         async with self.runtime.lock(agent_id):
             if self._has_operation(str(operation_id)):
                 return self._start_reply(
@@ -370,7 +370,7 @@ class Interactions:
         session_id: str,
         candidate: HostAgentConfiguration | None = None,
     ) -> dict[str, Any]:
-        session = self.host.session(organization_id, agent_id, session_id)
+        session = self._opencode_session(organization_id, agent_id, session_id)
         envelope = candidate or self._applied_envelope(organization_id, agent_id)
         if str(envelope.organization_id) != organization_id or str(envelope.agent_id) != agent_id:
             raise ValueError("Policy configuration belongs to another agent")
@@ -672,6 +672,13 @@ class Interactions:
             or record["applied_policy_version"] != envelope.policy_version
         ):
             raise RuntimeUnavailable("Interaction reply is waiting for thread policy")
+
+    def _opencode_session(
+        self, organization_id: str, agent_id: str, session_id: str
+    ) -> dict[str, Any]:
+        session = self.host.session(organization_id, agent_id, session_id)
+        RuntimeRouter.require_supported(session["runtime_type"])
+        return session
 
     def _applied_envelope(self, organization_id: str, agent_id: str) -> HostAgentConfiguration:
         agent = self.host.agent(organization_id, agent_id)

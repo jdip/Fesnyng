@@ -707,6 +707,7 @@ class Workspace:
     ) -> bool:
         try:
             session = await self._scoped_session(org, agent, self._native_id(session_id))
+            self._runtime_for(session)
         except (LookupError, RuntimeUnavailable):
             return False
         return session["directory"] == directory

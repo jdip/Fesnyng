@@ -132,6 +132,52 @@ def test_lifecycle_application_normalizes_a_legacy_envelope_for_interaction_admi
     assert receipt["state"] == "completed"
 
 
+def test_codex_bound_interactions_never_reach_the_opencode_client(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+    with host.connect() as connection:
+        connection.execute(
+            "UPDATE host_sessions SET runtime_type='codex' WHERE session_id=?", (session_id,)
+        )
+    native = Native(session_id)
+    interactions = Interactions(host, native)
+    interactions.initialize()
+    _mark_thread_policy_applied(interactions, organization_id, agent_id, session_id)
+    author = Actor(kind="human", id=uuid4(), name="Owner")
+
+    async def check():
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.pending(organization_id, agent_id, session_id, "question")
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.reply(
+                organization_id,
+                agent_id,
+                session_id,
+                uuid4(),
+                "question-1",
+                "question",
+                [["Yes"]],
+                author,
+            )
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.reply_scoped(
+                organization_id,
+                agent_id,
+                session_id,
+                "ses_native_child",
+                "/workspace/thread",
+                uuid4(),
+                "question-1",
+                "question",
+                [["Yes"]],
+                author,
+            )
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.apply_policy(organization_id, agent_id, session_id)
+
+    asyncio.run(check())
+    assert native.replies == []
+
+
 def test_replies_require_matching_native_thread_and_allow_only_safe_permission_choices(tmp_path):
     host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
     native = Native(session_id)

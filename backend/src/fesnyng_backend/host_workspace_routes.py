@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from fesnyng_backend.agent_models import Contract
 from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
 from fesnyng_backend.host_routes import host_errors, require_binding
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_workspace import (
     Fork,
     PermissionReply,
@@ -105,12 +106,13 @@ async def create_session(
 async def session_status(request: Request, organization_id: UUID, agent_id: UUID):
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
-    mapped = request.app.state.host_store.sessions(org, agent)
-    by_directory: dict[str, set[str]] = {}
-    for session in mapped:
-        by_directory.setdefault(session["directory"], set()).add(session["session_id"])
-    statuses: dict[str, object] = {}
     with host_errors():
+        mapped = request.app.state.host_store.sessions(org, agent)
+        by_directory: dict[str, set[str]] = {}
+        for session in mapped:
+            RuntimeRouter.require_supported(session["runtime_type"])
+            by_directory.setdefault(session["directory"], set()).add(session["session_id"])
+        statuses: dict[str, object] = {}
         for directory, ids in by_directory.items():
             native = await request.app.state.host_runtime.request(
                 org, agent, "/session/status", directory=directory
@@ -362,6 +364,9 @@ def _event_session(data: object) -> str | None:
 async def events(request: Request, organization_id: UUID, agent_id: UUID):
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
+    with host_errors():
+        for session in request.app.state.host_store.sessions(org, agent):
+            RuntimeRouter.require_supported(session["runtime_type"])
     workspace = _workspace(request)
 
     async def stream():
@@ -383,6 +388,10 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
 
         def attach_new_directories() -> None:
             for session in request.app.state.host_store.sessions(org, agent):
+                try:
+                    RuntimeRouter.require_supported(session["runtime_type"])
+                except RuntimeUnavailable:
+                    continue
                 directory = session["directory"]
                 if directory not in attached:
                     attached.add(directory)

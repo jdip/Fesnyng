@@ -304,6 +304,31 @@ def test_workspace_rejects_an_uninstalled_thread_harness_before_native_read(tmp_
         asyncio.run(workspace.update(org, agent, "thr_codex", SessionUpdate(title="Renamed")))
     assert native.calls == []
 
+    app = FastAPI()
+    app.state.host_store = store
+    app.state.host_runtime = native
+    app.include_router(router)
+
+    # The binding check runs before native status collection.
+    token = secrets.token_urlsafe(32)
+    store.bind_organization(org, token)
+
+    async def status_with_binding():
+        async with AsyncClient(
+            transport=ASGITransport(app),
+            base_url="http://host",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            status = await client.get(
+                f"/organizations/{org}/agents/{agent}/opencode/session/status"
+            )
+            events = await client.get(f"/organizations/{org}/agents/{agent}/opencode/event")
+            return status, events
+
+    status, event_stream = asyncio.run(status_with_binding())
+    assert status.status_code == event_stream.status_code == 503
+    assert native.calls == []
+
 
 def test_workspace_context_is_scoped_and_counts_verified_native_child_sessions(tmp_path):
     """Thread context never exposes a host path or counts unrelated native sessions."""
