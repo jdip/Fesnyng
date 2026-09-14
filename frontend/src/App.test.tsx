@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from './App';
 vi.mock('./Conversation', async () => {
   const { createPortal } = await import('react-dom');
@@ -273,4 +273,28 @@ test('starts a new native thread from every agent card without selecting the car
   expect(alpha.getAttribute('aria-pressed')).toBe('false');
   expect(beta.getAttribute('aria-pressed')).toBe('true');
   expect(await screen.findByRole('textbox', { name: 'Composer draft' })).toBeTruthy();
+});
+
+test('keeps the role selectable inside the compact agent card while threads remain outside it', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', title: 'Research', configuration: { workspace: 'default' } }]
+      : [];
+    return new Response(JSON.stringify(body));
+  }));
+
+  render(<App />);
+  const alpha = await screen.findByRole('button', { name: /Alpha/, pressed: false });
+  const role = within(alpha.closest('.app-sidebar')!).getByText('Research');
+  const choice = role.closest('button');
+  const card = role.closest('.agent-card');
+  expect(choice?.className).toContain('agent-choice');
+  expect(card?.contains(screen.getByRole('button', { name: 'New thread for Alpha' }))).toBe(true);
+  fireEvent.click(role);
+  expect(choice?.getAttribute('aria-pressed')).toBe('true');
+  expect(await screen.findByRole('region', { name: 'Alpha threads' }).then((threads) => card?.contains(threads))).toBe(false);
 });
