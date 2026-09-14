@@ -17,7 +17,7 @@ from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
-from fesnyng_backend.host_workspace import Fork, QuestionReply, Workspace
+from fesnyng_backend.host_workspace import Fork, QuestionReply, SessionUpdate, Workspace
 from fesnyng_backend.host_workspace_routes import _event_session, events, router
 from fesnyng_backend.settings import ServiceSettings
 
@@ -265,6 +265,69 @@ def test_workspace_lists_threads_by_attributed_incoming_message_recency(tmp_path
         )
     refreshed = workspace.sessions(org, agent)
     assert [session["id"] for session in refreshed[:2]] == ["ses_peer", "ses_human"]
+
+
+def test_workspace_rejects_an_uninstalled_thread_harness_before_native_read(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(
+        org,
+        agent,
+        "thr_codex",
+        "/workspace/default/codex",
+        "Codex",
+        runtime_type="codex",
+    )
+    native = Native()
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+        asyncio.run(workspace.get(org, agent, "thr_codex"))
+    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+        asyncio.run(workspace.update(org, agent, "thr_codex", SessionUpdate(title="Renamed")))
+    assert native.calls == []
+
+    app = FastAPI()
+    app.state.host_store = store
+    app.state.host_runtime = native
+    app.include_router(router)
+
+    # The binding check runs before native status collection.
+    token = secrets.token_urlsafe(32)
+    store.bind_organization(org, token)
+
+    async def status_with_binding():
+        async with AsyncClient(
+            transport=ASGITransport(app),
+            base_url="http://host",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            status = await client.get(
+                f"/organizations/{org}/agents/{agent}/opencode/session/status"
+            )
+            events = await client.get(f"/organizations/{org}/agents/{agent}/opencode/event")
+            return status, events
+
+    status, event_stream = asyncio.run(status_with_binding())
+    assert status.status_code == event_stream.status_code == 503
+    assert native.calls == []
 
 
 def test_workspace_context_is_scoped_and_counts_verified_native_child_sessions(tmp_path):
@@ -709,6 +772,53 @@ def test_workspace_accepts_native_message_id_field_names():
     from fesnyng_backend.host_workspace import Revert
 
     assert Revert.model_validate({"messageID": "msg_parent"}).message_id == "msg_parent"
+
+
+def test_workspace_child_history_inherits_its_verified_root_harness(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(org, agent, "ses_main", "/workspace/default/main", "Main")
+
+    class ChildHistoryNative(Native):
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            if path == "/session/ses_child" and method == "GET":
+                return {"id": "ses_child", "directory": directory, "title": "Child"}
+            if path == "/session/ses_child/message":
+                return [{"info": {"sessionID": "ses_child"}, "parts": []}]
+            return await super().request(
+                organization_id, agent_id, path, method=method, body=body, directory=directory
+            )
+
+    native = ChildHistoryNative()
+    native.children["/session/ses_main/children"] = [
+        {"id": "ses_child", "parentID": "ses_main", "directory": "/workspace/default/child"}
+    ]
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    workspace = Workspace(store, native, dispatches, interactions)
+
+    child = asyncio.run(workspace.get(org, agent, "ses_child"))
+    history = asyncio.run(workspace.messages(org, agent, "ses_child"))
+
+    assert child["id"] == "ses_child"
+    assert history == [{"info": {"sessionID": "ses_child"}, "parts": []}]
 
 
 def test_workspace_child_pending_and_reply_use_verified_child_directory_but_root_receipt(tmp_path):

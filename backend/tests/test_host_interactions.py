@@ -1,4 +1,5 @@
 import asyncio
+import json
 import secrets
 from uuid import uuid4
 
@@ -89,6 +90,92 @@ def test_question_rejection_is_durable_and_uses_native_reject_endpoint(tmp_path)
 
     assert receipt["state"] == "completed"
     assert native.replies == [("/question/question-1/reject", {})]
+
+
+def test_lifecycle_application_normalizes_a_legacy_envelope_for_interaction_admission(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+    envelope = HostAgentConfiguration.model_validate_json(
+        host.agent(organization_id, agent_id)["desired_envelope"]
+    )
+    legacy = envelope.model_dump(mode="json")
+    del legacy["configuration"]["runtime_type"]
+    with host.connect() as connection:
+        connection.execute(
+            "UPDATE host_agents SET desired_envelope=?,applied_envelope=? WHERE agent_id=?",
+            (json.dumps(legacy), json.dumps(legacy), agent_id),
+        )
+
+    # Lifecycle reconciliation reuses the semantic envelope and records one
+    # canonical desired/applied pair, so a reply is not held forever on raw
+    # JSON differences introduced by the new default.
+    host.mark_applied(envelope)
+    native = Native(session_id)
+    interactions = Interactions(host, native)
+    interactions.initialize()
+    _mark_thread_policy_applied(interactions, organization_id, agent_id, session_id)
+
+    receipt = asyncio.run(
+        interactions.reply(
+            organization_id,
+            agent_id,
+            session_id,
+            uuid4(),
+            "question-1",
+            "question",
+            [["Yes"]],
+            Actor(kind="human", id=uuid4(), name="Owner"),
+        )
+    )
+
+    agent = host.agent(organization_id, agent_id)
+    assert agent["desired_envelope"] == agent["applied_envelope"] == envelope.model_dump_json()
+    assert receipt["state"] == "completed"
+
+
+def test_codex_bound_interactions_never_reach_the_opencode_client(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+    with host.connect() as connection:
+        connection.execute(
+            "UPDATE host_sessions SET runtime_type='codex' WHERE session_id=?", (session_id,)
+        )
+    native = Native(session_id)
+    interactions = Interactions(host, native)
+    interactions.initialize()
+    _mark_thread_policy_applied(interactions, organization_id, agent_id, session_id)
+    author = Actor(kind="human", id=uuid4(), name="Owner")
+
+    async def check():
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.pending(organization_id, agent_id, session_id, "question")
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.reply(
+                organization_id,
+                agent_id,
+                session_id,
+                uuid4(),
+                "question-1",
+                "question",
+                [["Yes"]],
+                author,
+            )
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.reply_scoped(
+                organization_id,
+                agent_id,
+                session_id,
+                "ses_native_child",
+                "/workspace/thread",
+                uuid4(),
+                "question-1",
+                "question",
+                [["Yes"]],
+                author,
+            )
+        with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+            await interactions.apply_policy(organization_id, agent_id, session_id)
+
+    asyncio.run(check())
+    assert native.replies == []
 
 
 def test_replies_require_matching_native_thread_and_allow_only_safe_permission_choices(tmp_path):

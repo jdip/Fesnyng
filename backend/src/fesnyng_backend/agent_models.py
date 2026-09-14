@@ -27,6 +27,7 @@ class PermissionRule(Contract):
 
 class AgentConfiguration(Contract):
     execution_type: Literal["docker"] = "docker"
+    runtime_type: Literal["opencode", "codex"] = "opencode"
     provider: Literal["openai"] = "openai"
     model: str = Field(default="gpt-6-astra", min_length=1, max_length=120)
     profile_id: UUID | None = None

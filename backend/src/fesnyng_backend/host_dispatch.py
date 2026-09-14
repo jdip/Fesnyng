@@ -20,7 +20,7 @@ from fesnyng_backend.host_effects import native_tools_settled
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration, NativeID
 from fesnyng_backend.host_native_evidence import NativeEvidence
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
 
@@ -81,7 +81,8 @@ class DispatchStore:
         *,
         lifecycle_operation: bool = False,
     ) -> dict[str, Any]:
-        self.host.session(org, agent, session)
+        mapped_session = self.host.session(org, agent, session)
+        RuntimeRouter.require_supported(mapped_session["runtime_type"])
         payload = submission.model_dump_json()
         attribution = author.model_dump_json()
         with self.host.connect() as connection:
@@ -314,6 +315,7 @@ class Dispatcher:
     async def _thread(self, key: tuple[str, str, str], rows: list[dict[str, Any]]) -> None:
         org, agent, session_id = key
         session = self.store.host.session(org, agent, session_id)
+        RuntimeRouter.require_supported(session["runtime_type"])
         try:
             statuses = await self.runtime.request(
                 org, agent, "/session/status", directory=session["directory"]
@@ -427,10 +429,9 @@ class Dispatcher:
                 await self.interactions.apply_policy(org, agent, session["session_id"])
             async with self.runtime.lock(agent):
                 configured = self.store.host.agent(org, agent)
-                if (
-                    not configured["applied_envelope"]
-                    or configured["applied_envelope"] != configured["desired_envelope"]
-                ):
+                if not configured["applied_envelope"] or HostAgentConfiguration.model_validate_json(
+                    configured["applied_envelope"]
+                ) != HostAgentConfiguration.model_validate_json(configured["desired_envelope"]):
                     raise RuntimeUnavailable("Agent configuration is pending")
                 message_id = await _message_identifier(history)
                 self._require_current_policy(org, agent, session["session_id"])
@@ -472,7 +473,8 @@ class Dispatcher:
                     configured["desired_state"] != "running"
                     or configured["lifecycle_state"] != "running"
                     or not configured["applied_envelope"]
-                    or configured["applied_envelope"] != configured["desired_envelope"]
+                    or HostAgentConfiguration.model_validate_json(configured["applied_envelope"])
+                    != HostAgentConfiguration.model_validate_json(configured["desired_envelope"])
                 ):
                     raise RuntimeUnavailable(
                         "Agent lifecycle or configuration changed before native submission"

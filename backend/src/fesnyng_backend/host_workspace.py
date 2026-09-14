@@ -15,7 +15,7 @@ from fesnyng_backend.agent_models import Contract, Name, PermissionRule
 from fesnyng_backend.host_dispatch import DispatchStore, HostSubmission
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
 _native_id = TypeAdapter(NativeID)
@@ -130,8 +130,12 @@ class Workspace:
     ):
         self.host = host
         self.runtime = runtime
+        self.runtime_router = RuntimeRouter(runtime)
         self.dispatches = dispatches
         self.interactions = interactions
+
+    def _runtime_for(self, session: Mapping[str, Any]) -> NativeRuntime:
+        return self.runtime_router.for_session(session)
 
     def sessions(self, org: str, agent: str, *, archived: bool = False) -> list[dict[str, Any]]:
         sessions = self.host.sessions(org, agent, archived=None if archived else False)
@@ -159,6 +163,7 @@ class Workspace:
 
     async def create(self, org: str, agent: str, body: SessionCreate | None) -> dict[str, Any]:
         envelope = self.interactions._applied_envelope(org, agent)
+        RuntimeRouter.require_supported(envelope.configuration.runtime_type)
         title = body.title if body is not None else "New thread"
         # The native SDK sends `{}` for a normal create.  Pydantic fills its
         # model default in that case, so distinguish omission from an explicit
@@ -179,7 +184,7 @@ class Workspace:
 
     async def get(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         session = await self._scoped_session(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}", directory=session["directory"]
         )
         return self._project_session(
@@ -189,8 +194,9 @@ class Workspace:
     async def context(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         """Return safe workspace context for one mapped native thread."""
         session = await self._scoped_session(org, agent, session_id)
+        runtime = self._runtime_for(session)
         try:
-            context = await self.runtime.workspace_context(org, agent, session["directory"])
+            context = await runtime.workspace_context(org, agent, session["directory"])
         except RuntimeUnavailable:
             context = {
                 "repository": {"state": "unavailable"},
@@ -213,7 +219,7 @@ class Workspace:
 
     async def messages(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = await self._scoped_session(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}/message", directory=session["directory"]
         )
         if not isinstance(result, list) or not all(
@@ -230,6 +236,7 @@ class Workspace:
         self, org: str, agent: str, session_id: str, body: SessionUpdate
     ) -> dict[str, Any]:
         session = self.host.session(org, agent, session_id)
+        runtime = self._runtime_for(session)
         if not body.has_change():
             raise ValueError("Native session update requires a title or archive state")
         if body.time is not None:
@@ -238,7 +245,7 @@ class Workspace:
         if body.title is not None:
             native_update["title"] = body.title
         if native_update:
-            result = await self.runtime.request(
+            result = await runtime.request(
                 org,
                 agent,
                 f"/session/{session_id}",
@@ -267,8 +274,9 @@ class Workspace:
 
     async def delete(self, org: str, agent: str, session_id: str) -> None:
         session = self.host.session(org, agent, session_id)
+        runtime = self._runtime_for(session)
         self._require_no_unsettled_dispatch(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await runtime.request(
             org, agent, f"/session/{session_id}", method="DELETE", directory=session["directory"]
         )
         if result is not True:
@@ -300,31 +308,30 @@ class Workspace:
     async def fork(
         self, org: str, agent: str, session_id: str, body: Fork, author: Actor
     ) -> dict[str, Any]:
-        async with self.runtime.lock(agent):
-            source = self.host.session(org, agent, session_id)
+        source = self.host.session(org, agent, session_id)
+        runtime = self._runtime_for(source)
+        async with runtime.lock(agent):
             self._require_no_unsettled_dispatch(org, agent, session_id)
             self._session_receipt(
-                await self.runtime.request(
+                await runtime.request(
                     org, agent, f"/session/{session_id}", directory=source["directory"]
                 ),
                 session_id,
                 source["directory"],
             )
             self._require_idle(
-                await self.runtime.request(
-                    org, agent, "/session/status", directory=source["directory"]
-                ),
+                await runtime.request(org, agent, "/session/status", directory=source["directory"]),
                 session_id,
             )
             source_history = self._history_receipt(
-                await self.runtime.request(
+                await runtime.request(
                     org, agent, f"/session/{session_id}/message", directory=source["directory"]
                 ),
                 session_id,
             )
-            destination = await self.runtime.fork_workspace(org, agent, source["directory"])
+            destination = await runtime.fork_workspace(org, agent, source["directory"])
             try:
-                result = await self.runtime.request(
+                result = await runtime.request(
                     org,
                     agent,
                     f"/session/{session_id}/fork",
@@ -353,12 +360,12 @@ class Workspace:
                 if not isinstance(title, str) or not title:
                     raise RuntimeUnavailable("Native session fork receipt is invalid")
                 child_history_before = self._history_receipt(
-                    await self.runtime.request(
+                    await runtime.request(
                         org, agent, f"/session/{child_id}/message", directory=source["directory"]
                     ),
                     child_id,
                 )
-                await self.runtime.request(
+                await runtime.request(
                     org,
                     agent,
                     "/experimental/control-plane/move-session",
@@ -372,26 +379,26 @@ class Workspace:
                     },
                 )
                 moved = self._session_receipt(
-                    await self.runtime.request(
+                    await runtime.request(
                         org, agent, f"/session/{child_id}", directory=destination
                     ),
                     child_id,
                     destination,
                 )
                 child_history = self._history_receipt(
-                    await self.runtime.request(
+                    await runtime.request(
                         org, agent, f"/session/{child_id}/message", directory=destination
                     ),
                     child_id,
                 )
                 source_after = self._history_receipt(
-                    await self.runtime.request(
+                    await runtime.request(
                         org, agent, f"/session/{session_id}/message", directory=source["directory"]
                     ),
                     session_id,
                 )
                 self._session_receipt(
-                    await self.runtime.request(
+                    await runtime.request(
                         org, agent, f"/session/{session_id}", directory=source["directory"]
                     ),
                     session_id,
@@ -441,9 +448,10 @@ class Workspace:
 
     async def revert(self, org: str, agent: str, session_id: str, body: Revert) -> dict[str, Any]:
         session = self.host.session(org, agent, session_id)
+        runtime = self._runtime_for(session)
         self._require_no_unsettled_dispatch(org, agent, session_id)
         try:
-            result = await self.runtime.request(
+            result = await runtime.request(
                 org,
                 agent,
                 f"/session/{session_id}/revert",
@@ -459,8 +467,9 @@ class Workspace:
 
     async def unrevert(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         session = self.host.session(org, agent, session_id)
+        runtime = self._runtime_for(session)
         self._require_no_unsettled_dispatch(org, agent, session_id)
-        result = await self.runtime.request(
+        result = await runtime.request(
             org,
             agent,
             f"/session/{session_id}/unrevert",
@@ -577,8 +586,9 @@ class Workspace:
     async def files(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
         path = self._artifact_path(path, allow_root=True)
         session = await self._scoped_session(org, agent, session_id)
-        await self.runtime.workspace_path(org, agent, session["directory"], path)
-        native = await self.runtime.request_with_query(
+        runtime = self._runtime_for(session)
+        await runtime.workspace_path(org, agent, session["directory"], path)
+        native = await runtime.request_with_query(
             org, agent, "/file", {"path": path}, directory=session["directory"]
         )
         if not isinstance(native, list):
@@ -598,7 +608,7 @@ class Workspace:
         for start in range(0, len(candidates), 512):
             batch = candidates[start : start + 512]
             metadata_by_path.update(
-                await self.runtime.workspace_metadata_many(
+                await runtime.workspace_metadata_many(
                     org, agent, session["directory"], [entry_path for _, entry_path in batch]
                 )
             )
@@ -630,7 +640,8 @@ class Workspace:
     async def preview(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
         path = self._artifact_path(path)
         session = await self._scoped_session(org, agent, session_id)
-        async with self.runtime.workspace_download(org, agent, session["directory"], path) as (
+        runtime = self._runtime_for(session)
+        async with runtime.workspace_download(org, agent, session["directory"], path) as (
             metadata,
             stream,
         ):
@@ -665,7 +676,8 @@ class Workspace:
     ) -> AsyncIterator[tuple[dict[str, Any], AsyncIterator[bytes]]]:
         path = self._artifact_path(path)
         session = await self._scoped_session(org, agent, session_id)
-        async with self.runtime.workspace_download(org, agent, session["directory"], path) as (
+        runtime = self._runtime_for(session)
+        async with runtime.workspace_download(org, agent, session["directory"], path) as (
             metadata,
             stream,
         ):
@@ -695,6 +707,7 @@ class Workspace:
     ) -> bool:
         try:
             session = await self._scoped_session(org, agent, self._native_id(session_id))
+            self._runtime_for(session)
         except (LookupError, RuntimeUnavailable):
             return False
         return session["directory"] == directory
@@ -760,7 +773,9 @@ class Workspace:
     async def _pending_native(
         self, org: str, agent: str, session: dict[str, Any], kind: Literal["question", "permission"]
     ) -> list[dict[str, Any]]:
-        result = await self.runtime.request(org, agent, f"/{kind}", directory=session["directory"])
+        result = await self._runtime_for(session).request(
+            org, agent, f"/{kind}", directory=session["directory"]
+        )
         if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
             raise RuntimeUnavailable("Native pending interactions response is invalid")
         return [item for item in result if item.get("sessionID") == session["session_id"]]
@@ -779,7 +794,7 @@ class Workspace:
             mapped[root["session_id"]] = record
         while pending:
             parent = pending.pop()
-            children = await self.runtime.request(
+            children = await self._runtime_for(parent).request(
                 org,
                 agent,
                 f"/session/{parent['session_id']}/children",
@@ -806,6 +821,7 @@ class Workspace:
                     "session_id": child_id,
                     "directory": directory,
                     "root_session_id": parent["root_session_id"],
+                    "runtime_type": parent["runtime_type"],
                 }
                 seen.add(child_id)
                 result.append(record)
@@ -814,12 +830,13 @@ class Workspace:
 
     async def _child_count(self, org: str, agent: str, session: dict[str, Any]) -> int:
         """Count only descendants whose native ancestry is verified from this session."""
+        runtime = self._runtime_for(session)
         count = 0
         seen = {session["session_id"]}
         pending = [(session["session_id"], session["directory"])]
         while pending:
             parent_id, directory = pending.pop()
-            children = await self.runtime.request(
+            children = await runtime.request(
                 org, agent, f"/session/{parent_id}/children", directory=directory
             )
             if not isinstance(children, list):
@@ -847,12 +864,15 @@ class Workspace:
             pass
         roots = self.host.sessions(org, agent)
         mapped = {row["session_id"]: row for row in roots}
-        pending = [(row["session_id"], row["directory"], row["session_id"]) for row in roots]
-        seen = {root for root, _, _ in pending}
+        pending = [{**row, "root_session_id": row["session_id"]} for row in roots]
+        seen = {root["session_id"] for root in pending}
         while pending:
-            parent, directory, root_session_id = pending.pop()
-            children = await self.runtime.request(
-                org, agent, f"/session/{parent}/children", directory=directory
+            parent = pending.pop()
+            children = await self._runtime_for(parent).request(
+                org,
+                agent,
+                f"/session/{parent['session_id']}/children",
+                directory=parent["directory"],
             )
             if not isinstance(children, list):
                 raise RuntimeUnavailable("Native child sessions response is invalid")
@@ -861,7 +881,9 @@ class Workspace:
                     raise RuntimeUnavailable("Native child session receipt is invalid")
                 child_id = self._native_id(child.get("id"))
                 child_directory = child.get("directory")
-                if child.get("parentID") != parent or not isinstance(child_directory, str):
+                if child.get("parentID") != parent["session_id"] or not isinstance(
+                    child_directory, str
+                ):
                     raise RuntimeUnavailable("Native child session ancestry is invalid")
                 if child_id in mapped:
                     if mapped[child_id]["directory"] != child_directory:
@@ -873,10 +895,18 @@ class Workspace:
                     return {
                         "session_id": child_id,
                         "directory": child_directory,
-                        "root_session_id": root_session_id,
+                        "root_session_id": parent["root_session_id"],
+                        "runtime_type": parent["runtime_type"],
                     }
                 seen.add(child_id)
-                pending.append((child_id, child_directory, root_session_id))
+                pending.append(
+                    {
+                        "session_id": child_id,
+                        "directory": child_directory,
+                        "root_session_id": parent["root_session_id"],
+                        "runtime_type": parent["runtime_type"],
+                    }
+                )
         raise LookupError("Thread not found")
 
     @staticmethod

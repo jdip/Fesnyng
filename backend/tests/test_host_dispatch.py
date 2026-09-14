@@ -71,6 +71,47 @@ def test_dispatch_receipts_are_durable_ordered_and_reject_conflicting_retries(tm
         )
 
 
+def test_unavailable_thread_harness_is_rejected_before_opencode_delivery(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization_id, agent_id = str(uuid4()), str(uuid4())
+    host.bind_organization(organization_id, "test organization binding with enough characters")
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Engineer",
+    )
+    host.stage_agent(envelope)
+    host.mark_applied(envelope)
+    host.save_session(
+        organization_id,
+        agent_id,
+        "thr_codex",
+        "/workspace/codex",
+        "Codex thread",
+        runtime_type="codex",
+    )
+    deliveries = DispatchStore(host)
+    deliveries.initialize()
+
+    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+        deliveries.enqueue(
+            organization_id,
+            agent_id,
+            "thr_codex",
+            Submission(id=uuid4(), text="Do not send this to OpenCode"),
+            Actor(kind="human", id=uuid4(), name="Owner"),
+        )
+
+
 def test_native_delivery_is_fifo_per_thread_but_threads_run_concurrently(tmp_path):
     host = HostStore(
         ServiceSettings(

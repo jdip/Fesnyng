@@ -9,7 +9,7 @@ from fesnyng_backend.host_credentials import CredentialStore
 from fesnyng_backend.host_dispatch import DispatchStore
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import HostAgentConfiguration
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
 
@@ -96,6 +96,7 @@ class HostConfiguration:
         self, envelope: HostAgentConfiguration, *, lifecycle_operation: bool = False
     ) -> None:
         organization_id, agent_id = str(envelope.organization_id), str(envelope.agent_id)
+        RuntimeRouter.require_supported(envelope.configuration.runtime_type)
         current = self.host.agent(organization_id, agent_id)
         previous = (
             HostAgentConfiguration.model_validate_json(current["applied_envelope"])
@@ -109,7 +110,7 @@ class HostConfiguration:
                 )
         async with self.runtime.lock(agent_id):
             current = self.host.agent(organization_id, agent_id)
-            if current["desired_envelope"] != envelope.model_dump_json():
+            if HostAgentConfiguration.model_validate_json(current["desired_envelope"]) != envelope:
                 raise RuntimeUnavailable("Configuration changed during application")
             lifecycle_allowed = (
                 current["lifecycle_state"] in {"pending", "recovering"}

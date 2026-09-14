@@ -34,6 +34,27 @@ def test_apply_stages_desired_configuration_then_configures_after_quiet(tmp_path
     assert runtime.events == ["quiet", "configure"]
 
 
+def test_codex_configuration_stays_pending_until_its_harness_is_installed(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Codex agent",
+        configuration=AgentConfiguration(runtime_type="codex"),
+    )
+
+    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
+        asyncio.run(configuration.apply(envelope))
+
+    status = host.agent_status(organization_id, agent_id)
+    assert status["desired_version"] == 1
+    assert status["applied_version"] is None
+    assert status["runtime_state"] == "pending"
+    assert runtime.events == []
+
+
 def test_policy_suffix_is_applied_before_global_configuration(tmp_path):
     host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
     baseline = HostAgentConfiguration(
