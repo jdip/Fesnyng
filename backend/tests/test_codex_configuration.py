@@ -1,12 +1,13 @@
 import asyncio
 import secrets
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 
 from fesnyng_backend.agent_models import AgentConfiguration, OrganizationPolicy
-from fesnyng_backend.codex_runtime import native_policy
+from fesnyng_backend.codex_runtime import CodexRuntime, native_policy
 from fesnyng_backend.host_configuration import HostConfiguration
 from fesnyng_backend.host_credentials import CredentialStore
 from fesnyng_backend.host_dispatch import DispatchStore
@@ -72,6 +73,67 @@ def test_codex_policy_uses_only_equivalent_native_controls():
             base,
             [{"permission": "shell", "pattern": "*", "action": "ask"}],
         )
+
+
+def test_reconnect_resume_reapplies_and_verifies_the_applied_policy_before_caching():
+    envelope = HostAgentConfiguration(
+        host_id=uuid4(),
+        organization_id=uuid4(),
+        agent_id=uuid4(),
+        version=1,
+        name="Agent",
+        configuration=AgentConfiguration(runtime_type="codex"),
+    )
+
+    class Store:
+        def agent(self, _org, _agent):
+            return {"applied_envelope": envelope.model_dump_json()}
+
+    class Runtime:
+        store = Store()
+
+        async def running_port(self, _org, _agent):
+            return 1
+
+    class Transport:
+        def __init__(self, sandbox="dangerFullAccess"):
+            self.sandbox, self.calls = sandbox, []
+
+        async def connection_id(self, _org, _agent):
+            return "reconnected"
+
+        async def call(self, org, agent, method, params):
+            self.calls.append((org, agent, method, params))
+            return {
+                "thread": {"id": "thr_1"},
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "sandbox": {"type": self.sandbox},
+            }
+
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    runtime.runtime = cast(Any, Runtime())
+    runtime.resumed_connections = {}
+    runtime.started_policies = {}
+    transport = Transport()
+    runtime.transport = cast(Any, transport)
+    asyncio.run(runtime._resume(str(envelope.organization_id), str(envelope.agent_id), "thr_1"))
+    assert transport.calls[0][2:] == (
+        "thread/resume",
+        {
+            "threadId": "thr_1",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "sandbox": "danger-full-access",
+        },
+    )
+    assert runtime.resumed_connections
+
+    runtime.resumed_connections = {}
+    runtime.transport = cast(Any, Transport(sandbox="workspaceWrite"))
+    with pytest.raises(RuntimeUnavailable, match="required native policy"):
+        asyncio.run(runtime._resume(str(envelope.organization_id), str(envelope.agent_id), "thr_1"))
+    assert runtime.resumed_connections == {}
 
 
 def test_codex_quiet_state_includes_native_subagent_descendants():

@@ -99,3 +99,46 @@ test('mounts a Codex thread with native pending input and its streamed completio
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/prompt'))).toBe(true));
 });
+
+test('clears a transient pending-request reload error after the host recovers', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  let pendingReads = 0;
+  let replyAttempts = 0;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Investigate', time: {} }]));
+    if (url.includes('/history')) return new Response(JSON.stringify({ thread: { id: 'thread-one' }, turns: [], historyState: 'complete' }));
+    if (url.includes('/pending/question-one/reply?') && init.method === 'POST') {
+      replyAttempts += 1;
+      return replyAttempts === 1
+        ? new Response(JSON.stringify({ detail: 'Reply failed' }), { status: 503 })
+        : new Response(JSON.stringify({ accepted: true }));
+    }
+    if (url.includes('/pending?')) {
+      pendingReads += 1;
+      if (pendingReads === 1 || pendingReads === 4) return new Response(JSON.stringify({ detail: 'Agent host is unreachable' }), { status: 503 });
+      return new Response(JSON.stringify([{ id: 'question-one', method: 'item/tool/requestUserInput', params: { question: 'Recovered question' } }]));
+    }
+    return new Response(JSON.stringify({ id: 'thread-one', title: 'Investigate', time: {} }));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="thread-one" showThreadList={false} />);
+
+  expect(await screen.findByText('Agent host is unreachable')).toBeTruthy();
+  window.dispatchEvent(new Event('focus'));
+  expect(await screen.findByRole('textbox', { name: 'Answer Recovered question' })).toBeTruthy();
+  expect(screen.queryByText('Agent host is unreachable')).toBeNull();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Answer Recovered question' }), { target: { value: 'Yes' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Answer' }));
+  expect(await screen.findByText('Reply failed')).toBeTruthy();
+  window.dispatchEvent(new Event('focus'));
+  await waitFor(() => expect(pendingReads).toBeGreaterThan(2));
+  expect(screen.queryByText('Reply failed')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Answer' }));
+  expect(await screen.findByText('Agent host is unreachable')).toBeTruthy();
+  window.dispatchEvent(new Event('focus'));
+  await waitFor(() => expect(pendingReads).toBeGreaterThan(4));
+  expect(screen.queryByText('Agent host is unreachable')).toBeNull();
+});

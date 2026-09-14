@@ -192,7 +192,8 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
   const request = useMemo(() => createFesnyngCodexFetch(csrfToken), [csrfToken]);
   const [requests, setRequests] = useState<PendingRequest[]>([]);
   const [answer, setAnswer] = useState<Record<string, string>>({});
-  const [error, setError] = useState('');
+  const [reloadError, setReloadError] = useState('');
+  const [replyError, setReplyError] = useState('');
   const [submitting, setSubmitting] = useState<string>();
   const activeSession = useRef(sessionId);
   useLayoutEffect(() => { activeSession.current = sessionId; }, [sessionId]);
@@ -200,11 +201,14 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
     if (!sessionId) { setRequests([]); return; }
     const response = await request(`${base(baseUrl)}/pending?sessionID=${encodeURIComponent(sessionId)}`);
     const next = pending(await response.json());
-    if (activeSession.current === sessionId) setRequests(next);
+    if (activeSession.current === sessionId) {
+      setRequests(next);
+      setReloadError('');
+    }
   }, [baseUrl, request, sessionId]);
   useEffect(() => {
     let disposed = false;
-    const refresh = () => { void reload().catch((cause: unknown) => { if (!disposed) setError(errorMessage(cause)); }); };
+    const refresh = () => { void reload().catch((cause: unknown) => { if (!disposed) setReloadError(errorMessage(cause)); }); };
     queueMicrotask(refresh);
     const timer = window.setInterval(refresh, 2500);
     window.addEventListener('focus', refresh);
@@ -212,14 +216,20 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
   }, [reload]);
   const reply = async (item: PendingRequest, response: Record<string, unknown>) => {
     if (!sessionId) return;
-    setSubmitting(item.id); setError('');
+    setSubmitting(item.id); setReplyError('');
     try {
       await request(`${base(baseUrl)}/pending/${encodeURIComponent(item.id)}/reply?sessionID=${encodeURIComponent(sessionId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ response }) });
-      await reload();
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setSubmitting(undefined); }
+    } catch (cause) {
+      setReplyError(errorMessage(cause));
+      setSubmitting(undefined);
+      return;
+    }
+    try { await reload(); }
+    catch (cause) { setReloadError(errorMessage(cause)); }
+    setSubmitting(undefined);
   };
-  if (requests.length === 0 && !error) return null;
+  const errors = [reloadError, replyError].filter(Boolean);
+  if (requests.length === 0 && errors.length === 0) return null;
   return <section className="fesnyng-questions" aria-label="Agent questions">{requests.map((item) => {
     const question = typeof item.params.command === 'string' ? `Run command: ${item.params.command}` : typeof item.params.reason === 'string' ? item.params.reason : typeof item.params.question === 'string' ? item.params.question : typeof item.params.message === 'string' ? item.params.message : item.method;
     const approval = item.method === 'item/commandExecution/requestApproval' || item.method === 'item/fileChange/requestApproval';
@@ -228,7 +238,7 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
     const elicitationFields = item.method === 'mcpServer/elicitation/request' ? supportedElicitationFields(item.params.requestedSchema) : undefined;
     if (item.method === 'item/permissions/requestApproval') return <article key={item.id} className="app-panel"><p>This Codex request requires a permission profile that Fesnyng cannot safely translate. Update the agent’s mandatory policy before continuing.</p></article>;
     return <article key={item.id} className="app-panel"><p>{question}</p>{approval ? <div className="app-actions"><button className="app-button primary" disabled={busy} onClick={() => void reply(item, { decision: 'accept' })}>Approve</button><button className="app-button" disabled={busy} onClick={() => void reply(item, { decision: 'decline' })}>Reject</button></div> : item.method === 'mcpServer/elicitation/request' ? elicitationFields ? <form className="app-form" onSubmit={(event) => { event.preventDefault(); void reply(item, { action: 'accept', content: Object.fromEntries(elicitationFields.flatMap(({ name, field, required }) => { const value = answer[`${item.id}:${name}`] ?? ''; return required || value ? [[name, elicitationValue(value, field)]] : []; })) }); }}>{elicitationFields.map(({ name, field, required }) => { const key = `${item.id}:${name}`; const options = Array.isArray(field.enum) ? field.enum.filter((value): value is string => typeof value === 'string') : []; return <label key={key}>{typeof field.title === 'string' ? field.title : name}{typeof field.description === 'string' && <small className="muted">{field.description}</small>}{field.type === 'boolean' ? <select aria-label={`Answer ${name}`} required={required} value={answer[key] ?? ''} onChange={(event) => setAnswer((current) => ({ ...current, [key]: event.target.value }))}><option value="" disabled>Select an option</option><option value="false">No</option><option value="true">Yes</option></select> : options.length ? <select aria-label={`Answer ${name}`} required={required} value={answer[key] ?? ''} onChange={(event) => setAnswer((current) => ({ ...current, [key]: event.target.value }))}><option value="" disabled>Select an option</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select> : <input className="app-input" aria-label={`Answer ${name}`} required={required} type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} min={typeof field.minimum === 'number' ? field.minimum : undefined} max={typeof field.maximum === 'number' ? field.maximum : undefined} step={typeof field.multipleOf === 'number' ? field.multipleOf : field.type === 'integer' ? 1 : field.type === 'number' ? 'any' : undefined} value={answer[key] ?? ''} onChange={(event) => setAnswer((current) => ({ ...current, [key]: event.target.value }))} />}</label>; })}<div className="app-actions"><button className="app-button primary" disabled={busy}>Continue</button><button type="button" className="app-button" disabled={busy} onClick={() => void reply(item, { action: 'decline' })}>Decline</button></div></form> : <div className="app-actions"><p className="muted">This MCP request uses an input form the workspace cannot safely render.</p><button className="app-button" disabled={busy} onClick={() => void reply(item, { action: 'decline' })}>Decline</button><button className="app-button" disabled={busy} onClick={() => void reply(item, { action: 'cancel' })}>Cancel</button></div> : <form className="app-form" onSubmit={(event) => { event.preventDefault(); const entries = questions.length ? questions : [{ id: item.id }]; void reply(item, { answers: Object.fromEntries(entries.map((entry) => { const id = typeof entry.id === 'string' ? entry.id : item.id; return [id, { answers: [answer[`${item.id}:${id}`] ?? ''] }]; })) }); }}><>{(questions.length ? questions : [{ id: item.id, question }]).map((entry, index) => { const id = typeof entry.id === 'string' ? entry.id : `${item.id}:${index}`; const label = typeof entry.question === 'string' ? entry.question : question; const key = `${item.id}:${id}`; const options = fieldOptions(entry); return <label key={key}>{label}{typeof entry.description === 'string' && <small className="muted">{entry.description}</small>}{options.length ? <select aria-label={`Answer ${label}`} required value={answer[key] ?? ''} onChange={(event) => setAnswer((current) => ({ ...current, [key]: event.target.value }))}><option value="" disabled>Select an option</option>{options.map((option) => <option key={option.label as string} value={option.label as string}>{option.label as string}{typeof option.description === 'string' ? ` — ${option.description}` : ''}</option>)}</select> : <textarea className="app-textarea" aria-label={`Answer ${label}`} required value={answer[key] ?? ''} onChange={(event) => setAnswer((current) => ({ ...current, [key]: event.target.value }))} />}</label>; })}</><button className="app-button primary" disabled={busy}>Answer</button></form>}</article>;
-  })}{error && <p className="app-error" role="alert">{error}</p>}</section>;
+  })}{errors.map((message, index) => <p key={`${index}:${message}`} className="app-error" role="alert">{message}</p>)}</section>;
 }
 
 function CodexConversationView(props: CodexConversationProps) {

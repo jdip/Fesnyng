@@ -227,9 +227,21 @@ class CodexRuntime:
         connection_id = await self.transport.connection_id(organization_id, agent_id)
         if self.resumed_connections.get(key) == connection_id:
             return
-        await self.transport.call(
-            organization_id, agent_id, "thread/resume", {"threadId": thread_id}
+        agent = self.runtime.store.agent(organization_id, agent_id)
+        applied = agent.get("applied_envelope")
+        if not isinstance(applied, str):
+            raise RuntimeUnavailable("Codex harness is not applied")
+        envelope = HostAgentConfiguration.model_validate_json(applied)
+        if envelope.configuration.runtime_type != "codex":
+            raise RuntimeUnavailable("Agent is not configured for Codex")
+        policy = native_policy(envelope, [])
+        receipt = await self.transport.call(
+            organization_id, agent_id, "thread/resume", {"threadId": thread_id, **policy}
         )
+        thread = receipt.get("thread")
+        if not isinstance(thread, Mapping) or thread.get("id") != thread_id:
+            raise RuntimeUnavailable("Codex thread resume receipt is invalid")
+        _verify_policy(receipt, policy)
         self.resumed_connections[key] = await self.transport.connection_id(
             organization_id, agent_id
         )
