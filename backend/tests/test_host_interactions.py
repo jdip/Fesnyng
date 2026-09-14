@@ -676,6 +676,26 @@ def test_policy_reconciliation_contains_native_failures_and_waits_for_global_con
     }
 
 
+def test_policy_reconciliation_stays_alive_while_harness_capture_blocks_writes(tmp_path):
+    host, organization_id, agent_id, session_id = _host_with_session(tmp_path)
+    interactions = Interactions(host, Native(session_id))
+    interactions.initialize()
+    interactions.put_policy(
+        organization_id,
+        agent_id,
+        session_id,
+        0,
+        [PermissionRule(permission="read", action="allow")],
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+    host.begin_harness_switch(organization_id, agent_id, 1, "codex")
+
+    expected = {f"{organization_id}/{agent_id}/{session_id}": "pending"}
+    assert asyncio.run(interactions.reconcile_once()) == expected
+    assert asyncio.run(interactions.reconcile_once()) == expected
+    assert interactions.get_policy(organization_id, agent_id, session_id)["applied_revision"] == 0
+
+
 def _host_with_session(tmp_path):
     host = HostStore(
         ServiceSettings(

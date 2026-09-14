@@ -1,14 +1,18 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { App } from './App';
+import { AgentConversation, App } from './App';
+import type { Agent } from './workspace-api';
 vi.mock('./Conversation', async () => {
   const { createPortal } = await import('react-dom');
   const { useState } = await import('react');
-  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void }) => {
+  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect, readOnly }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void; readOnly?: boolean }) => {
     const [draft, setDraft] = useState('');
-    return <><p>Native conversation {sessionId}</p><textarea aria-label="Composer draft" value={draft} onChange={(event) => setDraft(event.target.value)} />{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</>;
+    return <><p>Native conversation {sessionId}</p>{readOnly ? <p>This thread is permanently frozen and read-only.</p> : <textarea aria-label="Composer draft" value={draft} onChange={(event) => setDraft(event.target.value)} />}{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</>;
   } };
 });
+vi.mock('./CodexConversation', () => ({
+  CodexConversation: ({ sessionId, readOnly }: { sessionId?: string; readOnly?: boolean }) => <><p>Codex conversation {sessionId}</p>{readOnly && <p>This thread is permanently frozen and read-only.</p>}</>,
+}));
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
 
@@ -147,6 +151,60 @@ test('restores a selected native thread after reloading an authorized organizati
   render(<App />);
   expect(await screen.findByText('Native conversation thread-one')).toBeTruthy();
   expect(document.querySelector('.thread-context')).toBeNull();
+});
+
+test('keeps a frozen OpenCode thread on its original renderer after the employee switches to Codex', async () => {
+  window.history.replaceState(null, '', '/#organization=one&agent=agent-one&thread=old-opencode');
+  const request = vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents/agent-one/sessions') ? [{ session_id: 'old-opencode', title: 'Original OpenCode work', runtime_type: 'opencode', frozen_at: 0 }]
+      : input.endsWith('/agents') ? [{ id: 'agent-one', name: 'Researcher', title: 'Research', configuration: { workspace: 'default', runtime_type: 'codex' } }]
+      : [];
+    return new Response(JSON.stringify(body));
+  });
+  vi.stubGlobal('fetch', request);
+
+  render(<App />);
+
+  expect(await screen.findByText('Native conversation old-opencode')).toBeTruthy();
+  expect(screen.getByText('This thread is permanently frozen and read-only.')).toBeTruthy();
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
+  expect(screen.getByRole('button', { name: /Original OpenCode work/ })).toBeTruthy();
+});
+
+test('refreshes the immutable inventory before opening a newly created thread', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 2, applied_version: 2, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'codex', provider: 'openai', model: 'gpt-6-astra', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/agents/agent-one/sessions')) {
+      reads += 1;
+      return new Response(JSON.stringify(reads === 1
+        ? [{ session_id: 'existing', title: 'Existing history', runtime_type: 'opencode', frozen: true }]
+        : [{ session_id: 'existing', title: 'Existing history', runtime_type: 'opencode', frozen: true }, { session_id: 'fresh', title: 'Fresh Codex thread', runtime_type: 'codex', frozen: false }]));
+    }
+    return new Response(JSON.stringify([]));
+  }));
+  const props = { organization: 'one', agent, csrfToken: 'csrf', hidden: false, refreshKey: 0, threadListTarget: null, newThreadRequest: undefined, onNewThreadStarted: vi.fn(), threadPageSize: 6, onThreadSelect: vi.fn(), onSessionChange: vi.fn(), onError: vi.fn(), onOpen: vi.fn() };
+  const view = render(<AgentConversation {...props} sessionId="existing" />);
+  expect(await screen.findByText('Native conversation existing')).toBeTruthy();
+
+  view.rerender(<AgentConversation {...props} sessionId="fresh" />);
+  expect(await screen.findByText('Codex conversation fresh')).toBeTruthy();
+  expect(screen.queryByText('This thread is not available in the immutable agent inventory.')).toBeNull();
+  expect(reads).toBeGreaterThan(1);
+});
+
+test('holds a new target-harness thread until its configuration applies', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 3, applied_version: 2, configuration_status: 'pending', configuration: { execution_type: 'docker', runtime_type: 'codex', provider: 'openai', model: 'gpt-6-astra', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => new Response(JSON.stringify(input.endsWith('/sessions') ? [{ session_id: 'old-codex', title: 'Frozen history', runtime_type: 'codex', frozen_at: 0 }] : []))));
+  render(<AgentConversation organization="one" agent={agent} csrfToken="csrf" hidden={false} refreshKey={0} sessionId={undefined} threadListTarget={null} newThreadRequest={1} onNewThreadStarted={vi.fn()} threadPageSize={6} onThreadSelect={vi.fn()} onSessionChange={vi.fn()} onError={vi.fn()} onOpen={vi.fn()} />);
+
+  expect(await screen.findByText('The selected harness is still applying. New threads will be available after configuration finishes.')).toBeTruthy();
+  expect(screen.queryByText('Codex conversation')).toBeNull();
 });
 
 test('lets an existing member create another organization without losing the original membership', async () => {

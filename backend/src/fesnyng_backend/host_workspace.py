@@ -160,6 +160,9 @@ class Workspace:
             result.append(
                 {
                     "id": session["session_id"],
+                    "runtime_type": session["runtime_type"],
+                    "frozen": session.get("frozen_at") is not None,
+                    "frozen_at": session.get("frozen_at"),
                     "title": session["title"],
                     "directory": session["directory"],
                     "time": time,
@@ -190,6 +193,8 @@ class Workspace:
 
     async def get(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         session = await self._scoped_session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            return self._project_session(session, self._snapshot(org, agent, session)["session"])
         result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}", directory=session["directory"]
         )
@@ -225,6 +230,10 @@ class Workspace:
 
     async def messages(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = await self._scoped_session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            if session["runtime_type"] != "opencode":
+                raise RuntimeUnavailable("Thread is bound to the Codex harness")
+            return self._snapshot(org, agent, session)["history"]
         result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}/message", directory=session["directory"]
         )
@@ -241,53 +250,61 @@ class Workspace:
     async def update(
         self, org: str, agent: str, session_id: str, body: SessionUpdate
     ) -> dict[str, Any]:
-        session = self.host.session(org, agent, session_id)
-        runtime = self._runtime_for(session)
-        if not body.has_change():
-            raise ValueError("Native session update requires a title or archive state")
-        if body.time is not None:
+        async with self.runtime.lock(agent):
+            self.host.require_writable(org, agent, session_id)
+            session = self.host.session(org, agent, session_id)
+            runtime = self._runtime_for(session)
+            if not body.has_change():
+                raise ValueError("Native session update requires a title or archive state")
+            if body.time is not None:
+                self._require_no_unsettled_dispatch(org, agent, session_id)
+            native_update: dict[str, Any] = {}
+            if body.title is not None:
+                native_update["title"] = body.title
+            if native_update:
+                result = await runtime.request(
+                    org,
+                    agent,
+                    f"/session/{session_id}",
+                    method="PATCH",
+                    body=native_update,
+                    directory=session["directory"],
+                )
+                receipt = self._session_receipt(result, session_id, session["directory"])
+                if receipt.get("title") != body.title:
+                    raise RuntimeUnavailable("Native session title was not applied")
+            else:
+                receipt = {
+                    "id": session_id,
+                    "directory": session["directory"],
+                    "title": session["title"],
+                }
+            if body.title is not None:
+                self.host.rename_session(org, agent, session_id, body.title)
+            if body.time is not None:
+                # Pinned OpenCode accepts a null archive timestamp without
+                # unarchiving its native record.  Fesnyng owns archive state only
+                # for mapped-thread navigation, so keep this local and project it
+                # onto scoped list/GET/event responses.
+                self.host.archive_session(org, agent, session_id, body.time.archived)
+            return self._project_session(self.host.session(org, agent, session_id), receipt)
+
+    async def delete(self, org: str, agent: str, session_id: str) -> None:
+        async with self.runtime.lock(agent):
+            self.host.require_writable(org, agent, session_id)
+            session = self.host.session(org, agent, session_id)
+            runtime = self._runtime_for(session)
             self._require_no_unsettled_dispatch(org, agent, session_id)
-        native_update: dict[str, Any] = {}
-        if body.title is not None:
-            native_update["title"] = body.title
-        if native_update:
             result = await runtime.request(
                 org,
                 agent,
                 f"/session/{session_id}",
-                method="PATCH",
-                body=native_update,
+                method="DELETE",
                 directory=session["directory"],
             )
-            receipt = self._session_receipt(result, session_id, session["directory"])
-            if receipt.get("title") != body.title:
-                raise RuntimeUnavailable("Native session title was not applied")
-        else:
-            receipt = {
-                "id": session_id,
-                "directory": session["directory"],
-                "title": session["title"],
-            }
-        if body.title is not None:
-            self.host.rename_session(org, agent, session_id, body.title)
-        if body.time is not None:
-            # Pinned OpenCode accepts a null archive timestamp without
-            # unarchiving its native record.  Fesnyng owns archive state only
-            # for mapped-thread navigation, so keep this local and project it
-            # onto scoped list/GET/event responses.
-            self.host.archive_session(org, agent, session_id, body.time.archived)
-        return self._project_session(self.host.session(org, agent, session_id), receipt)
-
-    async def delete(self, org: str, agent: str, session_id: str) -> None:
-        session = self.host.session(org, agent, session_id)
-        runtime = self._runtime_for(session)
-        self._require_no_unsettled_dispatch(org, agent, session_id)
-        result = await runtime.request(
-            org, agent, f"/session/{session_id}", method="DELETE", directory=session["directory"]
-        )
-        if result is not True:
-            raise RuntimeUnavailable("Native session deletion has no verified receipt")
-        self.host.delete_session(org, agent, session_id)
+            if result is not True:
+                raise RuntimeUnavailable("Native session deletion has no verified receipt")
+            self.host.delete_session(org, agent, session_id)
 
     def prompt(
         self, org: str, agent: str, session_id: str, operation_id: UUID, body: Prompt, author: Actor
@@ -317,6 +334,7 @@ class Workspace:
         source = self.host.session(org, agent, session_id)
         runtime = self._runtime_for(source)
         async with runtime.lock(agent):
+            self.host.require_writable(org, agent, session_id)
             self._require_no_unsettled_dispatch(org, agent, session_id)
             self._session_receipt(
                 await runtime.request(
@@ -453,37 +471,41 @@ class Workspace:
         return result
 
     async def revert(self, org: str, agent: str, session_id: str, body: Revert) -> dict[str, Any]:
-        session = self.host.session(org, agent, session_id)
-        runtime = self._runtime_for(session)
-        self._require_no_unsettled_dispatch(org, agent, session_id)
-        try:
+        async with self.runtime.lock(agent):
+            self.host.require_writable(org, agent, session_id)
+            session = self.host.session(org, agent, session_id)
+            runtime = self._runtime_for(session)
+            self._require_no_unsettled_dispatch(org, agent, session_id)
+            try:
+                result = await runtime.request(
+                    org,
+                    agent,
+                    f"/session/{session_id}/revert",
+                    method="POST",
+                    body={"messageID": body.message_id},
+                    directory=session["directory"],
+                )
+            except RuntimeUnavailable as error:
+                raise RuntimeUnavailable(
+                    "Native revert outcome is uncertain; inspect history before retrying"
+                ) from error
+            return self._session_receipt(result, session_id, session["directory"])
+
+    async def unrevert(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
+        async with self.runtime.lock(agent):
+            self.host.require_writable(org, agent, session_id)
+            session = self.host.session(org, agent, session_id)
+            runtime = self._runtime_for(session)
+            self._require_no_unsettled_dispatch(org, agent, session_id)
             result = await runtime.request(
                 org,
                 agent,
-                f"/session/{session_id}/revert",
+                f"/session/{session_id}/unrevert",
                 method="POST",
-                body={"messageID": body.message_id},
+                body={},
                 directory=session["directory"],
             )
-        except RuntimeUnavailable as error:
-            raise RuntimeUnavailable(
-                "Native revert outcome is uncertain; inspect history before retrying"
-            ) from error
-        return self._session_receipt(result, session_id, session["directory"])
-
-    async def unrevert(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
-        session = self.host.session(org, agent, session_id)
-        runtime = self._runtime_for(session)
-        self._require_no_unsettled_dispatch(org, agent, session_id)
-        result = await runtime.request(
-            org,
-            agent,
-            f"/session/{session_id}/unrevert",
-            method="POST",
-            body={},
-            directory=session["directory"],
-        )
-        return self._session_receipt(result, session_id, session["directory"])
+            return self._session_receipt(result, session_id, session["directory"])
 
     async def pending_all(
         self, org: str, agent: str, kind: Literal["question", "permission"]
@@ -731,7 +753,7 @@ class Workspace:
             self._runtime_for(session)
         except (LookupError, RuntimeUnavailable):
             return False
-        return session["directory"] == directory
+        return session.get("frozen_at") is None and session["directory"] == directory
 
     def project_event(self, org: str, agent: str, data: object) -> object:
         """Hide a pinned native unarchive bug behind the scoped host archive registry."""
@@ -808,6 +830,8 @@ class Workspace:
         seen: set[str] = set()
         mapped: dict[str, dict[str, Any]] = {}
         for root in self.host.sessions(org, agent):
+            if root.get("frozen_at") is not None or root["runtime_type"] != "opencode":
+                continue
             record = {**root, "root_session_id": root["session_id"]}
             result.append(record)
             pending.append(record)
@@ -884,6 +908,26 @@ class Workspace:
         except LookupError:
             pass
         roots = self.host.sessions(org, agent)
+        for root in self.host.sessions(org, agent, archived=None):
+            if root.get("frozen_at") is None:
+                continue
+            snapshot = self.host.frozen_snapshot(org, agent, root["session_id"])
+            child = snapshot.get("children", {}).get(session_id) if snapshot else None
+            if child is not None:
+                return {
+                    **root,
+                    "session_id": session_id,
+                    "directory": child["session"][
+                        "cwd" if root["runtime_type"] == "codex" else "directory"
+                    ],
+                    "title": child["session"].get("title") or root["title"],
+                    "root_session_id": root["session_id"],
+                }
+        roots = [
+            row
+            for row in roots
+            if row.get("frozen_at") is None and row["runtime_type"] == "opencode"
+        ]
         mapped = {row["session_id"]: row for row in roots}
         pending = [{**row, "root_session_id": row["session_id"]} for row in roots]
         seen = {root["session_id"] for root in pending}
@@ -930,6 +974,17 @@ class Workspace:
                 )
         raise LookupError("Thread not found")
 
+    def _snapshot(self, org: str, agent: str, session: dict[str, Any]) -> dict[str, Any]:
+        root_id = session.get("root_session_id", session["session_id"])
+        snapshot = self.host.frozen_snapshot(org, agent, root_id)
+        if snapshot is None:
+            raise RuntimeUnavailable("Frozen history snapshot is unavailable")
+        return (
+            snapshot
+            if root_id == session["session_id"]
+            else snapshot["children"][session["session_id"]]
+        )
+
     @staticmethod
     def _native_id(value: object) -> str:
         try:
@@ -947,6 +1002,13 @@ class Workspace:
 
     @staticmethod
     def _project_session(session: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("id") == session["session_id"]:
+            result = {
+                **result,
+                "runtime_type": session["runtime_type"],
+                "frozen": session.get("frozen_at") is not None,
+                "frozen_at": session.get("frozen_at"),
+            }
         # A discovered child has no host registry record.  Native child data is
         # read-only and must not inherit its root's archival projection.
         if "archived_at" not in session:

@@ -91,7 +91,11 @@ class CodexRuntime:
 
     async def events(self, organization_id: str, agent_id: str) -> AsyncIterator[dict[str, Any]]:
         for session in self.runtime.store.sessions(organization_id, agent_id):
-            if session["runtime_type"] == "codex" and session["deleted_at"] is None:
+            if (
+                session["runtime_type"] == "codex"
+                and session["deleted_at"] is None
+                and session.get("frozen_at") is None
+            ):
                 await self._resume(organization_id, agent_id, session["session_id"])
         async for event in self.transport.events(organization_id, agent_id):
             yield event

@@ -99,6 +99,42 @@ def test_same_host_peer_delivery_uses_durable_receiver_reservation_and_dispatch(
         )
 
 
+def test_accepted_peer_retry_remains_readable_after_receiver_thread_freezes(tmp_path):
+    host, target_agent, _, dispatch, state = _local_receiver(tmp_path)
+    configuration = PeerConfigurationStore(host)
+    configuration.initialize()
+    service = PeerDeliveryService(host, configuration, Native(), dispatch, Waker())
+    service.initialize()
+    envelope = PeerEnvelope(
+        id=uuid4(),
+        organization_id=state["organization_id"],
+        source_host=host.instance_id,
+        source_agent=state["source_agent"],
+        source_session="ses_sender",
+        target_agent=target_agent,
+        target_session="ses_source",
+        text="Already accepted work",
+    )
+    accepted = asyncio.run(service.receive(str(host.instance_id), envelope))
+    delivery = dispatch.get(state["organization_id"], str(target_agent), accepted["dispatch_id"])
+    dispatch.change(delivery, "completed", validated=True, outcome={"kind": "settled"})
+    host.begin_harness_switch(state["organization_id"], str(target_agent), 1, "codex")
+    host.commit_freeze(
+        state["organization_id"],
+        str(target_agent),
+        {
+            "ses_source": {
+                "runtime_type": "opencode",
+                "session": {"id": "ses_source"},
+                "history": [],
+                "children": {},
+            }
+        },
+    )
+
+    assert asyncio.run(service.receive(str(host.instance_id), envelope)) == accepted
+
+
 def test_terminal_peer_work_returns_one_result_to_its_original_source_thread(tmp_path):
     host = HostStore(
         ServiceSettings(

@@ -170,6 +170,134 @@ def test_queued_delivery_does_not_block_instruction_reconfiguration(tmp_path):
     assert status["desired_version"] == status["applied_version"] == 2
 
 
+def test_harness_switch_aborts_before_capture_when_queued_delivery_exists(tmp_path):
+    host, configuration, _, organization_id, agent_id = _configuration(tmp_path)
+    source = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+    )
+    asyncio.run(configuration.apply(source))
+    host.save_session(
+        organization_id, agent_id, "ses_queued", "/workspace/default/queued", "Queued"
+    )
+    configuration.dispatch_store.enqueue(
+        organization_id,
+        agent_id,
+        "ses_queued",
+        Submission(id=uuid4(), text="Do not silently cancel me"),
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+
+    with pytest.raises(RuntimeUnavailable, match="queued work"):
+        asyncio.run(configuration.switch_harness(organization_id, agent_id, 1, "codex"))
+
+    assert host.agent_status(organization_id, agent_id)["switch_state"] is None
+    assert host.session(organization_id, agent_id, "ses_queued")["frozen_at"] is None
+
+
+def test_harness_switch_rejects_unrepresentable_target_policy_before_freezing(tmp_path):
+    host, configuration, _, organization_id, agent_id = _configuration(tmp_path)
+    source = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+        policy=OrganizationPolicy(
+            mandatory_permissions=[PermissionRule(permission="shell", action="deny")]
+        ),
+    )
+    asyncio.run(configuration.apply(source))
+    host.save_session(
+        organization_id, agent_id, "ses_history", "/workspace/default/history", "History"
+    )
+
+    with pytest.raises(RuntimeUnavailable, match="mandatory"):
+        asyncio.run(configuration.switch_harness(organization_id, agent_id, 1, "codex"))
+
+    assert host.agent_status(organization_id, agent_id)["switch_state"] is None
+    assert host.session(organization_id, agent_id, "ses_history")["frozen_at"] is None
+
+
+@pytest.mark.parametrize(
+    "source_runtime,target_runtime", [("opencode", "codex"), ("codex", "opencode")]
+)
+def test_committed_harness_freeze_allows_only_the_selected_replacement_configuration(
+    tmp_path, source_runtime, target_runtime
+):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    runtime.codex = object()
+    source = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+        configuration=AgentConfiguration(runtime_type=source_runtime),
+    )
+    asyncio.run(configuration.apply(source))
+    asyncio.run(configuration.switch_harness(organization_id, agent_id, 1, target_runtime))
+    assert host.agent_status(organization_id, agent_id)["switch_state"] == "frozen"
+
+    target = source.model_copy(
+        update={
+            "version": 2,
+            "configuration": source.configuration.model_copy(
+                update={"runtime_type": target_runtime}
+            ),
+        }
+    )
+    status = asyncio.run(configuration.apply(target))
+
+    assert status["desired_version"] == status["applied_version"] == 2
+    assert host.agent_status(organization_id, agent_id)["switch_state"] is None
+    assert max(
+        index for index, event in enumerate(runtime.events) if event == "switch_harness"
+    ) < max(index for index, event in enumerate(runtime.events) if event == "configure")
+
+
+def test_concurrent_reconciliation_does_not_rebuild_an_already_switched_harness(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    runtime.codex = object()
+    source = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Reconciled agent",
+        configuration=AgentConfiguration(runtime_type="codex"),
+    )
+    asyncio.run(configuration.apply(source))
+    asyncio.run(configuration.switch_harness(organization_id, agent_id, 1, "opencode"))
+    target = source.model_copy(
+        update={
+            "version": 2,
+            "configuration": source.configuration.model_copy(update={"runtime_type": "opencode"}),
+        }
+    )
+    runtime.events.clear()
+    runtime.blocked_agent = agent_id
+
+    async def apply_and_reconcile():
+        apply = asyncio.create_task(configuration.apply(target))
+        await runtime.first_configure_started.wait()
+        reconcile = asyncio.create_task(configuration._reconcile_agent(target))
+        await asyncio.sleep(0)
+        assert not reconcile.done()
+        runtime.release_first_configure.set()
+        await apply
+        assert await reconcile == (agent_id, "applied")
+
+    asyncio.run(apply_and_reconcile())
+
+    assert runtime.events.count("switch_harness") == 1
+    assert runtime.events.count("configure") == 1
+    assert host.agent_status(organization_id, agent_id)["applied_version"] == 2
+
+
 def test_stopped_agent_retains_pending_configuration_until_started(tmp_path):
     host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
     baseline = HostAgentConfiguration(
@@ -429,6 +557,9 @@ class Native:
             await self.release_first_configure.wait()
         elif self.blocked_agent:
             self.second_configured.set()
+
+    async def switch_harness(self, organization_id, agent_id):
+        self.events.append("switch_harness")
 
     async def replace(self, organization_id, agent_id):
         self.events.append("replace")

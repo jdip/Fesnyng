@@ -97,6 +97,9 @@ class Interactions:
     async def pending(
         self, organization_id: str, agent_id: str, session_id: str, kind: InteractionKind
     ) -> list[dict[str, Any]]:
+        mapped = self.host.session(organization_id, agent_id, session_id)
+        if mapped["frozen_at"] is not None:
+            return []
         session = self._opencode_session(organization_id, agent_id, session_id)
         result = await self.runtime.request(
             organization_id, agent_id, f"/{kind}", directory=session["directory"]
@@ -118,9 +121,11 @@ class Interactions:
     ) -> dict[str, Any]:
         if kind not in {"question", "permission"}:
             raise ValueError("Unknown native interaction kind")
+        self.host.require_writable(organization_id, agent_id, session_id)
         payload, path = _reply_request(kind, request_id, answer)
         session = self._opencode_session(organization_id, agent_id, session_id)
         async with self.runtime.lock(agent_id):
+            self.host.require_writable(organization_id, agent_id, session_id)
             if self._has_operation(str(operation_id)):
                 return self._start_reply(
                     organization_id,
@@ -213,6 +218,7 @@ class Interactions:
         not acquire a lossy local taxonomy.
         """
         session = self.host.session(organization_id, agent_id, session_id)
+        self.host.require_writable(organization_id, agent_id, session_id)
         if session["runtime_type"] != "codex":
             raise RuntimeUnavailable("Thread is not bound to the Codex harness")
         router = getattr(self.runtime, "runtime_router", None)
@@ -224,6 +230,7 @@ class Interactions:
         if adapter is None or not all(hasattr(adapter, name) for name in ("pending", "respond")):
             raise RuntimeUnavailable("Codex harness is not available on this host")
         async with self.runtime.lock(agent_id):
+            self.host.require_writable(organization_id, agent_id, session_id)
             if self._has_operation(str(operation_id)):
                 return self._start_reply(
                     organization_id,
@@ -294,8 +301,10 @@ class Interactions:
         if kind not in {"question", "permission"}:
             raise ValueError("Unknown native interaction kind")
         payload, path = _reply_request(kind, request_id, answer)
+        self.host.require_writable(organization_id, agent_id, owner_session_id)
         self._opencode_session(organization_id, agent_id, owner_session_id)
         async with self.runtime.lock(agent_id):
+            self.host.require_writable(organization_id, agent_id, owner_session_id)
             if self._has_operation(str(operation_id)):
                 return self._start_reply(
                     organization_id,
@@ -416,6 +425,7 @@ class Interactions:
         attribution = author.model_dump_json()
         with self.host.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.host.require_writable(organization_id, agent_id, session_id, connection=connection)
             row = connection.execute(
                 "SELECT * FROM host_thread_policy WHERE organization_id=? AND agent_id=? AND session_id=?",
                 (organization_id, agent_id, session_id),
@@ -446,6 +456,7 @@ class Interactions:
         session_id: str,
         candidate: HostAgentConfiguration | None = None,
     ) -> dict[str, Any]:
+        self.host.require_writable(organization_id, agent_id, session_id)
         session = self.host.session(organization_id, agent_id, session_id)
         envelope = candidate or self._applied_envelope(organization_id, agent_id)
         if str(envelope.organization_id) != organization_id or str(envelope.agent_id) != agent_id:
@@ -454,6 +465,7 @@ class Interactions:
             return await self._apply_codex_policy(organization_id, agent_id, session_id, envelope)
         RuntimeRouter.require_supported(session["runtime_type"])
         async with self.runtime.lock(agent_id):
+            self.host.require_writable(organization_id, agent_id, session_id)
             record = self._policy_record(organization_id, agent_id, session_id)
             if (
                 record["desired_revision"] == record["applied_revision"]
@@ -490,6 +502,7 @@ class Interactions:
         """Apply only the policy App Server can represent, then record that receipt."""
         router = getattr(self.runtime, "runtime_router", None)
         session = self.host.session(organization_id, agent_id, session_id)
+        self.host.require_writable(organization_id, agent_id, session_id)
         adapter = (
             router.for_session(session)
             if router is not None
@@ -508,6 +521,7 @@ class Interactions:
         candidate: HostAgentConfiguration | None = None,
     ) -> dict[str, Any]:
         """Apply a Codex policy while the caller already holds the agent runtime lock."""
+        self.host.require_writable(organization_id, agent_id, session_id)
         session = self.host.session(organization_id, agent_id, session_id)
         envelope = candidate or self._applied_envelope(organization_id, agent_id)
         if session["runtime_type"] != "codex":
@@ -650,9 +664,15 @@ class Interactions:
                 JOIN host_agents AS agent
                   ON agent.organization_id=policy.organization_id
                  AND agent.agent_id=policy.agent_id
+                JOIN host_sessions AS session
+                  ON session.organization_id=policy.organization_id
+                 AND session.agent_id=policy.agent_id
+                 AND session.session_id=policy.session_id
+                 AND session.deleted_at IS NULL
+                 AND session.frozen_at IS NULL
                 WHERE policy.desired_revision != policy.applied_revision
                   AND agent.applied_envelope IS NOT NULL
-                  AND agent.desired_envelope=agent.applied_envelope
+                 AND agent.desired_envelope=agent.applied_envelope
                 ORDER BY policy.organization_id, policy.agent_id, policy.session_id"""
             ).fetchall()
         result: dict[str, str] = {}
@@ -665,7 +685,7 @@ class Interactions:
             key = f"{organization_id}/{agent_id}/{session_id}"
             try:
                 await self.apply_policy(organization_id, agent_id, session_id)
-            except RuntimeUnavailable:
+            except (RuntimeUnavailable, ValueError):
                 result[key] = "pending"
             else:
                 result[key] = "applied"

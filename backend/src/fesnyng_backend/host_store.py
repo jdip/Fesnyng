@@ -54,6 +54,9 @@ class HostStore:
                     snapshot_image TEXT,
                     desired_state TEXT NOT NULL DEFAULT 'running',
                     lifecycle_state TEXT NOT NULL DEFAULT 'pending',
+                    switch_state TEXT CHECK(switch_state IN ('capturing','frozen')),
+                    switch_source_version INTEGER,
+                    switch_target_runtime TEXT CHECK(switch_target_runtime IN ('opencode','codex')),
                     UNIQUE(organization_id,agent_id)
                 );
                 CREATE TABLE IF NOT EXISTS host_lifecycle_confirmations (
@@ -71,6 +74,14 @@ class HostStore:
                     deleted_at INTEGER,
                     archived_at INTEGER,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
+                );
+                CREATE TABLE IF NOT EXISTS host_thread_snapshots (
+                    session_id TEXT PRIMARY KEY REFERENCES host_sessions(session_id),
+                    organization_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    captured_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    snapshot TEXT NOT NULL,
                     FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
                 );
             """)
@@ -96,6 +107,16 @@ class HostStore:
                 connection.execute(
                     "ALTER TABLE host_agents ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'running'"
                 )
+            if "switch_state" not in agent_columns:
+                connection.execute("ALTER TABLE host_agents ADD COLUMN switch_state TEXT")
+            if "switch_source_version" not in agent_columns:
+                connection.execute(
+                    "ALTER TABLE host_agents ADD COLUMN switch_source_version INTEGER"
+                )
+            if "switch_target_runtime" not in agent_columns:
+                connection.execute("ALTER TABLE host_agents ADD COLUMN switch_target_runtime TEXT")
+            if "frozen_at" not in columns:
+                connection.execute("ALTER TABLE host_sessions ADD COLUMN frozen_at INTEGER")
             if connection.execute("SELECT version FROM host_schema").fetchone()[0] != 1:
                 raise RuntimeError("Unsupported host schema version")
 
@@ -163,6 +184,13 @@ class HostStore:
                     and envelope.policy != previous.policy
                 ):
                     raise ValueError("Policy version conflict")
+                if current["switch_state"] == "capturing":
+                    raise ValueError("Harness switch capture is in progress")
+                if current["switch_state"] == "frozen" and (
+                    envelope.configuration.runtime_type != current["switch_target_runtime"]
+                    or envelope.version <= current["switch_source_version"]
+                ):
+                    raise ValueError("Harness switch target configuration is required")
                 if previous == envelope and (
                     current["applied_envelope"] is not None
                     and HostAgentConfiguration.model_validate_json(current["applied_envelope"])
@@ -210,6 +238,9 @@ class HostStore:
             "runtime_state": agent["runtime_state"],
             "desired_state": agent["desired_state"],
             "lifecycle_state": agent["lifecycle_state"],
+            "switch_state": agent["switch_state"],
+            "switch_source_version": agent["switch_source_version"],
+            "switch_target_runtime": agent["switch_target_runtime"],
             "error": agent["error"],
         }
 
@@ -227,10 +258,28 @@ class HostStore:
             ):
                 raise ValueError("Configuration changed during runtime application")
             changed = connection.execute(
-                "UPDATE host_agents SET desired_envelope=?,applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=?",
+                """UPDATE host_agents
+                SET desired_envelope=?,applied_envelope=?,runtime_state='running',
+                    lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,
+                    switch_state=CASE
+                        WHEN switch_state='frozen' AND switch_target_runtime=? AND switch_source_version<?
+                        THEN NULL ELSE switch_state END,
+                    switch_source_version=CASE
+                        WHEN switch_state='frozen' AND switch_target_runtime=? AND switch_source_version<?
+                        THEN NULL ELSE switch_source_version END,
+                    switch_target_runtime=CASE
+                        WHEN switch_state='frozen' AND switch_target_runtime=? AND switch_source_version<?
+                        THEN NULL ELSE switch_target_runtime END,
+                    error=NULL WHERE agent_id=? AND organization_id=?""",
                 (
                     envelope.model_dump_json(),
                     envelope.model_dump_json(),
+                    envelope.configuration.runtime_type,
+                    envelope.version,
+                    envelope.configuration.runtime_type,
+                    envelope.version,
+                    envelope.configuration.runtime_type,
+                    envelope.version,
                     str(envelope.agent_id),
                     str(envelope.organization_id),
                 ),
@@ -259,18 +308,27 @@ class HostStore:
     ) -> None:
         if desired is not None and desired not in {"running", "stopped"}:
             raise ValueError("Unknown desired lifecycle state")
-        self.agent(organization_id, agent_id)
         with self.connect() as connection:
             if desired is None:
-                connection.execute(
-                    "UPDATE host_agents SET lifecycle_state=?,error=? WHERE organization_id=? AND agent_id=?",
+                changed = connection.execute(
+                    """UPDATE host_agents SET lifecycle_state=?,error=?
+                    WHERE organization_id=? AND agent_id=? AND switch_state IS NULL""",
                     (state, error, organization_id, agent_id),
-                )
+                ).rowcount
             else:
-                connection.execute(
-                    "UPDATE host_agents SET desired_state=?,lifecycle_state=?,error=? WHERE organization_id=? AND agent_id=?",
+                changed = connection.execute(
+                    """UPDATE host_agents SET desired_state=?,lifecycle_state=?,error=?
+                    WHERE organization_id=? AND agent_id=? AND switch_state IS NULL""",
                     (desired, state, error, organization_id, agent_id),
-                )
+                ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT switch_state FROM host_agents WHERE organization_id=? AND agent_id=?",
+                    (organization_id, agent_id),
+                ).fetchone()
+                if row is None:
+                    raise LookupError("Agent not found")
+                raise ValueError("Harness switch is in progress")
 
     def save_lifecycle_confirmation(
         self,
@@ -347,6 +405,170 @@ class HostStore:
                 "VALUES(?,?,?,?,?,?)",
                 (session_id, organization_id, agent_id, directory, title, runtime_type),
             )
+
+    def begin_harness_switch(
+        self, organization_id: str, agent_id: str, expected_version: int, target_runtime: str
+    ) -> None:
+        """Durably close admission before a caller captures old-harness history."""
+        if target_runtime not in {"opencode", "codex"}:
+            raise ValueError("Unknown target harness")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            agent = connection.execute(
+                "SELECT * FROM host_agents WHERE organization_id=? AND agent_id=?",
+                (organization_id, agent_id),
+            ).fetchone()
+            if agent is None:
+                raise LookupError("Agent not found")
+            desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
+            applied = (
+                HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
+                if agent["applied_envelope"]
+                else None
+            )
+            if (
+                desired.version != expected_version
+                or applied != desired
+                or desired.configuration.runtime_type == target_runtime
+            ):
+                raise ValueError("Harness switch source configuration is no longer current")
+            if agent["switch_state"] is not None:
+                if (
+                    agent["switch_source_version"] == expected_version
+                    and agent["switch_target_runtime"] == target_runtime
+                ):
+                    return
+                raise ValueError("Another harness switch is already in progress")
+            connection.execute(
+                """UPDATE host_agents
+                SET switch_state='capturing',switch_source_version=?,switch_target_runtime=?
+                WHERE organization_id=? AND agent_id=?""",
+                (expected_version, target_runtime, organization_id, agent_id),
+            )
+
+    def abort_harness_switch(self, organization_id: str, agent_id: str) -> None:
+        """Re-open admission only before the permanent freeze commits."""
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE host_agents
+                SET switch_state=NULL,switch_source_version=NULL,switch_target_runtime=NULL
+                WHERE organization_id=? AND agent_id=? AND switch_state='capturing'""",
+                (organization_id, agent_id),
+            )
+
+    def harness_switch_frozen_for(
+        self,
+        organization_id: str,
+        agent_id: str,
+        source_version: int,
+        target_runtime: str,
+    ) -> bool:
+        agent = self.agent(organization_id, agent_id)
+        return (
+            agent["switch_state"] == "frozen"
+            and agent["switch_source_version"] == source_version
+            and agent["switch_target_runtime"] == target_runtime
+        )
+
+    def commit_freeze(
+        self, organization_id: str, agent_id: str, snapshots: dict[str, dict[str, Any]]
+    ) -> None:
+        """Persist verified snapshots and permanent thread freezes in one transaction."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            agent = connection.execute(
+                "SELECT switch_state FROM host_agents WHERE organization_id=? AND agent_id=?",
+                (organization_id, agent_id),
+            ).fetchone()
+            if agent is None:
+                raise LookupError("Agent not found")
+            roots = connection.execute(
+                """SELECT * FROM host_sessions
+                WHERE organization_id=? AND agent_id=? AND deleted_at IS NULL
+                ORDER BY session_id""",
+                (organization_id, agent_id),
+            ).fetchall()
+            writable = [row for row in roots if row["frozen_at"] is None]
+            if agent["switch_state"] == "frozen":
+                if writable:
+                    raise ValueError("Harness freeze state is inconsistent")
+                return
+            if agent["switch_state"] != "capturing":
+                raise ValueError("Harness switch capture is not active")
+            expected = {row["session_id"] for row in writable}
+            if set(snapshots) != expected:
+                raise ValueError("Harness snapshot set does not match writable threads")
+            for row in writable:
+                snapshot = snapshots[row["session_id"]]
+                if (
+                    snapshot.get("runtime_type") != row["runtime_type"]
+                    or not isinstance(snapshot.get("session"), dict)
+                    or snapshot["session"].get("id") != row["session_id"]
+                ):
+                    raise ValueError("Harness snapshot provenance is invalid")
+                connection.execute(
+                    """INSERT INTO host_thread_snapshots(session_id,organization_id,agent_id,snapshot)
+                    VALUES(?,?,?,?)""",
+                    (
+                        row["session_id"],
+                        organization_id,
+                        agent_id,
+                        json.dumps(snapshot, separators=(",", ":")),
+                    ),
+                )
+            connection.execute(
+                """UPDATE host_sessions SET frozen_at=unixepoch()
+                WHERE organization_id=? AND agent_id=? AND deleted_at IS NULL AND frozen_at IS NULL""",
+                (organization_id, agent_id),
+            )
+            connection.execute(
+                """UPDATE host_agents SET switch_state='frozen'
+                WHERE organization_id=? AND agent_id=?""",
+                (organization_id, agent_id),
+            )
+
+    def frozen_snapshot(
+        self, organization_id: str, agent_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT snapshot FROM host_thread_snapshots
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+        return json.loads(row["snapshot"]) if row is not None else None
+
+    def require_writable(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Reject writes during capture and forever for frozen thread provenance."""
+        if connection is None:
+            with self.connect() as owned:
+                self.require_writable(organization_id, agent_id, session_id, connection=owned)
+            return
+        if session_id is not None:
+            session = connection.execute(
+                """SELECT frozen_at FROM host_sessions
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+            if session is None:
+                raise LookupError("Thread not found")
+            if session["frozen_at"] is not None:
+                raise ValueError("Thread is permanently frozen and read-only")
+        agent = connection.execute(
+            "SELECT switch_state FROM host_agents WHERE organization_id=? AND agent_id=?",
+            (organization_id, agent_id),
+        ).fetchone()
+        if agent is None:
+            raise LookupError("Agent not found")
+        if agent["switch_state"] is not None:
+            raise ValueError("Harness switch is in progress; new work is blocked")
 
     def session(self, organization_id: str, agent_id: str, session_id: str) -> dict[str, Any]:
         with self.connect() as connection:

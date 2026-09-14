@@ -144,7 +144,7 @@ class PeerDeliveryService:
     async def send(
         self, organization_id: str, source_agent: str, source_session: str, body: PeerSend
     ) -> dict[str, Any]:
-        self.store.session(organization_id, source_agent, source_session)
+        self.store.require_writable(organization_id, source_agent, source_session)
         target = self.config.agent(organization_id, str(body.target_agent))
         envelope = PeerEnvelope(
             **body.model_dump(),
@@ -157,6 +157,9 @@ class PeerDeliveryService:
         existing_delivery = False
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.store.require_writable(
+                organization_id, source_agent, source_session, connection=connection
+            )
             existing = connection.execute(
                 "SELECT * FROM peer_outbox WHERE id=?", (str(body.id),)
             ).fetchone()
@@ -217,7 +220,23 @@ class PeerDeliveryService:
                 if existing["organization_id"] != org or existing["envelope"] != encoded:
                     raise ValueError("Peer delivery identity conflict")
                 inbox = dict(existing)
+                # A durable acceptance is evidence, not a new native action.
+                # Return it after a later permanent freeze so a lost ACK does
+                # not turn a known receiver result into source uncertainty.
+                if inbox["state"] != "accepted":
+                    self.store.require_writable(
+                        org,
+                        str(envelope.target_agent),
+                        envelope.target_session,
+                        connection=connection,
+                    )
             else:
+                self.store.require_writable(
+                    org,
+                    str(envelope.target_agent),
+                    envelope.target_session,
+                    connection=connection,
+                )
                 directory = None if envelope.target_session else _directory(envelope)
                 connection.execute(
                     "INSERT INTO peer_inbox(id,organization_id,source_host,source_agent,source_session,"
@@ -698,6 +717,13 @@ class PeerDeliveryService:
         session = self.store.session(
             inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
         )
+        snapshot = (
+            self.store.frozen_snapshot(
+                inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
+            )
+            if session.get("frozen_at") is not None
+            else None
+        )
         if session.get("runtime_type") == "codex":
             turn_id = outcome.get("turn_id")
             if not isinstance(turn_id, str):
@@ -706,20 +732,23 @@ class PeerDeliveryService:
                     f"Peer delivery {inbox['id']} is {delivery['state']} for agent "
                     f"{inbox['target_agent']} in thread {inbox['target_session']}: {detail}"
                 )
-            adapter = self._codex(session)
-            turns = await full_turns(
-                adapter, inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
-            )
+            if snapshot is not None:
+                frozen_history = snapshot.get("history")
+                turns = frozen_history.get("turns") if isinstance(frozen_history, dict) else None
+                if not isinstance(turns, list):
+                    raise RuntimeUnavailable("Frozen Codex peer outcome snapshot is invalid")
+            else:
+                adapter = self._codex(session)
+                turns = await full_turns(
+                    adapter,
+                    inbox["organization_id"],
+                    inbox["target_agent"],
+                    inbox["target_session"],
+                )
             turn = next((item for item in turns if item.get("id") == turn_id), None)
             if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
                 raise RuntimeUnavailable("Native Codex peer outcome response is unavailable")
-            text = "\n".join(
-                item["text"]
-                for item in turn["items"]
-                if isinstance(item, dict)
-                and item.get("type") == "agentMessage"
-                and isinstance(item.get("text"), str)
-            ).strip()
+            text = _codex_agent_text(turn["items"])
             if text:
                 return text[:16_000]
             detail = delivery["error"] or outcome.get("kind", "terminal outcome")
@@ -730,12 +759,17 @@ class PeerDeliveryService:
             )
         message_id = outcome.get("message_id")
         if isinstance(message_id, str):
-            history = await self.runtime.request(
-                inbox["organization_id"],
-                inbox["target_agent"],
-                f"/session/{inbox['target_session']}/message",
-                directory=session["directory"],
-            )
+            if snapshot is not None:
+                history = snapshot.get("history")
+                if not isinstance(history, list):
+                    raise RuntimeUnavailable("Frozen peer outcome snapshot is invalid")
+            else:
+                history = await self.runtime.request(
+                    inbox["organization_id"],
+                    inbox["target_agent"],
+                    f"/session/{inbox['target_session']}/message",
+                    directory=session["directory"],
+                )
             found, answer = _assistant_text(
                 history, inbox["target_session"], message_id, outcome.get("responding_to")
             )
@@ -963,6 +997,28 @@ def _assistant_text(
         ).strip()
         return True, text[:16_000] or None
     return False, None
+
+
+def _codex_agent_text(items: list[object]) -> str:
+    """Read the pinned App Server's structured agent-message content."""
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            continue
+        if isinstance(item.get("text"), str):
+            parts.append(item["text"])
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        parts.extend(
+            part["text"]
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+    return "\n".join(parts).strip()[:16_000]
 
 
 def _native_id(value: str) -> bool:

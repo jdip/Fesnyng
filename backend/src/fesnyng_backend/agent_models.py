@@ -54,6 +54,11 @@ class AgentUpdate(Contract):
     configuration: AgentConfiguration | None = None
 
 
+class HarnessSwitchRequest(Contract):
+    expected_version: int = Field(ge=1)
+    target_runtime_type: Literal["opencode", "codex"]
+
+
 class CredentialProfileCreate(Contract):
     name: Name
     provider: Literal["openai"] = "openai"

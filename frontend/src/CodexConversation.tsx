@@ -24,6 +24,8 @@ export type CodexConversationProps = {
   onNewThreadStarted?: (request: number) => void;
   threadPageSize?: number;
   onThreadSelect?: () => void;
+  /** A host snapshot of an original Codex thread. No native interaction may be rendered. */
+  readOnly?: boolean;
 };
 
 const base = (url: string) => url.replace(/\/$/, '');
@@ -53,6 +55,12 @@ const metadata = (session: Session) => ({
   ...(typeof session.time?.updated === 'number' ? { lastMessageAt: new Date(session.time.updated) } : {}),
 });
 
+const writableCodexSessions = (value: unknown[]) => value.filter((entry) => {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return true;
+  const session = entry as Record<string, unknown>;
+  return session.runtime_type !== 'opencode' && session.frozen !== true && typeof session.frozen_at !== 'number';
+});
+
 /** The maintained remote-thread-list boundary over host-owned Codex threads. */
 export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string): RemoteThreadListAdapter {
   const request = createFesnyngCodexFetch(csrfToken);
@@ -61,7 +69,7 @@ export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string)
     async list() {
       const value: unknown = await read('/session');
       if (!Array.isArray(value)) throw new Error('Codex thread list is invalid.');
-      return { threads: value.map(sessionRecord).map(metadata) };
+      return { threads: writableCodexSessions(value).map(sessionRecord).map(metadata) };
     },
     async fetch(threadId) { return metadata(sessionRecord(await read(`/session/${encodeURIComponent(threadId)}`))); },
     async initialize() {
@@ -79,7 +87,7 @@ export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string)
   };
 }
 
-function useCodexHistory(baseUrl: string, csrfToken: string, sessionId: string | undefined, refreshKey: number, onError: CodexConversationProps['onError'], onHistoryNotice?: (notice: string) => void) {
+function useCodexHistory(baseUrl: string, csrfToken: string, sessionId: string | undefined, refreshKey: number, onError: CodexConversationProps['onError'], readOnly: boolean, onHistoryNotice?: (notice: string) => void) {
   const request = useMemo(() => createFesnyngCodexFetch(csrfToken), [csrfToken]);
   const [data, setData] = useState<CodexHistory>();
   const [loading, setLoading] = useState(Boolean(sessionId));
@@ -105,7 +113,7 @@ function useCodexHistory(baseUrl: string, csrfToken: string, sessionId: string |
   }, [baseUrl, onError, onHistoryNotice, request, sessionId]);
   useEffect(() => { void Promise.resolve().then(reload); }, [reload, refreshKey]);
   useEffect(() => {
-    if (!sessionId || typeof EventSource === 'undefined') return;
+    if (readOnly || !sessionId || typeof EventSource === 'undefined') return;
     const source = new EventSource(`${base(baseUrl)}/event`);
     let connected = false;
     source.addEventListener('open', () => {
@@ -124,16 +132,16 @@ function useCodexHistory(baseUrl: string, csrfToken: string, sessionId: string |
       } catch { /* EventSource reconnect and completed-turn reconciliation recover malformed notices. */ }
     });
     return () => source.close();
-  }, [baseUrl, reload, sessionId]);
+  }, [baseUrl, readOnly, reload, sessionId]);
   return { messages: data ? projectCodexHistory(data) : [], isRunning: Boolean(data?.turns.some((turn) => {
     const status = turn.status && typeof turn.status === 'object' ? (turn.status as Record<string, unknown>).type : turn.status;
     return status === 'inProgress' || status === 'running';
   })), loading, reload };
 }
 
-function useCodexThreadRuntime({ baseUrl, csrfToken, refreshKey, onError, onHistoryNotice }: Pick<CodexConversationProps, 'baseUrl' | 'csrfToken' | 'refreshKey' | 'onError'> & { onHistoryNotice?: (notice: string) => void }) {
+function useCodexThreadRuntime({ baseUrl, csrfToken, refreshKey, onError, readOnly = false, onHistoryNotice }: Pick<CodexConversationProps, 'baseUrl' | 'csrfToken' | 'refreshKey' | 'onError' | 'readOnly'> & { onHistoryNotice?: (notice: string) => void }) {
   const sessionId = useAuiState((state) => state.threadListItem.externalId ?? state.threadListItem.remoteId);
-  const state = useCodexHistory(baseUrl, csrfToken, sessionId, refreshKey ?? 0, onError, onHistoryNotice);
+  const state = useCodexHistory(baseUrl, csrfToken, sessionId, refreshKey ?? 0, onError, readOnly, onHistoryNotice);
   const request = useMemo(() => createFesnyngCodexFetch(csrfToken), [csrfToken]);
   return useExternalStoreRuntime({
     messages: state.messages,
@@ -245,17 +253,25 @@ function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadStarted } = props;
   const [historyNotice, setHistoryNotice] = useState('');
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken), [props.baseUrl, props.csrfToken]);
-  const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, onHistoryNotice: setHistoryNotice }); }, [props.baseUrl, props.csrfToken, props.onError, props.refreshKey]);
+  const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: props.readOnly, onHistoryNotice: setHistoryNotice }); }, [props.baseUrl, props.csrfToken, props.onError, props.readOnly, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
-    if (newThreadRequest === undefined || completed.current === newThreadRequest) return;
+    if (props.readOnly || newThreadRequest === undefined || completed.current === newThreadRequest) return;
     const request = newThreadRequest;
     void runtime.threads.switchToNewThread().then(() => { completed.current = request; onNewThreadStarted?.(request); }).catch((cause: unknown) => onError?.(cause));
-  }, [newThreadRequest, onError, onNewThreadStarted, runtime]);
-  const list = <ThreadList showNew={false} allowDelete={false} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
-  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={{ Composer: ({ autoFocus, allowAttachments }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" />, ToolFallback: NativeEditToolFallback, MessageFooter: ConversationMessageFooter, ThreadFooter: ConversationDeliveryRecovery }} /><CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} /></div></section></AssistantRuntimeProvider>;
+  }, [newThreadRequest, onError, onNewThreadStarted, props.readOnly, runtime]);
+  const list = <ThreadList showNew={false} allowDelete={false} readOnly={props.readOnly} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
+  const components = {
+    ...(props.readOnly ? { Composer: FrozenThreadNotice } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),
+    ToolFallback: NativeEditToolFallback,
+    MessageFooter: ConversationMessageFooter,
+    ThreadFooter: ConversationDeliveryRecovery,
+  };
+  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={props.readOnly} />{!props.readOnly && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
 }
+
+const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;
 
 /** Codex App Server view using maintained assistant-ui thread and list primitives. */
 export function CodexConversation(props: CodexConversationProps) {

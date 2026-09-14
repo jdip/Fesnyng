@@ -110,6 +110,8 @@ async def session_status(request: Request, organization_id: UUID, agent_id: UUID
         mapped = request.app.state.host_store.sessions(org, agent)
         by_directory: dict[str, set[str]] = {}
         for session in mapped:
+            if session.get("frozen_at") is not None:
+                continue
             RuntimeRouter.require_supported(session["runtime_type"])
             by_directory.setdefault(session["directory"], set()).add(session["session_id"])
         statuses: dict[str, object] = {}
@@ -366,7 +368,8 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
     require_binding(request, org)
     with host_errors():
         for session in request.app.state.host_store.sessions(org, agent):
-            RuntimeRouter.require_supported(session["runtime_type"])
+            if session.get("frozen_at") is None:
+                RuntimeRouter.require_supported(session["runtime_type"])
     workspace = _workspace(request)
 
     async def stream():
@@ -388,6 +391,8 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
 
         def attach_new_directories() -> None:
             for session in request.app.state.host_store.sessions(org, agent):
+                if session.get("frozen_at") is not None:
+                    continue
                 try:
                     RuntimeRouter.require_supported(session["runtime_type"])
                 except RuntimeUnavailable:
@@ -421,7 +426,7 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                     # The native stream itself is scoped to this directory.
                     # Forward only an invalidation, never its raw path/payload.
                     for session in request.app.state.host_store.sessions(org, agent):
-                        if session["directory"] == directory:
+                        if session["directory"] == directory and session.get("frozen_at") is None:
                             invalidation = {
                                 "type": "fesnyng.context.updated",
                                 "properties": {"sessionID": session["session_id"]},

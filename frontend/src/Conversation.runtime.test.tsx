@@ -34,6 +34,33 @@ test('mounts the maintained thread before an OpenCode-backed session exists', as
   expect(screen.getByRole('textbox', { name: 'Message input' })).toBeTruthy();
 });
 
+test('keeps frozen OpenCode history readable without native action controls', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'frozen-session', title: 'Frozen history', time: {} }]
+      : url.includes('/session/frozen-session/message') ? [{
+        info: { id: 'assistant-one', role: 'assistant', sessionID: 'frozen-session', time: { created: 1 } },
+        parts: [{ id: 'text-one', sessionID: 'frozen-session', messageID: 'assistant-one', type: 'text', text: 'Historical result.' }],
+      }]
+        : url.includes('/session/frozen-session') ? { id: 'frozen-session', title: 'Frozen history', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="frozen-session" showThreadList={false} readOnly />);
+
+  expect(await screen.findByText('Historical result.')).toBeTruthy();
+  expect(screen.getByText('This thread is permanently frozen and read-only.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
+  expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/question') || String(input).includes('/permission'))).toBe(false);
+});
+
 test('uses the maintained archived thread collection so an archived thread can be restored', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -667,4 +694,22 @@ test('opens same-agent search selections through the maintained runtime without 
   await waitFor(() => expect(screen.getByRole('button', { name: 'Second selection' }).closest('[data-active]')?.getAttribute('data-active')).toBe('true'));
   rerender(<Conversation {...props} sessionId="first" />);
   await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message input' })).toHaveProperty('value', 'Keep first selection draft'));
+});
+
+test('renders a frozen OpenCode history without native mutation controls', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.endsWith('/question')) throw new Error('Frozen history must not request native questions');
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" showThreadList={false} readOnly />);
+
+  expect(await screen.findByText('This thread is permanently frozen and read-only.')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Fork conversation' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
+  expect(fetchMock.mock.calls.some(([input]) => (input instanceof Request ? input.url : input.toString()).endsWith('/question'))).toBe(false);
 });

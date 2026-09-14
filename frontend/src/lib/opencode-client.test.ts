@@ -31,6 +31,23 @@ test('does not invent idempotency for a native read', async () => {
   expect(new Headers(request.headers).get('Idempotency-Key')).toBeNull();
 });
 
+test('hides frozen and Codex-bound roots from the writable OpenCode list', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify([
+    { id: 'active-opencode', runtime_type: 'opencode' },
+    { id: 'old-opencode', runtime_type: 'opencode', frozen_at: 0 },
+    { id: 'old-codex', runtime_type: 'codex', frozen: true },
+    { id: 'legacy-active' },
+  ])));
+  const fetchWithFesnyngAuth = createFesnyngOpenCodeFetch('csrf-example', fetchMock);
+
+  const response = await fetchWithFesnyngAuth('/experimental/session');
+
+  await expect(response.json()).resolves.toEqual([
+    { id: 'active-opencode', runtime_type: 'opencode' },
+    { id: 'legacy-active' },
+  ]);
+});
+
 test('preserves a caller-supplied idempotency key for a durable retry', async () => {
   const fetchMock = vi.fn().mockResolvedValue(new Response('{}'));
   const fetchWithFesnyngAuth = createFesnyngOpenCodeFetch('csrf-example', fetchMock);

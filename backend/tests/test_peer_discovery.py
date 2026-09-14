@@ -36,6 +36,47 @@ def test_codex_peer_history_projects_schema_user_message_content():
     assert history[0]["parts"] == [{"type": "text", "text": "peer requirement"}]
 
 
+def test_peer_can_find_and_read_frozen_history_with_native_harness_stopped(tmp_path):
+    host, config, org, roster = discovery_system(tmp_path)
+    agent = roster[0]["agent_id"]
+    history = [
+        {
+            "info": {"id": "msg_retained", "sessionID": "ses_CEO"},
+            "parts": [{"type": "text", "text": "Retained compiler investigation"}],
+        }
+    ]
+    host.begin_harness_switch(org, agent, 1, "codex")
+    host.commit_freeze(
+        org,
+        agent,
+        {
+            "ses_CEO": {
+                "runtime_type": "opencode",
+                "session": {"id": "ses_CEO"},
+                "history": history,
+                "children": {},
+            }
+        },
+    )
+
+    class Native:
+        async def request(self, *args, **kwargs):
+            raise AssertionError("Frozen peer reads cannot use the stopped harness")
+
+    discovery = PeerDiscovery(host, config, Native())
+
+    async def read():
+        assert await discovery.read_local(org, agent, "ses_CEO") == history
+        result = await discovery.local(
+            org, DiscoveryQuery(agent_id=agent, topic="compiler", active=False)
+        )
+        assert result["unavailable"] == []
+        assert [thread["session_id"] for thread in result["threads"]] == ["ses_CEO"]
+        assert result["threads"][0]["frozen"] is True
+
+    asyncio.run(read())
+
+
 def discovery_system(tmp_path):
     host = HostStore(
         ServiceSettings(

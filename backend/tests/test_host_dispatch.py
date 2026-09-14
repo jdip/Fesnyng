@@ -876,6 +876,77 @@ def test_dispatch_state_transition_detects_a_cancelled_admission(tmp_path):
     assert store.get(org, agent, row["id"])["native_message_id"] is None
 
 
+def test_codex_capture_gate_keeps_dispatch_supervisor_alive(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization_id, agent_id = str(uuid4()), str(uuid4())
+    host.bind_organization(organization_id, "test organization binding with enough characters")
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Codex engineer",
+        configuration={"runtime_type": "codex"},
+    )
+    host.stage_agent(envelope)
+    host.mark_applied(envelope)
+    host.save_session(
+        organization_id,
+        agent_id,
+        "thr_codex",
+        "/workspace/codex",
+        "Codex thread",
+        runtime_type="codex",
+    )
+    store = DispatchStore(host)
+    store.initialize()
+    receipt = store.enqueue(
+        organization_id,
+        agent_id,
+        "thr_codex",
+        Submission(id=uuid4(), text="Must remain queued during capture"),
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+    host.begin_harness_switch(organization_id, agent_id, 1, "opencode")
+
+    class Native:
+        def __init__(self):
+            self.codex = self
+            self._lock = asyncio.Lock()
+
+        def lock(self, agent_id):
+            return self._lock
+
+        async def request(
+            self, organization_id, agent_id, path, *, method="GET", body=None, directory=None
+        ):
+            raise AssertionError("capture gate must reject before native work")
+
+        async def call(self, *_args, **_kwargs):
+            raise AssertionError("capture gate must reject before native work")
+
+    async def check():
+        dispatcher = Dispatcher(store, Native())
+        dispatcher.tasks[receipt["id"]] = asyncio.create_task(
+            dispatcher._submit_codex(
+                receipt, host.session(organization_id, agent_id, "thr_codex"), None
+            )
+        )
+        await asyncio.sleep(0)
+        await dispatcher.step()
+        assert store.get(organization_id, agent_id, receipt["id"])["state"] == "queued"
+        await dispatcher.step()
+
+    asyncio.run(check())
+
+
 def test_stop_waits_for_native_admission_before_acknowledging_abort(tmp_path):
     org, agent, store, _, author = interaction_system(tmp_path)
 

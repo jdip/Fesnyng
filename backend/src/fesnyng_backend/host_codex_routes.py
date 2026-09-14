@@ -108,6 +108,9 @@ def _record(
         time["archived"] = session["archived_at"]
     return {
         "id": session["session_id"],
+        "runtime_type": session["runtime_type"],
+        "frozen": session.get("frozen_at") is not None,
+        "frozen_at": session.get("frozen_at"),
         "title": title,
         "directory": session["directory"],
         "time": time,
@@ -352,6 +355,13 @@ async def get_session(
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
     with host_errors():
+        workspace = _workspace(request)
+        session = await workspace._scoped_session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            if session["runtime_type"] != "codex":
+                raise RuntimeUnavailable("Thread is bound to the OpenCode harness")
+            snapshot = workspace._snapshot(org, agent, session)
+            return _record(session, snapshot["session"])
         adapter, session = _codex(request, org, agent, session_id)
         return _record(session, await _thread(adapter, org, agent, session))
 
@@ -361,6 +371,12 @@ async def history(request: Request, organization_id: UUID, agent_id: UUID, sessi
     org, agent = str(organization_id), str(agent_id)
     require_binding(request, org)
     with host_errors():
+        workspace = _workspace(request)
+        session = await workspace._scoped_session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            if session["runtime_type"] != "codex":
+                raise RuntimeUnavailable("Thread is bound to the OpenCode harness")
+            return workspace._snapshot(org, agent, session)["history"]
         adapter, _session = _codex(request, org, agent, session_id)
         try:
             reply = await adapter.call(
@@ -406,26 +422,28 @@ async def update_session(
     if body.title is not None and body.time is not None:
         raise HTTPException(409, "Codex session updates one native field at a time")
     with host_errors():
-        adapter, _session = _codex(request, org, agent, session_id)
-        if body.title is not None:
-            reply = await adapter.call(
-                org, agent, "thread/name/set", {"threadId": session_id, "name": body.title}
+        async with request.app.state.host_runtime.lock(agent):
+            request.app.state.host_store.require_writable(org, agent, session_id)
+            adapter, _session = _codex(request, org, agent, session_id)
+            if body.title is not None:
+                reply = await adapter.call(
+                    org, agent, "thread/name/set", {"threadId": session_id, "name": body.title}
+                )
+                if not isinstance(reply, Mapping):
+                    raise RuntimeUnavailable("Codex thread rename receipt is invalid")
+                request.app.state.host_store.rename_session(org, agent, session_id, body.title)
+            else:
+                assert body.time is not None
+                archived_at = body.time.archived
+                method = "thread/archive" if archived_at is not None else "thread/unarchive"
+                reply = await adapter.call(org, agent, method, {"threadId": session_id})
+                if not isinstance(reply, Mapping):
+                    raise RuntimeUnavailable("Codex thread archive receipt is invalid")
+                request.app.state.host_store.archive_session(org, agent, session_id, archived_at)
+            return _record(
+                request.app.state.host_store.session(org, agent, session_id),
+                {"title": body.title} if body.title is not None else None,
             )
-            if not isinstance(reply, Mapping):
-                raise RuntimeUnavailable("Codex thread rename receipt is invalid")
-            request.app.state.host_store.rename_session(org, agent, session_id, body.title)
-        else:
-            assert body.time is not None
-            archived_at = body.time.archived
-            method = "thread/archive" if archived_at is not None else "thread/unarchive"
-            reply = await adapter.call(org, agent, method, {"threadId": session_id})
-            if not isinstance(reply, Mapping):
-                raise RuntimeUnavailable("Codex thread archive receipt is invalid")
-            request.app.state.host_store.archive_session(org, agent, session_id, archived_at)
-        return _record(
-            request.app.state.host_store.session(org, agent, session_id),
-            {"title": body.title} if body.title is not None else None,
-        )
 
 
 @router.delete("/agents/{agent_id}/codex/session/{session_id}", status_code=204)
@@ -520,7 +538,7 @@ async def pending(
         )
         result: list[dict[str, Any]] = []
         for session in sessions:
-            if session["runtime_type"] != "codex":
+            if session["runtime_type"] != "codex" or session.get("frozen_at") is not None:
                 continue
             adapter, _ = _codex(request, org, agent, session["session_id"])
             entries = await adapter.pending(org, agent, session["session_id"])
@@ -568,7 +586,7 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                 session = request.app.state.host_store.session(org, agent, thread_id)
             except LookupError:
                 continue
-            if session["runtime_type"] != "codex":
+            if session["runtime_type"] != "codex" or session.get("frozen_at") is not None:
                 continue
             yield f"event: message\ndata: {json.dumps(notification, separators=(',', ':'))}\n\n"
 

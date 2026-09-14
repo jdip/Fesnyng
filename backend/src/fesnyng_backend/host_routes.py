@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 
 from fesnyng_backend.agent_lifecycle import HostLifecycleRequest
-from fesnyng_backend.host_models import HostAgentConfiguration, SessionCreate
+from fesnyng_backend.host_models import HarnessSwitch, HostAgentConfiguration, SessionCreate
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["host"])
@@ -67,6 +67,18 @@ async def apply_agent(
         return await request.app.state.host_configuration.apply(body)
 
 
+@router.post("/agents/{agent_id}/harness-switch")
+async def switch_harness(
+    request: Request, organization_id: UUID, agent_id: UUID, body: HarnessSwitch
+):
+    org, aid = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        return await request.app.state.host_configuration.switch_harness(
+            org, aid, body.expected_version, body.target_runtime_type
+        )
+
+
 @router.post("/agents/{agent_id}/replace")
 async def replace_agent(request: Request, organization_id: UUID, agent_id: UUID):
     org, aid = str(organization_id), str(agent_id)
@@ -109,6 +121,12 @@ async def messages(request: Request, organization_id: UUID, agent_id: UUID, sess
     require_binding(request, org)
     with host_errors():
         session = request.app.state.host_store.session(org, aid, session_id)
-        return await request.app.state.host_runtime.request(
-            org, aid, f"/session/{session['session_id']}/message", directory=session["directory"]
-        )
+        # Keep the original generic read URL on the same scoped history owner
+        # as each harness facade, including host-owned frozen snapshots.
+        if session["runtime_type"] == "codex":
+            from fesnyng_backend.host_codex_routes import history
+
+            return await history(request, organization_id, agent_id, session_id)
+        from fesnyng_backend.host_workspace_routes import messages as opencode_messages
+
+        return await opencode_messages(request, organization_id, agent_id, session_id)

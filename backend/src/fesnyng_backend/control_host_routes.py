@@ -10,7 +10,7 @@ from fesnyng_backend import auth
 from fesnyng_backend.agent_lifecycle import HostLifecycleRequest, LifecycleRequest
 from fesnyng_backend.agent_storage import AgentStore
 from fesnyng_backend.host_client import HostClient, HostRejected, HostUnavailable
-from fesnyng_backend.host_models import SessionCreate
+from fesnyng_backend.host_models import NativeID, SessionCreate
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["runtime"])
 
@@ -99,12 +99,9 @@ async def create_session(
 
 
 @router.get("/agents/{agent_id}/sessions/{session_id}/messages")
-async def messages(request: Request, organization_id: UUID, agent_id: UUID, session_id: str):
+async def messages(request: Request, organization_id: UUID, agent_id: UUID, session_id: NativeID):
     org, aid = str(organization_id), str(agent_id)
     auth.require_member(request, org)
-    # Native IDs are opaque but must never become path traversal or query syntax.
-    if not session_id.replace("_", "").isalnum():
-        raise HTTPException(404, "Thread not found")
     client = host_client(request)
     with host_errors():
         agent = client.agents.get_agent(org, aid)
