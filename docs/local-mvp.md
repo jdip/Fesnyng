@@ -219,6 +219,51 @@ the selected authorized conversation.
 
 ## Persistence, stop, and restart
 
+### End a temporary preview
+
+Before starting a preview, record its owning task, purpose, Docker context,
+service terminals/ports, private state directory and explicitly selected agent
+IDs in the existing task notes. Record whether it is temporary or deliberately
+kept live, and use the stop/restart procedure below. Retaining state or an attached
+checkout does not mean retaining running services. A live preview needs an
+explicit owner and reason; account for the frontend, control plane, both host APIs
+and selected containers together. A lone healthy API is not a usable preview.
+
+At the end of a temporary preview, including a failed verification:
+
+1. Capture the failure and exact resource identities in private task evidence.
+   Inspect pending work and uncertain effects before stopping a selected agent.
+   Use **Agent settings → Agent lifecycle → Stop** while its host is available;
+   satisfy the normal active-work confirmation. This preserves the stopped intent
+   across host restart. Do this only for agents explicitly owned by this preview;
+   shared and durable product agents keep their separately chosen lifecycle.
+2. Stop the frontend, control plane and each preview-owned host API with
+   `Control-C` in their original terminals. Verify each process exits and each
+   recorded listener is gone. Preserve unrelated services even if they use the
+   same executable. If the original terminal is unavailable, establish the exact
+   process and ownership before sending a graceful termination signal; do not
+   kill by executable name or assume an exited launcher stopped its child.
+3. Verify the selected containers are stopped in the recorded Docker context.
+   Inspect their `fesnyng.host`, `fesnyng.organization` and `fesnyng.agent`
+   labels against the recorded identities. When the host/API is unavailable,
+   after stopping the preview-owned host process, `docker --context "$PREVIEW_CONTEXT"
+   stop "$PREVIEW_CONTAINER_ID"` is an exact-container fallback. Record that this
+   stops compute without recording the product's stopped intent; the host may
+   restart it when service resumes. Never substitute a blanket Docker shutdown.
+4. Keep SQLite databases, binding files, credentials, home/workspace volumes,
+   checkpoint images and needed diagnostics. Report any failed stop or uncertain
+   ownership explicitly; a failed cleanup is not a completed teardown.
+
+To restart, use the same service commands, ports, Docker context and state
+directories from this guide. Verify all three `/health` instance IDs match the
+recorded identities, and that the frontend is reachable. Use **Agent lifecycle →
+Start** for the selected agents stopped through the UI. Verify the original
+threads and workspace data remain accessible; preserve any **Recovery required**
+gate and resolve uncertain outcomes through the existing investigation workflow.
+Do not replay work or rebuild containers just to make the preview appear ready.
+
+### Durable product agents
+
 Stop the Vite server, control plane, and each host with `Control-C`. This does
 not delete any SQLite state, containers, images, or agent volumes. The agent
 containers have Docker’s `unless-stopped` restart policy, so stopping a Python
