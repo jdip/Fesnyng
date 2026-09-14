@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ThreadNotificationsProvider, useThreadNotifications, type Delivery } from './ThreadNotifications';
+import { ThreadNotificationBadge } from './ThreadNotificationBadge';
 import type { Agent } from './workspace-api';
 
 const agent = { id: 'agent', name: 'Reviewer' } as Agent;
@@ -38,6 +39,32 @@ function response(body: unknown, status = 200) {
 }
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+test.each([
+  { unread: true, attention: true, label: 'Needs attention' },
+  { unread: false, attention: true, label: 'Needs attention' },
+  { unread: true, attention: false, label: 'Unread result' },
+  { unread: false, attention: false, label: null },
+])('shows one prioritized agent and thread indicator for $unread unread / $attention attention', async ({ unread, attention, label }) => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.endsWith('/thread-acknowledgements')) return response({ acknowledgements: [] });
+    if (url.endsWith('/opencode/question')) return response(attention ? [{ id: 'question', sessionID: 'thread' }] : []);
+    if (url.endsWith('/opencode/permission')) return response([]);
+    if (url.endsWith('/sessions')) return response([{ session_id: 'thread' }]);
+    return response(unread ? [completed()] : []);
+  }));
+  render(<ThreadNotificationsProvider organization="org" agents={[agent]} csrf="csrf-example" selectedAgent="agent">
+    <Probe />
+    <section aria-label="Agent status"><ThreadNotificationBadge agent="agent" /></section>
+    <section aria-label="Thread status"><ThreadNotificationBadge session="thread" /></section>
+  </ThreadNotificationsProvider>);
+  await waitFor(() => expect(screen.getByTestId('status').textContent).toBe(JSON.stringify({ unread, attention })));
+  for (const name of ['Agent status', 'Thread status']) {
+    const status = within(screen.getByRole('region', { name }));
+    expect(status.queryAllByRole('img')).toHaveLength(label ? 1 : 0);
+    if (label) expect(status.getByRole('img', { name: label })).toBeTruthy();
+  }
+});
 
 test('shows a completed result until the user personally reads its exact receipt', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {

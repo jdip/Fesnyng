@@ -111,7 +111,7 @@ export const ThreadListItems: FC<{ pageSize?: number }> = ({ pageSize = 6 }) => 
   return <div data-slot="aui_thread-list-items" className="flex flex-col gap-0.5">
     <AuiIf condition={(state) => state.threads.isLoading && state.threads.threadIds.length === 0}><ThreadListSkeleton /></AuiIf>
     {visible.map(({ id, index }) => <ThreadListPrimitive.ItemByIndex key={id} index={index} components={{ ThreadListItem }} />)}
-    {visible.length < threadIds.length && <Button variant="ghost" aria-label="Show more threads" onClick={() => setVisibleCount((count) => count + pageSize)}>Show more</Button>}
+    {visible.length < threadIds.length && <Button variant="ghost" data-slot="aui_thread-list-show-more" className="h-7 justify-start px-2.5 font-normal text-muted-foreground" aria-label="Show more threads" onClick={() => setVisibleCount((count) => count + pageSize)}>Show more</Button>}
   </div>;
 };
 
@@ -213,7 +213,6 @@ export const ThreadListItem: FC = () => {
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
         >
           {pinned && <PinIcon role="img" aria-label="Pinned" className="me-1.5 size-3.5 shrink-0" />}
-          {session && <ThreadNotificationBadge session={session} />}
           {isRunning && (
             <Loader2Icon
               aria-hidden
@@ -228,6 +227,7 @@ export const ThreadListItem: FC = () => {
             <span className="block truncate"><ThreadListItemPrimitive.Title fallback="New Chat" /></span>
             {session && workspace && <ThreadRepositorySubtitle id={subtitleId} session={session} {...workspace} />}
           </span>
+          {session && <ThreadNotificationBadge session={session} />}
           {isRunning && <span className="sr-only">Running</span>}
         </ThreadListItemPrimitive.Trigger>
       )}
