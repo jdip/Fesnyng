@@ -227,8 +227,9 @@ class HostStore:
             ):
                 raise ValueError("Configuration changed during runtime application")
             changed = connection.execute(
-                "UPDATE host_agents SET applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=?",
+                "UPDATE host_agents SET desired_envelope=?,applied_envelope=?,runtime_state='running',lifecycle_state=CASE WHEN desired_state='running' AND lifecycle_state NOT IN ('transitioning','recovering') THEN 'running' ELSE lifecycle_state END,error=NULL WHERE agent_id=? AND organization_id=?",
                 (
+                    envelope.model_dump_json(),
                     envelope.model_dump_json(),
                     str(envelope.agent_id),
                     str(envelope.organization_id),
