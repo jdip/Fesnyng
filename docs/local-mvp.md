@@ -2,7 +2,8 @@
 
 This guide starts one control plane, two independent agent-host APIs, and the
 browser workspace on one macOS machine. Each applied agent receives one
-Docker-managed OpenCode container. It is the local installation and recovery
+Docker-managed container running its selected OpenCode or Codex App Server
+harness. It is the local installation and recovery
 guide for the MVP. [Issue #18](https://github.com/jdip/Fesnyng/issues/18) records
 the retained full-system acceptance and delivery evidence.
 
@@ -77,7 +78,7 @@ FESNYNG_CONTROL_PLANE_STATE_DIRECTORY="$STATE_ROOT/control-plane" \
   --login owner --name 'Local Owner'
 ```
 
-Build the pinned OpenCode runtime image once from the repository root:
+Build the pinned dual-harness runtime image once from the repository root:
 
 ```bash
 docker build -t fesnyng-agent:local agent-runtime
@@ -200,7 +201,8 @@ The same OpenAI account may be used on both hosts, but each host keeps its own
 OAuth login and refresh state; no credentials are synchronized between hosts.
 
 Create an agent from the agent `+` control, select one registered home host and
-the credential profile, then choose a logical workspace name, model,
+the credential profile, then choose the **OpenCode** (default) or **Codex**
+harness, a logical workspace name, model,
 instructions, and skills. **Save and apply** writes the desired configuration,
 asks the assigned host to apply it, and sends the current collaboration roster.
 An agent is ready only after its settings report `applied`; a busy host can
@@ -211,7 +213,7 @@ relationships.
 
 Open an applied agent’s **Threads** page to start a conversation. The browser
 uses an authenticated control-plane facade; it does not connect to the native
-OpenCode port or agent-host credential API directly. The selected organization,
+OpenCode or Codex port or agent-host credential API directly. The selected organization,
 agent, and thread stay in the browser URL fragment, so a reload can reattach to
 the selected authorized conversation.
 
@@ -268,6 +270,44 @@ Rebuild is the explicit recovery path for a missing container. Inspect any
 Reconcile actions; an uncertain external effect still needs a human finding.
 Keep new submissions gated until that outcome is resolved.
 
+## Harness switching and historical threads
+
+The harness selected at employee creation applies only to new threads. An
+existing employee may change between OpenCode and Codex only through the
+**Harness** control in Agent settings. This is not a normal configuration save:
+it first requires the agent to be running and stable, with its native work
+quiet and delivery effects settled. Fesnyng does not cancel queued work to make
+the switch possible. Resolve or cancel that work through its normal delivery
+workflow, then retry the switch.
+
+On a successful switch request, the assigned host captures a complete,
+host-owned snapshot of every old root and permanently freezes those threads.
+The control plane then records the target selection as pending. Use **Apply
+selected harness** after the target selection is recorded. If the browser lost
+the acknowledgement, the host says `capturing`, or its `frozen` target does not
+match the current selected harness, use **Retry harness switch** instead; it
+safely resumes the same selection. When the selected harness already matches a
+`frozen` target, use **Apply selected harness**. Do not start a target-harness
+thread until Agent settings reports the configuration as `applied`.
+
+Frozen roots remain in the workspace's **Frozen history** list under their
+original OpenCode or Codex renderer. Their messages, tools, diffs, attribution,
+resolution evidence, and personal read receipts stay available. All native and
+history mutation paths return a read-only conflict for them; personal read
+acknowledgements remain writable metadata. The old container and
+native server may be stopped after capture, but the original agent host stores
+the snapshot and must be online to serve it. Preserve that host state and its
+snapshots during recovery; a missing or offline host is not a reason to
+recreate a thread or replay work.
+
+For Codex, only the pinned App Server policy equivalent is accepted: default
+permission `allow`, no mandatory permission rules, and no per-thread override.
+Attempting another mandatory/default policy leaves configuration pending with a
+visible error. Do not relax organization policy to make it apply. Both harnesses
+obtain short-lived access from the assigned host's credential broker; device
+login and refresh credentials remain on that host and are never copied into a
+container or browser.
+
 The separate checkpoint replacement operation remains available through the
 organization-bound host API. It waits for native sessions to be quiet and for
 delivery effects to be reconciled, checkpoints the container image, retains the
@@ -323,15 +363,24 @@ preserves the draft so it can be corrected or retried.
 ## Local proof boundaries
 
 This guide establishes the local topology only. Use `scripts/check.sh` for the
-repository’s complete static and behavior gate. The opt-in real-Docker test is:
+repository’s complete static and behavior gate. The opt-in real-Docker tests are:
 
 ```bash
 FESNYNG_DOCKER_TESTS=true uv run --locked --project backend \
   pytest backend/tests/test_docker_integration.py -q
+
+FESNYNG_CODEX_DOCKER_TESTS=true uv run --locked --project backend \
+  pytest backend/tests/test_codex_docker_integration.py \
+  backend/tests/test_harness_switch_docker.py -q
 ```
 
-That test creates isolated resources and retains failed resources for diagnosis.
-It does not establish an authenticated provider request. The retained MVP proof
+These tests create isolated resources and retain failed resources for diagnosis.
+They do not establish an authenticated provider request. The retained MVP proof
 also requires live browser, device-login, Docker, host-restart, direct-peer, and
 provider evidence under [issue #18](https://github.com/jdip/Fesnyng/issues/18).
+The harness proof under [issue #89](https://github.com/jdip/Fesnyng/issues/89)
+includes a real browser/Docker switch in both directions and rendered native
+responses. Credential rejection and refresh in that acceptance remain
+deterministic host-broker simulation; do not represent them as a live provider
+refresh proof.
 Use that record to distinguish verified behavior from remaining limitations.

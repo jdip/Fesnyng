@@ -2,7 +2,7 @@
 
 Fesnyng has separate Python/FastAPI control-plane and agent-host services in `backend/`, and a React/TypeScript/Vite application in `frontend/`. The Python package shares contracts while each service owns its SQLite database and schema. Product code and contracts are **Application Code**; setup and delivery scripts are **Tooling**.
 
-The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace is described in [frontend/README.md](../frontend/README.md). Use the [local retained-MVP guide](local-mvp.md) for one control plane, two local hosts, Docker, login, persistence, and recovery. Retained full-system verification is recorded in [issue #18](https://github.com/jdip/Fesnyng/issues/18), the final child of the [approved MVP specification](https://github.com/jdip/Fesnyng/issues/10).
+The current API supports service health, durable identity, human authentication, organizations, memberships, agent configuration, independent Docker hosts and host-local shared OAuth. Each employee selects OpenCode or Codex App Server; switching safely freezes prior native threads into host-owned readable history. Hosts implement durable thread delivery, native interactions, permission reconciliation, explicit memory, and direct peer discovery/collaboration with cached routing. The assistant-ui conversation workspace is described in [frontend/README.md](../frontend/README.md). Use the [local retained-MVP guide](local-mvp.md) for one control plane, two local hosts, Docker, login, persistence, and recovery. Initial full-system verification is recorded in [issue #18](https://github.com/jdip/Fesnyng/issues/18); dual-harness acceptance is recorded in [issue #89](https://github.com/jdip/Fesnyng/issues/89) under the [approved harness specification](https://github.com/jdip/Fesnyng/issues/83).
 
 ## Install and check
 
@@ -16,6 +16,29 @@ scripts/check.sh
 Setup consumes the locked manifests. The canonical check includes setup, Python lint/format/type/behavior checks, frontend lint/behavior/type/build checks, native auth plugin lint/type/behavior checks, Bash syntax, executable script modes, whitespace and the `CLAUDE.md -> AGENTS.md` bridge. Run focused component checks during implementation; use the canonical gate before delivery. Product tests exercise public behavior with temporary isolated state. Tooling is verified through successful real use, without a tooling coverage suite.
 
 After building the agent image, run `FESNYNG_DOCKER_TESTS=true uv run --locked --project backend pytest backend/tests/test_docker_integration.py -q` to verify native configuration, managed skill removal and container-replacement persistence against real Docker. This opt-in check creates isolated containers and volumes, removes its own successfully verified resources, and retains failed resources for diagnosis. Real provider login and shared-credential verification use private installation state and are separate from credential-free tests.
+
+### Dual-harness verification
+
+Build the pinned image with the instructions in [agent-runtime/README.md](../agent-runtime/README.md), then exercise the native Codex transport and both switch directions:
+
+```bash
+FESNYNG_CODEX_DOCKER_TESTS=true \
+  uv run --locked --project backend pytest \
+  backend/tests/test_codex_docker_integration.py \
+  backend/tests/test_harness_switch_docker.py -q -s
+```
+
+These tests default to `fesnyng-agent:local`; set `FESNYNG_CODEX_TEST_IMAGE` to an already built image to isolate this proof from another installation. They use no provider credentials. The switching proof creates fresh native threads, retains a workspace file across replacements, verifies snapshot reads with the original runtime replaced, and rejects old-thread writes after switching back. Successful runs remove their own containers, volumes and state. On failure, inspect the reported exact resources and retain diagnostic state; follow the repository cleanup rules before stopping or removing anything shared.
+
+Keep these evidence types separate when recording acceptance:
+
+| Evidence | What it establishes |
+| --- | --- |
+| Canonical behavioral tests | Organization and account isolation, serialized refresh including rejection before expiry, scoped native approvals/questions, cancellation, peer receipts, admission races, capture rollback and restart recovery through deterministic native/provider doubles. |
+| Credential-free Docker tests | Real pinned harness startup, native session/history protocols, both-direction replacement and storage preservation. They do not establish authenticated model execution or a live OAuth refresh. |
+| Authenticated browser proof | Real model replies, streamed native tools/file diffs, memory access, reconnect, frozen history rendering and original URLs after switching. Use a private host profile and record only sanitized outcomes. |
+
+The delivered proof in issue #89 distinguishes real OpenCode/Codex replies and native tool execution from simulated refresh, failure and cross-account cases. Do not describe a simulated rejection or refresh race as a live provider event. Stop verification once the relevant gates and acceptance evidence pass; later source changes require checks and review of the affected behavior.
 
 ## Run locally
 

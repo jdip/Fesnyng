@@ -63,11 +63,42 @@ Agent configuration also identifies the harness with `runtime_type`, defaulting 
 `opencode` when omitted. Existing configurations and thread IDs remain valid.
 Each host thread retains its original runtime binding; saving thread metadata must
 not reassign that binding or its organization/agent ownership. New employees may
-select `codex` to use the pinned Codex App Server. Existing employees remain on
-their applied harness until the safe-switching operation is delivered; an
-ordinary configuration update cannot bypass that boundary. Unsupported native
+select `codex` to use the pinned Codex App Server. An ordinary configuration
+update cannot change an existing employee's harness. Unsupported native
 operations fail visibly. Both integrations follow the approved
 [harness integration specification](https://github.com/jdip/Fesnyng/issues/83).
+
+### Switch an existing employee's harness
+
+An owner or admin starts the only supported change with
+`POST /organizations/{organization}/agents/{agent}/harness-switch` and
+`{ "expected_version": N, "target_runtime_type": "opencode" | "codex" }`.
+The source configuration must be the exact applied version. The host first closes
+admission and requires queued, active, uncertain, interaction, and peer delivery
+effects to settle or be explicitly resolved. It then captures complete verified
+history and provenance for every mapped root and descendant before one atomic,
+permanent freeze. A failed capture leaves the source harness selected and
+writable; a committed freeze is never undone.
+
+Only after the host returns its frozen receipt does the control plane select the
+target configuration. The response reports `switch_state: "pending_apply"`;
+apply the selected configuration to create a replacement runtime. A lost response
+or restart keeps the durable switch intent. Retry the switch endpoint only while
+the control-plane source remains selected; after it reports `pending_apply`,
+apply the selected target. The host's
+`GET /organizations/{organization}/agents/{agent}` runtime status exposes
+`capturing` or `frozen` state and the target harness until application succeeds.
+Configuration application rebuilds the container while preserving the employee's
+owned `/home/agent` and `/workspace` volumes, then clears the switch state only
+after the target is actually applied.
+
+Frozen records remain in the complete session inventory with immutable
+`runtime_type` and `frozen_at`; harness façade records also project
+`frozen: true`. The original `/opencode` or `/codex` read routes serve their
+host-owned snapshots without contacting the old native server. All native
+mutations against a frozen thread return a read-only conflict. Snapshot history
+includes verified child ancestry and item/turn provenance, so a switch does not
+reinterpret a thread through the replacement harness.
 
 The authorized `opencode/session/{id}/context` read exposes display-safe repository
 and branch metadata for the mapped thread workspace. Git changes compare tracked
@@ -142,6 +173,12 @@ all agents sharing that host profile; stale rejection requests use the newer
 credential. Refresh tokens remain with the host, and uncertain refresh outcomes
 require reconciliation instead of falling back to a rejected access token.
 
+The broker verifies the assigned profile and account scope for every credential
+response. A container receives only a short-lived access token and account
+metadata; it cannot perform device login, refresh, or move a profile to another
+host. A profile can be shared by agents on its host, but a different host requires
+its own login and refresh state.
+
 ## Container state and replacement
 
 Applied agents use labeled Docker volumes for `/home/agent` and `/workspace`; native server ports are published only on loopback. The host writes the agent's configuration, skill files, and broker configuration with a private umask. Codex uses an authenticated App Server connection for native requests and events. Docker receives no socket mount from this runtime.
@@ -182,6 +219,14 @@ Read `questions` and `permissions` beneath a thread, and reply to a native reque
 
 Thread `policy` reads expose desired and applied revisions. Writes include `expected_revision` and complete override `rules`. Organization policy controls whether overrides are allowed; mandatory organization rules remain the final authority. Changed permissions interrupt native work when necessary and clear remembered grants before verification. Pinned OpenCode does not consistently inherit restrictions in new and reused native child sessions. Restricted threads therefore block native task delegation, subtask commands, and executable command-template substitutions; broad-default threads retain native delegation. These guards cover the pinned runtime’s [child-policy inheritance](https://github.com/anomalyco/opencode/blob/3104c1428ec91f809e5ab86631300de41eb6952e/packages/opencode/src/agent/subagent-permissions.ts) and [command expansion](https://github.com/anomalyco/opencode/blob/3104c1428ec91f809e5ab86631300de41eb6952e/packages/opencode/src/session/prompt.ts), which run outside the complete parent-session policy. Other agent configuration waits for native work and uncertain effects to settle. Pending changes are retried by the autonomous host.
 
+Codex applies only the policy App Server can prove: `default_permission: "allow"`
+with no mandatory permissions and no thread overrides. A Codex target with an
+unrepresentable policy is rejected before any source thread freezes. Codex uses
+native `turn/start`, `turn/steer`, and `turn/interrupt` receipts. Fesnyng records
+the durable delivery UUID as the native client message correlation value, but an
+ambiguous native submission is still unresolved and is never automatically
+replayed.
+
 Explicit agent `memory` is stored separately from native conversation history. List entries or read a key beneath `/organizations/{organization}/agents/{agent}/memory`; PUT an entry with `key`, `content`, and `expected_revision` (zero creates). Stale edits return 409. Entries retain revision, author, and update time. Agent containers use the maintained MCP SDK's authenticated memory tools; the host derives their agent identity from the host-issued credential.
 
 After a restart, the host reconciles native receipts without resending uncertain prompts, commands, or replies. An unresolved delivery can be explicitly resolved through its `/resolve` endpoint with an `operation_id`, `outcome` (`completed` or `failed`), and inspected `evidence`. This records an attributed resolution, preserves the native receipt, and never replays the payload. Resolution requires native work to be quiet and its tool states settled.
@@ -190,9 +235,27 @@ Each host database has one live API-process owner. Startup marks abandoned login
 
 ## Assistant workspace façade
 
-The browser-facing control plane proxies a finite OpenCode-compatible workspace surface to the assigned host at `/organizations/{organization}/agents/{agent}/opencode`. The host, rather than the browser, owns the allowlist, mapped-session scope, and native runtime credentials. Control-plane reads require organization membership; mutations also require the browser CSRF token and forward a binding-authenticated `X-Fesnyng-Actor` provenance header plus an `Idempotency-Key` where a durable prompt, abort, or interaction reply needs one. Browsers never receive host bindings or native credentials.
+The browser-facing control plane proxies finite harness façades to the assigned
+host at `/organizations/{organization}/agents/{agent}/opencode` and `/codex`.
+The host, rather than the browser, owns the allowlist, mapped-session scope, and
+native runtime credentials. Control-plane reads require organization membership;
+mutations also require the browser CSRF token and forward a binding-authenticated
+`X-Fesnyng-Actor` provenance header plus an `Idempotency-Key` where a durable
+prompt, abort, or interaction reply needs one. Browsers never receive host
+bindings or native credentials.
 
-This façade exposes mapped session list/create/read/update/delete, native message history, durable `prompt_async` and abort receipts, bounded question and permission replies, provider/config display, and an authorized event stream. OpenCode continues to own native conversation history and execution. Fesnyng's `HostStore` owns archive state only for navigation among its mapped threads: the pinned OpenCode version accepts a null archive timestamp without clearing its native archive record, so scoped list, session, and event responses project the host's archive metadata. Archive state has no execution or history effect.
+The OpenCode façade exposes mapped session list/create/read/update/delete, native
+message history, durable `prompt_async` and abort receipts, bounded question and
+permission replies, provider/config display, and an authorized event stream.
+The Codex façade preserves its native thread, turn, and item representation for
+mapped session reads, history, prompts, aborts, pending replies, configured
+explicit skills, and events; unavailable native parity is reported rather than
+synthesized. OpenCode continues to own native conversation history and
+execution. Fesnyng's `HostStore` owns archive state only for navigation among
+its mapped threads: the pinned OpenCode version accepts a null archive timestamp
+without clearing its native archive record, so scoped list, session, and event
+responses project the host's archive metadata. Archive state has no execution or
+history effect.
 
 `GET /file` and `GET /file/content` require a mapped `sessionID` and a relative path. The host resolves that path inside the mapped workspace and rejects absolute, traversal, symlink, and cross-workspace escapes. A fork makes a controlled workspace copy, asks native OpenCode to fork the source history, then uses pinned OpenCode's [`move-session`](https://github.com/anomalyco/opencode/blob/3104c1428ec91f809e5ab86631300de41eb6952e/packages/opencode/src/server/routes/instance/httpapi/groups/control-plane.ts) endpoint to move only that fresh child into the copy with `moveChanges: false`. The host verifies the child's destination, metadata, and history before mapping it; it never rewrites native history. Forked workspaces are distinct thread directories sharing the agent container’s filesystem permissions. Host-managed instructions direct continuations to use the current native working directory rather than historical absolute paths; the Docker isolation boundary is the agent. Save and apply an agent configuration after a host upgrade to refresh its managed continuation guidance. Copies with a `.git` file or any symlink are rejected because they could alias another checkout. If copy, fork, or move cannot be verified, both the copied workspace and native child are retained for inspection instead of being replayed. The façade does not provide a general filesystem or native HTTP proxy.
 
@@ -206,4 +269,32 @@ Hosts cache the applied roster, reporting relationships and authenticated direct
 
 Contribution and delegation require a stable delivery UUID and an owned `source_session`. OpenCode's remote MCP requests do not carry native thread identity, so this field is validated agent-supplied attribution. Agents can discover their own thread IDs. Contributions address an existing receiving thread; delegation reserves a new native thread. Identical retries retain the original receipt and receiving thread; conflicting content is rejected. Native session metadata correlates interrupted creation, and ambiguous creation remains unresolved instead of creating another thread.
 
-Peer acceptance and native completion are distinct. Hosts retain queued work during receiver outages and retry through direct connections. Completed or failed work returns a linked result to the initiating thread; result messages do not trigger recursive result notifications. Configured peer traffic and recovery continue while the control plane or browser is unavailable. Inspect uncertain receipts and native effects before repeating work.
+Peer acceptance and native completion are distinct. Hosts retain queued work during receiver outages and retry through direct connections. Completed or failed work returns a linked result to the initiating thread; result messages do not trigger recursive result notifications. Configured peer traffic and recovery continue while the control plane or browser is unavailable. Inspect uncertain receipts and native effects before repeating work. An exact retry of a previously accepted inbound peer delivery can return its durable receipt after the receiver thread freezes; it does not create or replay native work. New or nonterminal peer recovery remains blocked by the switch gate.
+
+## Native Docker verification
+
+Build the pinned image, then opt into the real OpenCode boundary check from the
+repository root:
+
+```bash
+docker build -t fesnyng-agent:local agent-runtime
+FESNYNG_DOCKER_TESTS=true uv run --locked --project backend \
+  pytest backend/tests/test_docker_integration.py -q -s
+```
+
+This creates an isolated temporary host, container, labeled volumes, and state;
+it removes them only after its native configuration, replacement, and scoped-file
+checks pass. A failure retains diagnostic state rather than guessing cleanup.
+The credential-free Codex dispatch/reconnect and both-direction harness-switch
+checks use the pinned image explicitly:
+
+```bash
+FESNYNG_CODEX_DOCKER_TESTS=true FESNYNG_CODEX_TEST_IMAGE=fesnyng-agent:local \
+  uv run --locked --project backend pytest \
+  backend/tests/test_codex_docker_integration.py \
+  backend/tests/test_harness_switch_docker.py -q -s
+```
+
+These checks prove native protocol and retained-volume behavior without an
+authenticated provider response. A real ChatGPT account request still requires a
+host-local profile login and its separate operator evidence.
