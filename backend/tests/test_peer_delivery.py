@@ -1,4 +1,5 @@
 import asyncio
+import json
 import secrets
 import sqlite3
 from uuid import uuid4
@@ -7,6 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_dispatch import DispatchStore
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
@@ -221,6 +223,122 @@ class Waker:
 
     def wake(self):
         self.woken = True
+
+
+class CodexPeer:
+    async def call(self, org, agent, method, params):
+        if method != "thread/turns/list":
+            raise AssertionError((method, params))
+        return {
+            "data": [
+                {
+                    "id": "turn_peer",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "Codex peer answer"}],
+                }
+            ],
+            "nextCursor": None,
+        }
+
+
+class CodexPeerRouter:
+    def __init__(self, codex):
+        self.codex = codex
+
+    def for_session(self, session):
+        assert session["runtime_type"] == "codex"
+        return self.codex
+
+
+class MixedPeerRuntime(Native):
+    def __init__(self, host):
+        super().__init__()
+        self.host = host
+        self.codex = CodexPeer()
+        self.runtime_router = CodexPeerRouter(self.codex)
+
+    async def create_session(
+        self, organization_id, agent_id, title, workspace, *, directory=None, metadata=None
+    ):
+        org, agent = organization_id, agent_id
+        self.created.append((agent, directory, metadata))
+        self.host.save_session(org, agent, "thr_peer", directory, title, runtime_type="codex")
+        return {"id": "thr_peer", "directory": directory, "title": title}
+
+
+def test_opencode_source_to_codex_peer_reserves_directory_and_returns_native_turn_text(tmp_path):
+    org = str(uuid4())
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "host.sqlite3",
+        )
+    )
+    host.initialize()
+    host.bind_organization(org, secrets.token_urlsafe(32))
+    source, target = uuid4(), uuid4()
+    for agent, name, runtime_type in ((source, "Source", "opencode"), (target, "Target", "codex")):
+        envelope = HostAgentConfiguration(
+            host_id=host.instance_id,
+            organization_id=org,
+            agent_id=agent,
+            version=1,
+            name=name,
+            configuration=AgentConfiguration(runtime_type=runtime_type),
+        )
+        host.stage_agent(envelope)
+        host.mark_applied(envelope)
+    host.save_session(org, str(source), "ses_source", "/workspace/default/source", "Source")
+    configuration = PeerConfigurationStore(host)
+    configuration.initialize()
+    configuration.apply(
+        PeerConfiguration(
+            organization_id=org,
+            host_id=host.instance_id,
+            version=1,
+            agents=[
+                PeerAgent(agent_id=source, name="Source", host_id=host.instance_id),
+                PeerAgent(agent_id=target, name="Target", host_id=host.instance_id),
+            ],
+        )
+    )
+    dispatch = DispatchStore(host)
+    dispatch.initialize()
+    runtime = MixedPeerRuntime(host)
+    service = PeerDeliveryService(host, configuration, runtime, dispatch, Waker())
+    service.initialize()
+    request = PeerSend(id=uuid4(), target_agent=target, text="Analyze")
+
+    asyncio.run(service.send(org, str(source), "ses_source", request))
+    expected_directory = f"/workspace/default/threads/peer-{request.id.hex}"
+    assert runtime.created == [
+        (str(target), expected_directory, {"fesnyng_delivery_id": str(request.id)})
+    ]
+    delivery = dispatch.get(org, str(target), str(request.id))
+    assert dispatch.change(
+        delivery,
+        "completed",
+        outcome={"kind": "codex_turn_completed", "turn_id": "turn_peer"},
+    )
+    inbox = service._inbox(str(request.id))
+    completed = dispatch.get(org, str(target), str(request.id))
+    assert asyncio.run(service._result_text(inbox, completed)) == "Codex peer answer"
+    asyncio.run(
+        service._publish_result_once(
+            inbox, PeerEnvelope.model_validate(json.loads(inbox["envelope"])), completed
+        )
+    )
+    with host.connect() as connection:
+        result = connection.execute(
+            "SELECT envelope FROM peer_outbox WHERE id=?",
+            (service._inbox(str(request.id))["result_id"],),
+        ).fetchone()
+    assert result is not None
+    returned = json.loads(result["envelope"])
+    assert returned["text"] == "Codex peer answer"
+    assert returned["source_agent"] == str(target)
+    assert returned["target_agent"] == str(source)
 
 
 def test_remote_peer_delivery_uses_peer_auth_and_rejects_forged_source(tmp_path):

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fesnyng_backend.agent_lifecycle import AgentLifecycle
 from fesnyng_backend.application import create_service_app
 from fesnyng_backend.host_auth_routes import router as credential_router
+from fesnyng_backend.host_codex_routes import router as codex_workspace_router
 from fesnyng_backend.host_configuration import HostConfiguration
 from fesnyng_backend.host_credentials import CredentialService, CredentialStore
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore
@@ -122,6 +123,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             ):
                 application.state.provider_client = client
                 application.state.credential_service = CredentialService(credentials, client)
+                application.state.host_runtime.codex.set_credential_access(
+                    application.state.credential_service.access_for_agent
+                )
                 reconciliation = background.create_task(reconcile_configuration())
                 try:
                     yield
@@ -142,4 +146,5 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.include_router(peer_delivery_router)
     app.include_router(peer_discovery_router)
     app.include_router(workspace_router)
+    app.include_router(codex_workspace_router)
     return app

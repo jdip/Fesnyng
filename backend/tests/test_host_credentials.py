@@ -174,14 +174,91 @@ def test_twenty_concurrent_agent_accesses_refresh_once(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
-def test_uncertain_refresh_blocks_agent_access(tmp_path: Path) -> None:
+def test_rejected_unexpired_shared_token_refreshes_once_per_generation(tmp_path: Path) -> None:
     async def exercise() -> None:
         store, agent_key = _ready_store(tmp_path)
-        with store.connect() as connection:
-            connection.execute(
-                "UPDATE credential_profiles SET expires=0 WHERE organization_id=? AND profile_id=?",
-                ("organization-a", "profile-a"),
+        store.assign_agent("organization-a", "agent-b", "profile-a", "second-agent-key")
+        calls = 0
+
+        async def refresh(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0)
+            return httpx.Response(200, json=_tokens("account-a"))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(refresh)) as client:
+            service = CredentialService(store, client)
+            original = await service.access_for_agent(agent_key)
+            generation = original["generation"]
+            assert isinstance(generation, int)
+            credentials = await asyncio.gather(
+                *(
+                    service.access_for_agent(
+                        token,
+                        rejected_generation=generation,
+                        previous_account_id="account-a",
+                    )
+                    for token in [agent_key, "second-agent-key"] * 10
+                )
             )
+            assert calls == 1
+            assert all(
+                isinstance(value["generation"], int) and value["generation"] > generation
+                for value in credentials
+            )
+            assert all("refresh" not in value for value in credentials)
+            latest = await service.access_for_agent(
+                agent_key,
+                rejected_generation=generation,
+                previous_account_id="account-a",
+            )
+            assert latest == credentials[0]
+            assert calls == 1
+
+    asyncio.run(exercise())
+
+
+def test_rejected_token_cannot_refresh_another_account_or_unknown_generation(tmp_path: Path):
+    async def exercise():
+        store, agent_key = _ready_store(tmp_path)
+
+        async def forbidden_refresh(request: httpx.Request) -> httpx.Response:
+            pytest.fail("A mismatched rejection must not rotate a host credential")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden_refresh)) as client:
+            service = CredentialService(store, client)
+            original = await service.access_for_agent(agent_key)
+            generation = original["generation"]
+            assert isinstance(generation, int)
+            with pytest.raises(PermissionError, match="account mismatch"):
+                await service.access_for_agent(
+                    agent_key,
+                    rejected_generation=generation,
+                    previous_account_id="another-account",
+                )
+            with pytest.raises(PermissionError, match="generation mismatch"):
+                await service.access_for_agent(
+                    agent_key,
+                    rejected_generation=generation + 1,
+                    previous_account_id="account-a",
+                )
+            assert await service.access_for_agent(agent_key) == original
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("rejected_before_expiry", [False, True])
+def test_uncertain_refresh_blocks_agent_access(
+    tmp_path: Path, rejected_before_expiry: bool
+) -> None:
+    async def exercise() -> None:
+        store, agent_key = _ready_store(tmp_path)
+        if not rejected_before_expiry:
+            with store.connect() as connection:
+                connection.execute(
+                    "UPDATE credential_profiles SET expires=0 WHERE organization_id=? AND profile_id=?",
+                    ("organization-a", "profile-a"),
+                )
 
         def unavailable(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("offline", request=request)
@@ -189,7 +266,11 @@ def test_uncertain_refresh_blocks_agent_access(tmp_path: Path) -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
             service = CredentialService(store, client)
             with pytest.raises(PermissionError, match="reconciliation"):
-                await service.refresh_profile("organization-a", "profile-a")
+                await service.refresh_profile(
+                    "organization-a",
+                    "profile-a",
+                    rejected_generation=1 if rejected_before_expiry else None,
+                )
             with pytest.raises(PermissionError, match="unavailable"):
                 await service.access_for_agent(agent_key)
         status = store.profile_status("organization-a", "profile-a")

@@ -285,16 +285,39 @@ class CredentialService:
         self.client = client
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    async def access_for_agent(self, token: str) -> dict[str, object]:
-        """Return only the requesting agent's assigned, still-valid access credential."""
+    async def access_for_agent(
+        self,
+        token: str,
+        *,
+        rejected_generation: int | None = None,
+        previous_account_id: str | None = None,
+    ) -> dict[str, object]:
+        """Return assigned access, refreshing a rejected generation at most once.
+
+        Native clients retain the generation they authenticated with. A late
+        rejection for an older generation reuses the newer host credential.
+        """
         credential = self.store.assigned_credential(token)
         if credential is None:
             raise PermissionError("Credential unavailable")
+        if previous_account_id is not None and credential["account_id"] != previous_account_id:
+            raise PermissionError("Credential account mismatch")
+        if rejected_generation is not None and (
+            type(rejected_generation) is not int
+            or rejected_generation < 0
+            or rejected_generation > credential["generation"]
+        ):
+            raise PermissionError("Credential generation mismatch")
+        assignment = (credential["organization_id"], credential["profile_id"])
         needs_refresh = credential["state"] == _REFRESHING or (
-            credential["state"] == _READY and credential["expires"] <= time.time() + 30
+            credential["state"] == _READY
+            and (
+                credential["expires"] <= time.time() + 30
+                or rejected_generation == credential["generation"]
+            )
         )
         if needs_refresh:
-            await self.refresh_profile(credential["organization_id"], credential["profile_id"])
+            await self.refresh_profile(*assignment, rejected_generation=rejected_generation)
             credential = self.store.assigned_credential(token)
         elif credential["state"] != _READY:
             raise PermissionError("Credential unavailable")
@@ -302,6 +325,8 @@ class CredentialService:
             credential is None
             or credential["state"] != _READY
             or credential["expires"] <= time.time()
+            or (credential["organization_id"], credential["profile_id"]) != assignment
+            or (previous_account_id is not None and credential["account_id"] != previous_account_id)
         ):
             raise PermissionError("Credential unavailable")
         return {
@@ -313,14 +338,23 @@ class CredentialService:
             "generation": credential["generation"],
         }
 
-    async def refresh_profile(self, organization_id: str, profile_id: str) -> None:
-        """Refresh an expiring profile once, retaining uncertain outcomes for reconciliation."""
+    async def refresh_profile(
+        self,
+        organization_id: str,
+        profile_id: str,
+        *,
+        rejected_generation: int | None = None,
+    ) -> None:
+        """Refresh expiry or a rejected generation; retain uncertain rotation outcomes."""
         lock = self._locks.setdefault((organization_id, profile_id), asyncio.Lock())
         async with lock:
             credential = self.store.refresh_credential(organization_id, profile_id)
             if credential is None or credential["state"] != _READY:
                 raise PermissionError("Credential unavailable")
-            if credential["expires"] > time.time() + 30:
+            if (
+                credential["expires"] > time.time() + 30
+                and credential["generation"] != rejected_generation
+            ):
                 return
             operation = self.store.acquire_operation(
                 organization_id,

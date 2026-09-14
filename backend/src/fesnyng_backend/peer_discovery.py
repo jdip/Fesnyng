@@ -11,6 +11,7 @@ import httpx
 from pydantic import Field
 
 from fesnyng_backend.agent_models import Contract, Name, Slug
+from fesnyng_backend.codex_history import full_turns, is_unmaterialized
 from fesnyng_backend.host_models import NativeID
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
@@ -80,19 +81,7 @@ class PeerDiscovery:
                     workspace = session["directory"].split("/")[2]
                     if query.workspace and workspace != query.workspace:
                         continue
-                    statuses = await self.runtime.request(
-                        org, aid, "/session/status", directory=session["directory"]
-                    )
-                    if not isinstance(statuses, dict):
-                        raise RuntimeUnavailable("Invalid native activity")
-                    activity = statuses.get(session["session_id"], {"type": "idle"})
-                    if not isinstance(activity, dict) or activity.get("type") not in (
-                        "idle",
-                        "busy",
-                        "retry",
-                    ):
-                        raise RuntimeUnavailable("Invalid native activity")
-                    active = activity["type"] in {"busy", "retry"}
+                    active = await self._active(org, aid, session)
                     if query.active is not None and active != query.active:
                         continue
                     if query.topic and query.topic.casefold() not in session["title"].casefold():
@@ -195,10 +184,51 @@ class PeerDiscovery:
 
     async def read_local(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = self.host.session(org, agent, session_id)
+        if session["runtime_type"] == "codex":
+            adapter = self._codex(session)
+            try:
+                turns = await full_turns(adapter, org, agent, session_id)
+            except RuntimeUnavailable as error:
+                if not is_unmaterialized(error, session_id):
+                    raise
+                return []
+            return _codex_peer_history({"data": turns}, session_id)
         history = await self.runtime.request(
             org, agent, f"/session/{session_id}/message", directory=session["directory"]
         )
         return _validated_history(history, session_id)
+
+    def _codex(self, session: dict[str, Any]) -> Any:
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "call"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        return adapter
+
+    async def _active(self, org: str, agent: str, session: dict[str, Any]) -> bool:
+        if session["runtime_type"] == "codex":
+            try:
+                turns = await full_turns(self._codex(session), org, agent, session["session_id"])
+            except RuntimeUnavailable as error:
+                if not is_unmaterialized(error, session["session_id"]):
+                    raise
+                return False
+            return any(
+                turn.get("status") not in {"completed", "failed", "interrupted"} for turn in turns
+            )
+        statuses = await self.runtime.request(
+            org, agent, "/session/status", directory=session["directory"]
+        )
+        if not isinstance(statuses, dict):
+            raise RuntimeUnavailable("Invalid native activity")
+        activity = statuses.get(session["session_id"], {"type": "idle"})
+        if not isinstance(activity, dict) or activity.get("type") not in ("idle", "busy", "retry"):
+            raise RuntimeUnavailable("Invalid native activity")
+        return activity["type"] in {"busy", "retry"}
 
     async def read(
         self, org: str, source_agent: str, agent: str, session_id: str
@@ -269,3 +299,44 @@ def _validated_history(history: Any, session_id: str) -> list[dict[str, Any]]:
             ):
                 raise RuntimeUnavailable("Invalid native history")
     return history
+
+
+def _codex_peer_history(reply: Any, session_id: str) -> list[dict[str, Any]]:
+    """Project textual Codex items into the existing peer-read DTO.
+
+    Peer tools exchange a concise read model; they do not expose a second
+    execution API.  The complete native item stream remains available through
+    the Codex workspace facade.
+    """
+    if not isinstance(reply, dict) or not isinstance(reply.get("data"), list):
+        raise RuntimeUnavailable("Invalid Codex history")
+    projected: list[dict[str, Any]] = []
+    for turn in reply["data"]:
+        if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+            raise RuntimeUnavailable("Invalid Codex history")
+        for index, item in enumerate(turn["items"]):
+            if not isinstance(item, dict):
+                raise RuntimeUnavailable("Invalid Codex history")
+            kind = item.get("type")
+            text = item.get("text")
+            if not isinstance(text, str) and isinstance(item.get("content"), list):
+                text = "".join(
+                    part["text"]
+                    for part in item["content"]
+                    if isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                )
+            if kind not in {"userMessage", "agentMessage"} or not isinstance(text, str):
+                continue
+            projected.append(
+                {
+                    "info": {
+                        "id": str(item.get("id") or f"{turn.get('id', 'turn')}-{index}"),
+                        "sessionID": session_id,
+                        "role": "user" if kind == "userMessage" else "assistant",
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+    return projected

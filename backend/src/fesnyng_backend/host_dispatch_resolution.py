@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from fesnyng_backend.agent_models import Contract
+from fesnyng_backend.codex_history import full_turns
 from fesnyng_backend.host_dispatch import DispatchStore
 from fesnyng_backend.host_models import Actor, NativeID
 from fesnyng_backend.host_native_evidence import NativeEvidence
@@ -85,6 +86,27 @@ class DispatchResolutionService:
             raise ValueError("Delivery still has a local submission task")
 
         session = self.host.session(organization_id, agent_id, session_id)
+        if session["runtime_type"] == "codex":
+            adapter = self._codex(session)
+            assert_quiet = getattr(self.runtime, "assert_codex_thread_quiet", None)
+            if assert_quiet is None:
+                raise RuntimeUnavailable("Codex descendant activity cannot be verified")
+            await assert_quiet(organization_id, agent_id, session_id)
+            turns = await full_turns(adapter, organization_id, agent_id, session_id)
+            if any(
+                turn.get("status") not in {"completed", "failed", "interrupted"} for turn in turns
+            ):
+                raise ValueError("Codex thread is not idle")
+            if any(
+                item.get("status") == "inProgress"
+                for turn in turns
+                for item in turn.get("items", [])
+                if isinstance(item, dict)
+            ):
+                raise ValueError("Codex thread still has a running tool")
+            return self._persist(
+                organization_id, agent_id, session_id, str(delivery_id), resolution
+            )
         statuses = await self.runtime.request(
             organization_id, agent_id, "/session/status", directory=session["directory"]
         )
@@ -111,6 +133,17 @@ class DispatchResolutionService:
         ):
             raise ValueError("Native descendants are not verified quiet")
         return self._persist(organization_id, agent_id, session_id, str(delivery_id), resolution)
+
+    def _codex(self, session: dict[str, Any]) -> Any:
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "call"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        return adapter
 
     def _persist(
         self,

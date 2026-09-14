@@ -51,8 +51,8 @@ class HostConfiguration:
             return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
         try:
             await self._apply_staged(envelope)
-        except (PermissionError, RuntimeUnavailable, ValueError):
-            self._mark_pending(str(envelope.organization_id), str(envelope.agent_id))
+        except (PermissionError, RuntimeUnavailable, ValueError) as error:
+            self._mark_pending(str(envelope.organization_id), str(envelope.agent_id), str(error))
             raise
         return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
 
@@ -87,8 +87,8 @@ class HostConfiguration:
         organization_id, agent_id = str(envelope.organization_id), str(envelope.agent_id)
         try:
             await self._apply_staged(envelope, lifecycle_operation=lifecycle_operation)
-        except (PermissionError, RuntimeUnavailable, ValueError):
-            self._mark_pending(organization_id, agent_id)
+        except (PermissionError, RuntimeUnavailable, ValueError) as error:
+            self._mark_pending(organization_id, agent_id, str(error))
             return agent_id, "pending"
         return agent_id, "applied"
 
@@ -96,14 +96,26 @@ class HostConfiguration:
         self, envelope: HostAgentConfiguration, *, lifecycle_operation: bool = False
     ) -> None:
         organization_id, agent_id = str(envelope.organization_id), str(envelope.agent_id)
-        RuntimeRouter.require_supported(envelope.configuration.runtime_type)
         current = self.host.agent(organization_id, agent_id)
         previous = (
             HostAgentConfiguration.model_validate_json(current["applied_envelope"])
             if current["applied_envelope"]
             else None
         )
-        if previous is None or previous.policy_version != envelope.policy_version:
+        if previous is not None and (
+            previous.configuration.runtime_type != envelope.configuration.runtime_type
+        ):
+            raise RuntimeUnavailable("Harness changes require the thread freeze workflow")
+        if envelope.configuration.runtime_type == "codex":
+            if not hasattr(self.runtime, "codex"):
+                raise RuntimeUnavailable("Codex harness is not available on this host")
+        else:
+            RuntimeRouter.require_supported(envelope.configuration.runtime_type)
+        policy_changed = previous is None or previous.policy_version != envelope.policy_version
+        # Codex owns thread policy in its App Server.  Its connection and
+        # credentials must be configured first, but an applied agent record is
+        # still withheld until every mapped thread has accepted that policy.
+        if policy_changed and envelope.configuration.runtime_type != "codex":
             for session in self.host.sessions(organization_id, agent_id):
                 await self.interactions.apply_policy(
                     organization_id, agent_id, session["session_id"], envelope
@@ -130,6 +142,11 @@ class HostConfiguration:
                     organization_id, agent_id, str(profile_id), current["agent_token"]
                 )
             await self.runtime.configure(envelope)
+            if policy_changed and envelope.configuration.runtime_type == "codex":
+                for session in self.host.sessions(organization_id, agent_id):
+                    await self.interactions.apply_policy_locked(
+                        organization_id, agent_id, session["session_id"], envelope
+                    )
             self.host.mark_applied(envelope)
 
     def _require_safe_delivery_effects(self, organization_id: str, agent_id: str) -> None:
@@ -143,10 +160,10 @@ class HostConfiguration:
         if unsettled:
             raise RuntimeUnavailable("Configuration pending: delivery effects need reconciliation")
 
-    def _mark_pending(self, organization_id: str, agent_id: str) -> None:
+    def _mark_pending(self, organization_id: str, agent_id: str, reason: str | None = None) -> None:
         self.host.set_runtime_state(
             organization_id,
             agent_id,
             "pending",
-            "Configuration pending; host reconciliation required",
+            reason or "Configuration pending; host reconciliation required",
         )

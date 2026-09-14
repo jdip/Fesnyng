@@ -244,3 +244,18 @@ test('ignores an older empty refresh that finishes after a newer completed resul
   await act(async () => { finishOld(response([])); });
   expect(screen.getByTestId('status').textContent).toContain('"unread":true');
 });
+
+test('uses the Codex pending facade without polling OpenCode for a Codex-bound agent', async () => {
+  const codexAgent = { ...agent, configuration: { runtime_type: 'codex' } } as Agent;
+  const fetchMock = vi.fn(async (url: string) => {
+    if (url.endsWith('/thread-acknowledgements')) return response({ acknowledgements: [] });
+    if (url.endsWith('/sessions')) return response([{ session_id: 'thread' }]);
+    if (url.includes('/codex/pending?sessionID=thread')) return response([{ id: 'request-one', method: 'item/tool/requestUserInput', params: {} }]);
+    if (url.includes('/opencode/')) throw new Error('Codex notification refresh must not poll OpenCode');
+    return response([]);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ThreadNotificationsProvider organization="org" agents={[codexAgent]} csrf="csrf-example" selectedAgent="agent"><Probe /></ThreadNotificationsProvider>);
+  await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('{"unread":false,"attention":true}'));
+  expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/opencode/'))).toBe(false);
+});

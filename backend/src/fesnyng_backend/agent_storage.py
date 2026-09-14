@@ -262,6 +262,11 @@ class AgentStore:
                 raise ConfigurationConflict("Agent configuration version conflict")
             version = current["desired_version"] + 1
             configuration = values.get("configuration", json.loads(current["configuration"]))
+            original_runtime = AgentConfiguration.model_validate_json(
+                current["configuration"]
+            ).runtime_type
+            if AgentConfiguration.model_validate(configuration).runtime_type != original_runtime:
+                raise ValueError("Use the dedicated harness switch operation to change a harness")
             _validate_profile(connection, organization_id, configuration)
             reporting = values.get("reports_to_agent_id", current["reports_to_agent_id"])
             _validate_reporting(connection, organization_id, agent_id, reporting)

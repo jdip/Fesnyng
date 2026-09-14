@@ -1,6 +1,6 @@
 # Fesnyng agent runtime
 
-This directory builds the pinned OpenCode runtime image used by Fesnyng agent hosts. It is an OpenCode server image, not a separate agent loop: the host owns container lifecycle and credentials, while OpenCode owns native sessions, model requests, tools, and skills. It does not establish a general preinstalled command-tool baseline for agents.
+This directory builds the agent image with OpenCode and Codex App Server versions pinned in `package.json` and `package-lock.json`. The host selects one harness per employee and owns container lifecycle and credentials. The selected native harness owns sessions, model requests, tools, and skills. The image does not establish a general preinstalled command-tool baseline for agents.
 
 The image includes Git solely for the host's scoped, read-only thread-context lookup. It is not exposed as a control-plane mutation or a general host filesystem capability.
 
@@ -10,7 +10,9 @@ Build it from the repository root:
 docker build -t fesnyng-agent:local agent-runtime
 ```
 
-The image starts `opencode serve` on its internal port `4096`. Do not publish or run it as an independently administered agent service. Start an agent host from [the backend runtime instructions](../backend/README.md#install-an-agent-host); the host creates and labels each agent container, supplies its server password, and binds the native port to host loopback only.
+The entrypoint starts `opencode serve` or `codex app-server` on internal port `4096`, according to the host-supplied `FESNYNG_RUNTIME_TYPE`. Start an agent host from [the backend runtime instructions](../backend/README.md#install-an-agent-host); the host creates and labels each agent container, supplies its private native server credential, and binds the native port to host loopback only.
+
+Codex uses a capability-authenticated WebSocket. The host initializes its experimental API and supplies access tokens through native `chatgptAuthTokens` login. Native token rejection requests return to the same host-owned profile broker, including rejection before expiry. Refresh credentials stay on the host. Managed Codex instructions and skills live under `/home/agent/.codex`; thread working directories and retained files live under `/workspace`.
 
 ## Host-managed OpenAI authentication
 
@@ -40,3 +42,12 @@ npm run check --prefix agent-runtime
 ```
 
 The command runs ESLint, TypeScript checking for the JavaScript plugin, and its Node behavioral tests. Building the image or starting a host does not itself prove an authenticated provider request; that requires the separately authorized host and provider validation.
+
+After building the image, the credential-free Codex integration check exercises Fesnyng dispatch, interruption, persisted native history and reconnection:
+
+```bash
+FESNYNG_CODEX_DOCKER_TESTS=true uv run --locked --project backend \
+  pytest backend/tests/test_codex_docker_integration.py -q
+```
+
+Set `FESNYNG_CODEX_TEST_IMAGE` when testing a separately tagged image. Successful checks remove their isolated container, volumes and state. Failed checks stop their container and retain diagnostic state.

@@ -16,6 +16,7 @@ import httpx
 from pydantic import Field
 
 from fesnyng_backend.agent_models import Contract, Name, Slug
+from fesnyng_backend.codex_history import full_turns
 from fesnyng_backend.host_dispatch import DispatchStore, Submission
 from fesnyng_backend.host_models import Actor, NativeID
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -115,6 +116,7 @@ class PeerDeliveryService:
                 );
                 """
             )
+
             connection.execute("BEGIN IMMEDIATE")
             outbox_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(peer_outbox)")
@@ -127,6 +129,17 @@ class PeerDeliveryService:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(peer_inbox)")}
             if "author" not in columns:
                 connection.execute("ALTER TABLE peer_inbox ADD COLUMN author TEXT")
+
+    def _codex(self, session: dict[str, Any]) -> Any:
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "call"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        return adapter
 
     async def send(
         self, organization_id: str, source_agent: str, source_session: str, body: PeerSend
@@ -682,11 +695,41 @@ class PeerDeliveryService:
 
     async def _result_text(self, inbox: dict[str, Any], delivery: dict[str, Any]) -> str:
         outcome = delivery["outcome"] if isinstance(delivery["outcome"], dict) else {}
+        session = self.store.session(
+            inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
+        )
+        if session.get("runtime_type") == "codex":
+            turn_id = outcome.get("turn_id")
+            if not isinstance(turn_id, str):
+                detail = delivery["error"] or outcome.get("kind", "terminal outcome")
+                return (
+                    f"Peer delivery {inbox['id']} is {delivery['state']} for agent "
+                    f"{inbox['target_agent']} in thread {inbox['target_session']}: {detail}"
+                )
+            adapter = self._codex(session)
+            turns = await full_turns(
+                adapter, inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
+            )
+            turn = next((item for item in turns if item.get("id") == turn_id), None)
+            if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+                raise RuntimeUnavailable("Native Codex peer outcome response is unavailable")
+            text = "\n".join(
+                item["text"]
+                for item in turn["items"]
+                if isinstance(item, dict)
+                and item.get("type") == "agentMessage"
+                and isinstance(item.get("text"), str)
+            ).strip()
+            if text:
+                return text[:16_000]
+            detail = delivery["error"] or outcome.get("kind", "terminal outcome")
+            return (
+                f"Peer delivery {inbox['id']} is {delivery['state']} for agent "
+                f"{inbox['target_agent']} in thread {inbox['target_session']} "
+                f"at native turn {turn_id}: {detail}"
+            )
         message_id = outcome.get("message_id")
         if isinstance(message_id, str):
-            session = self.store.session(
-                inbox["organization_id"], inbox["target_agent"], inbox["target_session"]
-            )
             history = await self.runtime.request(
                 inbox["organization_id"],
                 inbox["target_agent"],
@@ -737,7 +780,12 @@ class PeerDeliveryService:
                 metadata={"fesnyng_delivery_id": inbox["id"]},
             )
         except RuntimeUnavailable:
-            adopted = await self._adopt_session(inbox)
+            # Codex has no native caller metadata, so only a mapping already
+            # persisted by the same successful native create can be recovered.
+            # Do not guess from unrelated App Server threads after a lost reply.
+            adopted = self._local_session_match(inbox)
+            if adopted is None:
+                adopted = await self._adopt_session(inbox)
             if adopted is None:
                 with self.store.connect() as connection:
                     connection.execute(
@@ -783,6 +831,18 @@ class PeerDeliveryService:
         return {"id": matches[0]["session_id"]}
 
     async def _adopt_session(self, inbox: dict[str, Any]) -> dict[str, Any] | None:
+        local = self._local_session_match(inbox)
+        if local is not None:
+            return local
+        target = self.store.agent(inbox["organization_id"], inbox["target_agent"])
+        if (
+            target.get("applied_envelope")
+            and '"runtime_type":"codex"' in target["applied_envelope"]
+        ):
+            # App Server has no searchable Fesnyng delivery metadata.  An
+            # ambiguous create must stay uncertain rather than adopt a thread
+            # by directory or title alone.
+            return None
         sessions = await self.runtime.request(
             inbox["organization_id"],
             inbox["target_agent"],

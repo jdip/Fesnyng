@@ -65,3 +65,15 @@ test('keeps a failed native edit on the maintained fallback with its error', () 
   fireEvent.click(screen.getByRole('button', { name: /Used tool: apply_patch/ }));
   expect(screen.getByText('Patch did not apply')).toBeTruthy();
 });
+
+test('renders pinned Codex delete changes as deletions, preserving unified diff marks', () => {
+  const props = {
+    toolName: 'apply_patch',
+    argsText: JSON.stringify({ changes: [{ path: 'src/removed.ts', kind: { type: 'delete' }, diff: '@@ -1 +0,0 @@\n-export const removed = true;' }] }),
+    result: { output: 'Done!' }, status: { type: 'complete' },
+  } as unknown as ComponentProps<typeof NativeEditToolFallback>;
+  render(<NativeEditToolFallback {...props} />);
+  const change = screen.getByLabelText('deleted src/removed.ts');
+  expect(change.textContent).toContain('-export const removed = true;');
+  expect(change.querySelector('ins')).toBeNull();
+});

@@ -12,6 +12,20 @@ from fesnyng_backend.settings import ControlPlaneSessionSettings
 ORIGIN = "https://workspace.example"
 
 
+def test_codex_completed_turn_has_a_stable_read_acknowledgement_identity():
+    assert (
+        control_thread_acknowledgement_routes._outcome_id(
+            {
+                "state": "completed",
+                "outcome": {"kind": "codex_turn_completed", "turn_id": "turn_42"},
+            },
+            "read",
+            "delivery",
+        )
+        == "codex:turn_42"
+    )
+
+
 def test_thread_acknowledgements_are_personal_and_durable(organization, monkeypatch):
     settings, control, owner, org, agents, host_id = organization
     agents.set_host_credential(org.id, host_id, secrets.token_urlsafe(32))

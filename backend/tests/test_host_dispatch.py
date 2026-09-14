@@ -71,7 +71,7 @@ def test_dispatch_receipts_are_durable_ordered_and_reject_conflicting_retries(tm
         )
 
 
-def test_unavailable_thread_harness_is_rejected_before_opencode_delivery(tmp_path):
+def test_codex_thread_is_admitted_to_the_durable_queue_without_opencode_fallback(tmp_path):
     host = HostStore(
         ServiceSettings(
             service="agent-host",
@@ -102,14 +102,17 @@ def test_unavailable_thread_harness_is_rejected_before_opencode_delivery(tmp_pat
     deliveries = DispatchStore(host)
     deliveries.initialize()
 
-    with pytest.raises(RuntimeUnavailable, match="Codex harness is not available"):
-        deliveries.enqueue(
-            organization_id,
-            agent_id,
-            "thr_codex",
-            Submission(id=uuid4(), text="Do not send this to OpenCode"),
-            Actor(kind="human", id=uuid4(), name="Owner"),
-        )
+    receipt = deliveries.enqueue(
+        organization_id,
+        agent_id,
+        "thr_codex",
+        Submission(id=uuid4(), text="Do not send this to OpenCode"),
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+
+    # Native execution is selected only later, at Dispatcher._thread, with
+    # the session's immutable harness binding and installed runtime router.
+    assert receipt["state"] == "queued"
 
 
 def test_native_delivery_is_fifo_per_thread_but_threads_run_concurrently(tmp_path):
@@ -1403,3 +1406,106 @@ def test_operator_resolution_settles_an_unvalidated_receipt_for_new_policy_admis
         org, agent, "ses_one", Submission(id=uuid4(), text="After review"), author
     )
     assert next_receipt["state"] == "queued"
+
+
+def test_codex_lifecycle_interrupts_native_descendants_without_opencode_calls(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization, agent = str(uuid4()), str(uuid4())
+    host.bind_organization(organization, "test organization binding with enough characters")
+    envelope = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization,
+        agent_id=agent,
+        version=1,
+        name="Codex engineer",
+        configuration={"runtime_type": "codex"},
+    )
+    host.stage_agent(envelope)
+    host.mark_applied(envelope)
+    host.save_session(
+        organization, agent, "thr_root", "/workspace/root", "Root", runtime_type="codex"
+    )
+    store = DispatchStore(host)
+    store.initialize()
+
+    class Codex:
+        def __init__(self):
+            self.active = {"thr_root", "thr_child"}
+            self.interrupts: list[tuple[str, str]] = []
+
+        async def call(self, _org, _agent, method, params):
+            if method == "thread/list":
+                return {
+                    "data": [
+                        {
+                            "id": "thr_root",
+                            "parentThreadId": None,
+                            "status": {"type": "active" if "thr_root" in self.active else "idle"},
+                        },
+                        {
+                            "id": "thr_child",
+                            "parentThreadId": "thr_root",
+                            "status": {"type": "active" if "thr_child" in self.active else "idle"},
+                        },
+                    ]
+                }
+            if method == "thread/turns/list":
+                thread_id = params["threadId"]
+                turn_id = "turn_root" if thread_id == "thr_root" else "turn_child"
+                return {
+                    "data": [
+                        {
+                            "id": turn_id,
+                            "status": "inProgress" if thread_id in self.active else "interrupted",
+                            "items": [],
+                        }
+                    ]
+                }
+            if method == "turn/interrupt":
+                self.interrupts.append((params["threadId"], params["turnId"]))
+                self.active.remove(params["threadId"])
+                return {}
+            raise AssertionError((method, params))
+
+    class Native:
+        def __init__(self):
+            self.codex = Codex()
+            self._lock = asyncio.Lock()
+
+        def lock(self, agent_id):
+            return self._lock
+
+        async def codex_thread_statuses(self, _organization_id, _agent_id):
+            return [
+                {
+                    "id": "thr_root",
+                    "parentThreadId": None,
+                    "status": {"type": "active" if "thr_root" in self.codex.active else "idle"},
+                },
+                {
+                    "id": "thr_child",
+                    "parentThreadId": "thr_root",
+                    "status": {"type": "active" if "thr_child" in self.codex.active else "idle"},
+                },
+            ]
+
+        async def request(self, *_args, **_kwargs):
+            raise AssertionError("Codex lifecycle must not call OpenCode")
+
+    native = Native()
+    dispatcher = Dispatcher(store, native)
+    owner = Actor(kind="human", id=uuid4(), name="Owner")
+
+    asyncio.run(dispatcher.quiesce_agent(organization, agent, owner))
+
+    assert set(native.codex.interrupts) == {("thr_root", "turn_root"), ("thr_child", "turn_child")}
+    [stop] = store.for_thread(organization, agent, "thr_root")
+    assert stop["state"] == "completed"
+    assert stop["outcome"]["kind"] == "codex_interrupt_completed"

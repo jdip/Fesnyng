@@ -58,6 +58,26 @@ def test_configuration_update_is_versioned_and_rejects_a_stale_edit(organization
     assert agents.get_agent(org.id, agent["id"]) == updated
 
 
+@pytest.mark.parametrize("runtime_type,replacement", [("opencode", "codex"), ("codex", "opencode")])
+def test_ordinary_settings_cannot_switch_an_existing_employee_harness(
+    organization, runtime_type, replacement
+):
+    _, _, owner, org, agents, host_id = organization
+    agent = agents.create_agent(
+        org.id,
+        owner.id,
+        {"name": "Engineer", "host_id": host_id, "configuration": {"runtime_type": runtime_type}},
+    )
+    with pytest.raises(ValueError, match="harness switch"):
+        agents.update_agent(
+            org.id,
+            agent["id"],
+            owner.id,
+            {"expected_version": 1, "configuration": {"runtime_type": replacement}},
+        )
+    assert agents.get_agent(org.id, agent["id"]) == agent
+
+
 def test_assignment_and_reporting_cannot_cross_organizations_or_create_cycles(organization):
     _, control, owner, org, agents, host_id = organization
     other_org = control.create_organization(owner.id, "Separate organization")

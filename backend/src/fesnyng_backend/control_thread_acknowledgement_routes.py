@@ -109,6 +109,8 @@ def _outcome_id(receipt: dict[str, object], kind: str, delivery_id: str) -> str 
         return None
     if outcome_kind == "native_run_completed" and isinstance(outcome.get("message_id"), str):
         return f"native:{outcome['message_id']}"
+    if outcome_kind == "codex_turn_completed" and isinstance(outcome.get("turn_id"), str):
+        return f"codex:{outcome['turn_id']}"
     if outcome_kind == "operator_resolution" and outcome.get("outcome") == "completed":
         operation_id = outcome.get("operation_id")
         if isinstance(operation_id, str):

@@ -10,9 +10,30 @@ from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.peer_configuration import PeerConfiguration, PeerConfigurationStore
-from fesnyng_backend.peer_discovery import DiscoveryQuery, PeerDiscovery
+from fesnyng_backend.peer_discovery import DiscoveryQuery, PeerDiscovery, _codex_peer_history
 from fesnyng_backend.peer_discovery_routes import router
 from fesnyng_backend.settings import ServiceSettings
+
+
+def test_codex_peer_history_projects_schema_user_message_content():
+    history = _codex_peer_history(
+        {
+            "data": [
+                {
+                    "id": "turn_1",
+                    "items": [
+                        {
+                            "id": "item_1",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "peer requirement"}],
+                        }
+                    ],
+                }
+            ]
+        },
+        "thr_1",
+    )
+    assert history[0]["parts"] == [{"type": "text", "text": "peer requirement"}]
 
 
 def discovery_system(tmp_path):
