@@ -184,7 +184,7 @@ test('shows an unread result on its agent without a standalone Activity view', a
   render(<App />);
   const pip = await screen.findByRole('img', { name: 'Unread result' });
   expect(pip.closest('button')?.textContent).toContain('Researcher');
-  expect(pip.parentElement?.parentElement?.className).toContain('agent-name-row');
+  expect(screen.getByRole('button', { name: /Unread result.*Researcher/ })).toBe(pip.closest('button'));
   expect(screen.queryByRole('button', { name: 'Activity' })).toBeNull();
 });
 
