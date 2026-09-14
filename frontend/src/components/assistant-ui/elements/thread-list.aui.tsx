@@ -40,16 +40,16 @@ import {
 } from "react";
 
 export type ThreadMenuTarget = { id: string; title: string };
-type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void };
+type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; allowDelete?: boolean };
 const ThreadNavigationContext = createContext<ThreadNavigation>({});
 
-export const ThreadList: FC<ThreadNavigation & { pageSize?: number; showNew?: boolean }> = ({ pageSize = 6, showNew = true, onSelect, onOpenFiles, onOpenPermissions }) => {
+export const ThreadList: FC<ThreadNavigation & { pageSize?: number; showNew?: boolean }> = ({ pageSize = 6, showNew = true, onSelect, onOpenFiles, onOpenPermissions, allowDelete = true }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
-    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions }}><ThreadListRoot>
+    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions, allowDelete }}><ThreadListRoot>
       {showNew && <ThreadListNew onClick={onSelect} />}
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
@@ -174,7 +174,7 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const { onSelect } = useContext(ThreadNavigationContext);
+  const { onSelect, allowDelete } = useContext(ThreadNavigationContext);
   const pins = useThreadPins();
   const session = useAuiState((s) => s.threadListItem.remoteId);
   const workspace = useThreadWorkspace();
@@ -234,6 +234,7 @@ export const ThreadListItem: FC = () => {
       <ThreadListItemMore
         archived={isArchived}
         onRename={() => setIsRenaming(true)}
+        allowDelete={allowDelete}
       />
     </ThreadListItemPrimitive.Root>
   );
@@ -312,7 +313,8 @@ const ThreadListItemRename: FC<{
 const ThreadListItemMore: FC<{
   archived: boolean;
   onRename: () => void;
-}> = ({ archived, onRename }) => {
+  allowDelete?: boolean;
+}> = ({ archived, onRename, allowDelete = true }) => {
   const pins = useThreadPins();
   const { onOpenFiles, onOpenPermissions } = useContext(ThreadNavigationContext);
   const session = useAuiState((s) => s.threadListItem.remoteId);
@@ -384,7 +386,7 @@ const ThreadListItemMore: FC<{
             </ThreadListItemMorePrimitive.Item>
           </ThreadListItemPrimitive.Archive>
         )}
-        <ThreadListItemPrimitive.Delete asChild>
+        {allowDelete && <ThreadListItemPrimitive.Delete asChild>
           <ThreadListItemMorePrimitive.Item
             data-slot="aui_thread-list-item-more-item"
             className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
@@ -392,7 +394,7 @@ const ThreadListItemMore: FC<{
             <TrashIcon className="size-4" />
             Delete
           </ThreadListItemMorePrimitive.Item>
-        </ThreadListItemPrimitive.Delete>
+        </ThreadListItemPrimitive.Delete>}
       </ThreadListItemMorePrimitive.Content>
     </ThreadListItemMorePrimitive.Root>
   );

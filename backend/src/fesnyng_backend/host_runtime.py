@@ -20,23 +20,72 @@ class RuntimeUnavailable(RuntimeError):
     pass
 
 
+def codex_thread_family(
+    roots: set[str], threads: list[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    """Validate native ancestry and select the roots and their descendants."""
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for thread in threads:
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id or thread_id in by_id:
+            raise RuntimeUnavailable("Codex thread status receipt is invalid")
+        parent = thread.get("parentThreadId")
+        if parent is not None and not isinstance(parent, str):
+            raise RuntimeUnavailable("Codex thread ancestry receipt is invalid")
+        by_id[thread_id] = thread
+    if not roots <= by_id.keys():
+        raise RuntimeUnavailable("Codex mapped thread is missing from native status")
+    related = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for thread_id, thread in by_id.items():
+            if thread.get("parentThreadId") in related and thread_id not in related:
+                related.add(thread_id)
+                changed = True
+    return [by_id[thread_id] for thread_id in sorted(related)]
+
+
+def _assert_codex_threads_quiet(roots: set[str], threads: list[Mapping[str, Any]]) -> None:
+    """Reject active native roots or descendants discovered from App Server."""
+    for thread in codex_thread_family(roots, threads):
+        status = thread.get("status")
+        if not isinstance(status, Mapping) or not isinstance(status.get("type"), str):
+            raise RuntimeUnavailable("Codex thread status receipt is invalid")
+        if status["type"] == "active":
+            raise RuntimeUnavailable("Configuration pending: native work is active")
+        if status["type"] not in {"idle", "notLoaded"}:
+            raise RuntimeUnavailable("Codex native thread status is uncertain")
+
+
 class RuntimeRouter:
     """Resolve a thread's immutable harness binding to its native runtime.
 
-    OpenCode is the only installed harness in this delivery.  Keeping this
-    resolution next to the native boundary prevents a future thread binding
+    Keeping resolution next to the native boundary prevents a Codex binding
     from accidentally falling through to the OpenCode client.
     """
 
-    def __init__(self, opencode: Any):
+    def __init__(self, opencode: Any, codex: Any | None = None):
         self.opencode = opencode
+        self.codex = codex
 
     def for_session(self, session: Mapping[str, Any]) -> Any:
-        self.require_supported(session.get("runtime_type"))
-        return self.opencode
+        runtime_type = session.get("runtime_type")
+        if runtime_type == "opencode":
+            return self.opencode
+        if runtime_type == "codex" and self.codex is not None:
+            return self.codex
+        if runtime_type == "codex":
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        raise RuntimeUnavailable("Thread harness binding is invalid")
 
     @staticmethod
     def require_supported(runtime_type: object) -> None:
+        """Protect legacy OpenCode-only callers from a Codex fallthrough.
+
+        New harness-aware owners resolve through :meth:`for_session`; callers
+        still using this compatibility guard must remain OpenCode-only.
+        """
         if runtime_type == "opencode":
             return
         if runtime_type == "codex":
@@ -140,6 +189,11 @@ class DockerRuntime:
         self.credential_url = credential_url
         self.image = image
         self.locks: dict[str, asyncio.Lock] = {}
+        self.native_ports: dict[tuple[str, str], int] = {}
+        from fesnyng_backend.codex_runtime import CodexRuntime
+
+        self.codex = CodexRuntime(self)
+        self.runtime_router = RuntimeRouter(self, self.codex)
 
     def lock(self, agent_id: str) -> asyncio.Lock:
         return self.locks.setdefault(agent_id, asyncio.Lock())
@@ -190,6 +244,21 @@ class DockerRuntime:
             raise RuntimeUnavailable("Container ownership mismatch; resource retained")
         return info
 
+    def native_port(self, organization_id: str, agent_id: str) -> int:
+        try:
+            return self.native_ports[(organization_id, agent_id)]
+        except KeyError:
+            raise RuntimeUnavailable("Agent container is not running") from None
+
+    async def running_port(self, organization_id: str, agent_id: str) -> int:
+        """Inspect the native endpoint without starting or creating a container."""
+        info = await self.inspect(organization_id, agent_id)
+        if info is None or not info["state"]["Running"]:
+            raise RuntimeUnavailable("Agent container is not running")
+        port = self._port(info)
+        self.native_ports[(organization_id, agent_id)] = port
+        return port
+
     async def ensure(self, organization_id: str, agent_id: str) -> None:
         agent = self.store.agent(organization_id, agent_id)
         info = await self.inspect(organization_id, agent_id)
@@ -208,6 +277,10 @@ class DockerRuntime:
             )
         elif not info["state"]["Running"]:
             await self.docker("start", self.name(agent_id))
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is not running")
+        self.native_ports[(organization_id, agent_id)] = self._port(info)
         await self._wait_healthy(organization_id, agent_id)
 
     async def start(self, organization_id: str, agent_id: str) -> None:
@@ -216,6 +289,10 @@ class DockerRuntime:
             raise RuntimeUnavailable("Agent container is missing; rebuild is required")
         if not info["state"]["Running"]:
             await self.docker("start", self.name(agent_id))
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is not running")
+        self.native_ports[(organization_id, agent_id)] = self._port(info)
         await self._wait_healthy(organization_id, agent_id)
 
     async def stop(self, organization_id: str, agent_id: str) -> None:
@@ -237,6 +314,10 @@ class DockerRuntime:
                 await self.docker("stop", "--time", "30", self.name(agent_id))
             await self.docker("rm", self.name(agent_id))
         await self._create_container(organization_id, agent_id, self.image, require_volumes=True)
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is not running")
+        self.native_ports[(organization_id, agent_id)] = self._port(info)
         await self._wait_healthy(organization_id, agent_id)
 
     async def _require_retained_volumes(self, agent_id: str) -> None:
@@ -274,6 +355,8 @@ class DockerRuntime:
         require_volumes: bool,
     ) -> None:
         agent = self.store.agent(organization_id, agent_id)
+        desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
+        runtime_type = desired.configuration.runtime_type
         name = self.name(agent_id)
         for suffix in ("home", "workspace"):
             volume = f"{name}-{suffix}"
@@ -341,16 +424,43 @@ class DockerRuntime:
             "-e",
             f"OPENCODE_SERVER_PASSWORD={agent['runtime_password']}",
             "-e",
+            f"FESNYNG_RUNTIME_TYPE={runtime_type}",
+            "-e",
+            f"FESNYNG_RUNTIME_TOKEN={agent['runtime_password']}",
+            "-e",
+            f"FESNYNG_AGENT_TOKEN={agent['agent_token']}",
+            "-e",
+            f"FESNYNG_MCP_URL={self.credential_url.rstrip('/')}/mcp/",
+            "-e",
             "FESNYNG_AGENT_AUTH=/home/agent/host-auth.json",
             "-e",
             'OPENCODE_AUTH_CONTENT={"openai":{"type":"oauth","access":"","refresh":"","expires":0}}',
             image,
         )
 
+    @staticmethod
+    def _port(info: Mapping[str, Any]) -> int:
+        ports = info["ports"].get("4096/tcp") or []
+        if not ports or ports[0].get("HostIp") != "127.0.0.1":
+            raise RuntimeUnavailable("Unexpected native runtime port binding")
+        try:
+            return int(ports[0]["HostPort"])
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeUnavailable("Unexpected native runtime port binding") from None
+
     async def _wait_healthy(self, organization_id: str, agent_id: str) -> None:
+        agent = self.store.agent(organization_id, agent_id)
+        envelope = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
         for _ in range(120):
             try:
-                await self.request(organization_id, agent_id, "/global/health")
+                if envelope.configuration.runtime_type == "codex":
+                    port = self.native_port(organization_id, agent_id)
+                    async with httpx.AsyncClient(timeout=2) as client:
+                        response = await client.get(f"http://127.0.0.1:{port}/readyz")
+                    if response.status_code != 200:
+                        raise RuntimeUnavailable("Codex App Server is not ready")
+                else:
+                    await self.request(organization_id, agent_id, "/global/health")
                 return
             except (RuntimeUnavailable, httpx.HTTPError):
                 await asyncio.sleep(0.5)
@@ -756,6 +866,19 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         info = await self.inspect(organization_id, agent_id)
         if info is None or not info["state"]["Running"]:
             return
+        agent = self.store.agent(organization_id, agent_id)
+        configured = agent["applied_envelope"] or agent["desired_envelope"]
+        envelope = HostAgentConfiguration.model_validate_json(configured)
+        if envelope.configuration.runtime_type == "codex":
+            roots = {
+                session["session_id"]
+                for session in self.store.sessions(organization_id, agent_id)
+                if session["runtime_type"] == "codex" and session["deleted_at"] is None
+            }
+            if roots:
+                threads = await self.codex_thread_statuses(organization_id, agent_id)
+                _assert_codex_threads_quiet(roots, threads)
+            return
         directories = {
             session["directory"] for session in self.store.sessions(organization_id, agent_id)
         }
@@ -766,7 +889,74 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
             if any(status.get("type") != "idle" for status in statuses.values()):
                 raise RuntimeUnavailable("Configuration pending: native work is active")
 
+    async def codex_thread_statuses(
+        self, organization_id: str, agent_id: str
+    ) -> list[Mapping[str, Any]]:
+        """Read complete native ancestry, including mapped unmaterialized roots."""
+        source_kinds = [
+            "cli",
+            "vscode",
+            "exec",
+            "appServer",
+            "subAgent",
+            "subAgentReview",
+            "subAgentCompact",
+            "subAgentThreadSpawn",
+            "subAgentOther",
+            "unknown",
+        ]
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        threads: list[Mapping[str, Any]] = []
+        while True:
+            params: dict[str, object] = {"limit": 100, "sourceKinds": source_kinds}
+            if cursor is not None:
+                params["cursor"] = cursor
+            receipt = await self.codex.call(organization_id, agent_id, "thread/list", params)
+            data = receipt.get("data")
+            if not isinstance(data, list) or not all(
+                isinstance(thread, Mapping) for thread in data
+            ):
+                raise RuntimeUnavailable("Codex thread status receipt is invalid")
+            threads.extend(data)
+            next_cursor = receipt.get("nextCursor")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeUnavailable("Codex thread status pagination is invalid")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        roots = {
+            session["session_id"]
+            for session in self.store.sessions(organization_id, agent_id)
+            if session["runtime_type"] == "codex" and session["deleted_at"] is None
+        }
+        listed = {thread.get("id") for thread in threads}
+        for thread_id in roots - listed:
+            receipt = await self.codex.call(
+                organization_id, agent_id, "thread/read", {"threadId": thread_id}
+            )
+            thread = receipt.get("thread")
+            if not isinstance(thread, Mapping) or thread.get("id") != thread_id:
+                raise RuntimeUnavailable("Codex mapped thread is missing from native status")
+            threads.append(thread)
+        codex_thread_family(roots, threads)
+        return threads
+
+    async def assert_codex_thread_quiet(
+        self, organization_id: str, agent_id: str, thread_id: str
+    ) -> None:
+        """Require the mapped thread and native descendants to have settled."""
+        session = self.store.session(organization_id, agent_id, thread_id)
+        if session["runtime_type"] != "codex":
+            raise RuntimeUnavailable("Thread is not bound to Codex")
+        threads = await self.codex_thread_statuses(organization_id, agent_id)
+        _assert_codex_threads_quiet({thread_id}, threads)
+
     async def configure(self, envelope: HostAgentConfiguration) -> None:
+        if envelope.configuration.runtime_type == "codex":
+            await self.codex.configure(envelope)
+            return
         org, agent_id = str(envelope.organization_id), str(envelope.agent_id)
         agent = self.store.agent(org, agent_id)
         await self.ensure(org, agent_id)
@@ -894,6 +1084,15 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         if not agent["applied_envelope"]:
             raise RuntimeUnavailable("Agent configuration is not applied")
         envelope = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
+        if envelope.configuration.runtime_type == "codex":
+            return await self.codex.create_session(
+                organization_id,
+                agent_id,
+                title,
+                workspace,
+                directory=directory,
+                metadata=metadata,
+            )
         if workspace != envelope.configuration.workspace:
             raise ValueError("Workspace is not assigned to this agent")
         directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"

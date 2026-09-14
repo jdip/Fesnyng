@@ -6,7 +6,7 @@ import { ViewedContent } from './ViewedContent';
 import { agentPath, api, errorMessage } from './workspace-api';
 
 type DeliveryConfiguration = { organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void };
-type NativeMessage = { role?: string; session?: string; ids: Set<string> };
+type NativeMessage = { role?: string; session?: string; ids: Set<string>; clientIds: Set<string>; turnId?: string };
 
 const ConversationDeliveryContext = createContext<DeliveryConfiguration | undefined>(undefined);
 const actionableStates = new Set(['unresolved', 'uncertain', 'submitting', 'stopping']);
@@ -15,15 +15,20 @@ const record = (value: unknown): value is Record<string, unknown> => Boolean(val
 /** Preserves native message identities even when assistant-ui combines message parts. */
 export function nativeMessage(message: unknown): NativeMessage {
   const ids = new Set<string>();
-  if (!record(message)) return { ids };
+  const clientIds = new Set<string>();
+  if (!record(message)) return { ids, clientIds };
   if (typeof message.id === 'string') ids.add(message.id);
   const metadata = record(message.metadata) ? message.metadata : undefined;
   const custom = metadata && record(metadata.custom) ? metadata.custom : undefined;
   const opencode = custom && record(custom.opencode) ? custom.opencode : undefined;
+  const codex = custom && record(custom.codex) ? custom.codex : undefined;
   const original = opencode && record(opencode.originalMessage) ? opencode.originalMessage : undefined;
   if (typeof original?.id === 'string') ids.add(original.id);
   if (Array.isArray(opencode?.parts)) for (const part of opencode.parts) if (record(part) && typeof part.messageID === 'string') ids.add(part.messageID);
-  return { role: typeof message.role === 'string' ? message.role : undefined, session: typeof original?.sessionID === 'string' ? original.sessionID : undefined, ids };
+  const codexItem = codex && record(codex.item) ? codex.item : undefined;
+  if (typeof codexItem?.clientId === 'string') clientIds.add(codexItem.clientId);
+  if (typeof codexItem?.id === 'string') ids.add(codexItem.id);
+  return { role: typeof message.role === 'string' ? message.role : undefined, session: typeof original?.sessionID === 'string' ? original.sessionID : typeof codex?.sessionId === 'string' ? codex.sessionId : undefined, ids, clientIds, turnId: typeof codex?.turnId === 'string' ? codex.turnId : undefined };
 }
 
 export function ConversationDeliveryProvider({ organization, agent, session, csrf, onOpen, children }: PropsWithChildren<{ organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void }>) {
@@ -35,9 +40,15 @@ export function useConversationDelivery() {
   return useContext(ConversationDeliveryContext);
 }
 
-function matchingDeliveries(deliveries: Delivery[], message: NativeMessage) {
-  if (message.role === 'user') return deliveries.filter((delivery) => Boolean(delivery.native_message_id && message.ids.has(delivery.native_message_id)));
-  if (message.role === 'assistant') return deliveries.filter((delivery) => Boolean(delivery.outcome?.message_id && message.ids.has(delivery.outcome.message_id)));
+export function matchingDeliveries(deliveries: Delivery[], message: NativeMessage) {
+  if (message.role === 'user') return deliveries.filter((delivery) => Boolean(
+    (delivery.native_message_id && message.ids.has(delivery.native_message_id))
+    || message.clientIds.has(delivery.id),
+  ));
+  if (message.role === 'assistant') return deliveries.filter((delivery) => Boolean(
+    (delivery.outcome?.message_id && message.ids.has(delivery.outcome.message_id))
+    || (delivery.outcome?.turn_id && message.turnId === delivery.outcome.turn_id),
+  ));
   return [];
 }
 

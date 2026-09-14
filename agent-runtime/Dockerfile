@@ -7,9 +7,11 @@ RUN apt-get update \
     && npm ci --omit=dev \
     && mkdir -p /workspace /home/agent
 COPY host-auth.mjs ./host-auth.mjs
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod 0555 ./entrypoint.sh
 ENV HOME=/home/agent
 ENV XDG_DATA_HOME=/home/agent/.local/share
 ENV XDG_CONFIG_HOME=/home/agent/.config
 ENV XDG_CACHE_HOME=/home/agent/.cache
 WORKDIR /workspace
-ENTRYPOINT ["/opt/fesnyng/node_modules/.bin/opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
+ENTRYPOINT ["/opt/fesnyng/entrypoint.sh"]

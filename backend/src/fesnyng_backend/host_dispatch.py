@@ -16,11 +16,12 @@ from uuid import UUID
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from fesnyng_backend.agent_models import Contract
+from fesnyng_backend.codex_history import full_turns, is_unmaterialized
 from fesnyng_backend.host_effects import native_tools_settled
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration, NativeID
 from fesnyng_backend.host_native_evidence import NativeEvidence
-from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable, codex_thread_family
 from fesnyng_backend.host_store import HostStore
 
 
@@ -82,7 +83,11 @@ class DispatchStore:
         lifecycle_operation: bool = False,
     ) -> dict[str, Any]:
         mapped_session = self.host.session(org, agent, session)
-        RuntimeRouter.require_supported(mapped_session["runtime_type"])
+        # The durable queue may admit either installed harness.  Native routing
+        # happens only in Dispatcher._thread after it has the bound runtime;
+        # never reject Codex here through the legacy OpenCode-only static gate.
+        if mapped_session["runtime_type"] not in {"opencode", "codex"}:
+            raise RuntimeUnavailable("Thread harness binding is invalid")
         payload = submission.model_dump_json()
         attribution = author.model_dump_json()
         with self.host.connect() as connection:
@@ -315,6 +320,9 @@ class Dispatcher:
     async def _thread(self, key: tuple[str, str, str], rows: list[dict[str, Any]]) -> None:
         org, agent, session_id = key
         session = self.store.host.session(org, agent, session_id)
+        if session["runtime_type"] == "codex":
+            await self._codex_thread(key, rows, session)
+            return
         RuntimeRouter.require_supported(session["runtime_type"])
         try:
             statuses = await self.runtime.request(
@@ -373,6 +381,418 @@ class Dispatcher:
         except RuntimeUnavailable as error:
             for row in rows:
                 self.store.change(row, row["state"], error=str(error))
+
+    def _codex(self, session: Mapping[str, Any]) -> Any:
+        """Resolve the bound App Server adapter without falling through to OpenCode."""
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "call"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        return adapter
+
+    async def _codex_thread(
+        self, key: tuple[str, str, str], rows: list[dict[str, Any]], session: dict[str, Any]
+    ) -> None:
+        """Reconcile Codex turns, whose receipts are native turn IDs rather than messages."""
+        org, agent, session_id = key
+        adapter = self._codex(session)
+        try:
+            turns = await full_turns(adapter, org, agent, session_id)
+        except RuntimeUnavailable as error:
+            # The pinned server cannot page an untouched thread.  It is safe
+            # to start its first turn, but an already submitted turn remains
+            # unresolved until the native record becomes inspectable.
+            known_empty = all(
+                row["state"] == "queued" and row["native_message_id"] is None for row in rows
+            )
+            if not known_empty or not is_unmaterialized(error, session_id):
+                raise
+            turns = []
+        if not isinstance(turns, list) or not all(isinstance(turn, Mapping) for turn in turns):
+            raise RuntimeUnavailable("Codex thread receipt is invalid")
+        by_id = {turn.get("id"): turn for turn in turns if isinstance(turn.get("id"), str)}
+        active_turns = {
+            turn_id
+            for turn_id, turn in by_id.items()
+            if turn.get("status") not in {"completed", "failed", "interrupted"}
+        }
+        for row in sorted(rows, key=lambda item: item["sequence"], reverse=True):
+            if row["native_message_id"] is None:
+                correlated = next(
+                    (
+                        turn_id
+                        for turn_id, turn in by_id.items()
+                        if any(
+                            isinstance(item, Mapping)
+                            and item.get("type") == "userMessage"
+                            and item.get("clientId") == row["id"]
+                            for item in turn.get("items", [])
+                            if isinstance(turn.get("items"), list)
+                        )
+                    ),
+                    None,
+                )
+                if correlated is not None:
+                    current = self.store.get(org, agent, row["id"])
+                    self.store.change(current, "active", message_id=correlated, validated=True)
+                    row = self.store.get(org, agent, row["id"])
+            turn = by_id.get(row["native_message_id"])
+            if turn is None:
+                continue
+            status = turn.get("status")
+            if status in {"completed", "failed", "interrupted"}:
+                current = self.store.get(org, agent, row["id"])
+                # Interrupt acknowledgement is not terminal.  Once the
+                # targeted turn reaches *any* terminal state, the requested
+                # quieting action succeeded even when normal completion won
+                # the race with the interrupt.
+                stopped = row["payload"]["mode"] == "stop"
+                self.store.change(
+                    current,
+                    "completed" if status == "completed" or stopped else "failed",
+                    validated=True,
+                    outcome={
+                        "kind": "codex_interrupt_completed" if stopped else "codex_turn_completed",
+                        "turn_id": row["native_message_id"],
+                        "status": status,
+                    },
+                    error=None if status == "completed" or stopped else f"Codex turn {status}",
+                )
+            elif row["state"] == "submitting":
+                self.store.change(row, "active", validated=True)
+        current = [self.store.get(org, agent, row["id"]) for row in rows]
+        # A receipt that was previously correlated but is absent from the
+        # latest native history is an unknown effect, never evidence of idle.
+        missing_active_receipt = any(
+            row["state"] == "active"
+            and isinstance(row["native_message_id"], str)
+            and row["native_message_id"] not in by_id
+            for row in current
+        )
+        # An earlier RPC can be in flight before App Server materializes its
+        # turn.  Do not let a later queued prompt overtake that unknown effect.
+        blocked_by_unknown = (
+            any(
+                row["state"] in {"submitting", "stopping", "uncertain", "unresolved"}
+                for row in current
+            )
+            or missing_active_receipt
+        )
+        if blocked_by_unknown:
+            # A stop may still quiet a separately known active native turn.
+            # It never settles or bypasses the earlier unknown receipt, and
+            # normal/steering submissions remain blocked below this point.
+            urgent_stop = next(
+                (
+                    row
+                    for row in current
+                    if row["state"] == "queued" and row["payload"]["mode"] == "stop"
+                ),
+                None,
+            )
+            if urgent_stop is not None and active_turns and urgent_stop["id"] not in self.tasks:
+                self.tasks[urgent_stop["id"]] = asyncio.create_task(
+                    self._submit_codex(urgent_stop, session, next(iter(active_turns)))
+                )
+            return
+        unsettled = [
+            row
+            for row in current
+            if row["state"] not in {"completed", "failed", "contributed", "cancelled", "unresolved"}
+        ]
+        urgent = next(
+            (
+                row
+                for row in unsettled
+                if row["state"] == "queued" and row["payload"]["mode"] == "stop"
+            ),
+            None,
+        )
+        steering = next(
+            (
+                row
+                for row in unsettled
+                if row["state"] == "queued"
+                and row["payload"]["mode"] == "steering"
+                and active_turns
+            ),
+            None,
+        )
+        queued = next((row for row in unsettled if row["state"] == "queued"), None)
+        candidate = urgent or steering or (queued if not active_turns else None)
+        if candidate is not None and candidate["id"] not in self.tasks:
+            self.tasks[candidate["id"]] = asyncio.create_task(
+                self._submit_codex(candidate, session, next(iter(active_turns), None))
+            )
+
+    async def _submit_codex(
+        self, row: dict[str, Any], session: dict[str, Any], active_turn_id: str | None
+    ) -> None:
+        """Submit exactly once.  An unavailable response is unresolved, never replayed."""
+        org, agent, session_id = row["organization_id"], row["agent_id"], row["session_id"]
+        try:
+            adapter = self._codex(session)
+            # Policy application takes the same per-agent lock.  Perform it
+            # before admission serializes the native user turn, then recheck
+            # the durable record while holding that lock.
+            if row["payload"]["mode"] == "stop":
+                self._require_codex_stop_admission(org, agent)
+            else:
+                await self._require_codex_admission(org, agent, session_id, apply_policy=True)
+            async with self.runtime.lock(agent):
+                if row["payload"]["mode"] == "stop":
+                    self._require_codex_stop_admission(org, agent)
+                else:
+                    await self._require_codex_admission(org, agent, session_id, apply_policy=False)
+                active_turn_id = await self._recheck_codex_head(
+                    adapter, row, session, active_turn_id
+                )
+                if not self.store.change(row, "submitting"):
+                    return
+                current = self.store.get(org, agent, row["id"])
+                if row["payload"]["mode"] == "stop":
+                    if row["payload"]["cancel_queued"]:
+                        for queued in self.store.for_thread(org, agent, session_id):
+                            if (
+                                queued["state"] == "queued"
+                                and queued["sequence"] < row["sequence"]
+                                and queued["payload"]["mode"] != "stop"
+                            ):
+                                self.store.change(
+                                    self.store.get(org, agent, queued["id"]),
+                                    "cancelled",
+                                    outcome={
+                                        "kind": "cancelled_before_submission",
+                                        "stop_id": row["id"],
+                                    },
+                                )
+                    if active_turn_id is None:
+                        self.store.change(
+                            current,
+                            "completed",
+                            validated=True,
+                            outcome={"kind": "codex_interrupt_not_needed"},
+                        )
+                        return
+                    reply = await adapter.call(
+                        org,
+                        agent,
+                        "turn/interrupt",
+                        {"threadId": session_id, "turnId": active_turn_id},
+                    )
+                    if not isinstance(reply, Mapping):
+                        raise RuntimeUnavailable("Codex interrupt receipt is invalid")
+                    # An RPC acknowledgement only says the interrupt was
+                    # accepted.  Reconciliation observes the terminal native
+                    # turn before completing this durable stop receipt.
+                    self.store.change(
+                        current,
+                        "stopping",
+                        message_id=active_turn_id,
+                        outcome={"kind": "codex_interrupt_requested", "turn_id": active_turn_id},
+                    )
+                    return
+                input_: list[dict[str, str]] = []
+                command = row["payload"]["command"]
+                if command:
+                    input_.append(
+                        await self._codex_skill_input(
+                            adapter, org, agent, session["directory"], command
+                        )
+                    )
+                if row["payload"]["text"]:
+                    input_.append({"type": "text", "text": row["payload"]["text"]})
+                if row["payload"]["mode"] == "steering":
+                    if active_turn_id is None:
+                        raise RuntimeUnavailable("Codex steering has no active turn")
+                    reply = await adapter.call(
+                        org,
+                        agent,
+                        "turn/steer",
+                        {
+                            "threadId": session_id,
+                            "expectedTurnId": active_turn_id,
+                            "input": input_,
+                            "clientUserMessageId": row["id"],
+                        },
+                    )
+                    turn_id = reply.get("turnId") if isinstance(reply, Mapping) else None
+                else:
+                    reply = await adapter.call(
+                        org,
+                        agent,
+                        "turn/start",
+                        {
+                            "threadId": session_id,
+                            "input": input_,
+                            "clientUserMessageId": row["id"],
+                            "model": HostAgentConfiguration.model_validate_json(
+                                self.store.host.agent(org, agent)["applied_envelope"]
+                            ).configuration.model,
+                        },
+                    )
+                    turn = reply.get("turn") if isinstance(reply, Mapping) else None
+                    turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+                if not isinstance(turn_id, str):
+                    raise RuntimeUnavailable("Codex turn receipt is invalid")
+                current = self.store.get(org, agent, row["id"])
+                self.store.change(current, "active", message_id=turn_id, validated=True)
+        except RuntimeUnavailable as error:
+            current = self.store.get(org, agent, row["id"])
+            # Codex has no caller-selected native idempotency key.  Once a call
+            # might have reached App Server, only an operator may resolve it.
+            if current["state"] in {"submitting", "stopping"}:
+                self.store.change(current, "unresolved", error=str(error))
+            elif current["state"] == "queued":
+                self.store.change(current, "queued", error=str(error))
+        except asyncio.CancelledError:
+            current = self.store.get(org, agent, row["id"])
+            if current["state"] == "submitting":
+                self.store.change(
+                    current,
+                    "unresolved",
+                    error="Host stopped during Codex submission; inspect before repeating",
+                )
+            raise
+        finally:
+            self.wake()
+
+    async def _require_codex_admission(
+        self, organization_id: str, agent_id: str, session_id: str, *, apply_policy: bool
+    ) -> None:
+        """Require the host-applied Codex policy/configuration before a native turn."""
+        agent = self.store.host.agent(organization_id, agent_id)
+        if not agent["applied_envelope"]:
+            raise RuntimeUnavailable("Agent configuration is pending")
+        desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
+        applied = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
+        if desired != applied:
+            raise RuntimeUnavailable("Agent configuration is pending")
+        if applied.configuration.runtime_type != "codex":
+            raise RuntimeUnavailable("Codex configuration is not applied")
+        if self.interactions is not None:
+            # A newly created thread receives the candidate policy in
+            # `thread/start`, but its durable per-thread receipt is still
+            # absent.  Apply through the policy owner before a user turn;
+            # it verifies the native policy and only then marks the record.
+            if apply_policy:
+                await self.interactions.apply_policy(organization_id, agent_id, session_id)
+            policy = self.interactions.get_policy(organization_id, agent_id, session_id)
+            if (
+                policy["desired_revision"] != policy["applied_revision"]
+                or policy["applied_policy_version"] != applied.policy_version
+            ):
+                raise RuntimeUnavailable("Thread policy changed before native submission")
+
+    def _require_codex_stop_admission(self, organization_id: str, agent_id: str) -> None:
+        """Stopping remains available while a replacement configuration is staged."""
+        agent = self.store.host.agent(organization_id, agent_id)
+        applied = agent.get("applied_envelope")
+        if not isinstance(applied, str):
+            raise RuntimeUnavailable("Codex harness is not applied")
+        if (
+            HostAgentConfiguration.model_validate_json(applied).configuration.runtime_type
+            != "codex"
+        ):
+            raise RuntimeUnavailable("Codex harness is not applied")
+
+    async def _recheck_codex_head(
+        self, adapter: Any, row: dict[str, Any], session: dict[str, Any], active_turn_id: str | None
+    ) -> str | None:
+        """Re-read durable/native ordering under the agent lock before an RPC."""
+        org, agent, session_id = row["organization_id"], row["agent_id"], row["session_id"]
+        latest = self.store.get(org, agent, row["id"])
+        if latest["state"] != "queued":
+            raise RuntimeUnavailable("Codex delivery is no longer queued")
+        rows = self.store.for_thread(org, agent, session_id)
+        earlier = [
+            item
+            for item in rows
+            if item["sequence"] < latest["sequence"]
+            and item["state"] not in {"completed", "failed", "contributed", "cancelled"}
+        ]
+        try:
+            turns = await full_turns(adapter, org, agent, session_id)
+        except RuntimeUnavailable as error:
+            queued_cancellation = (
+                latest["payload"]["mode"] == "stop"
+                and latest["payload"]["cancel_queued"]
+                and all(item["state"] == "queued" for item in earlier)
+            )
+            if (earlier and not queued_cancellation) or not is_unmaterialized(error, session_id):
+                raise
+            turns = []
+        active = [
+            turn["id"]
+            for turn in turns
+            if isinstance(turn, Mapping)
+            and isinstance(turn.get("id"), str)
+            and turn.get("status") not in {"completed", "failed", "interrupted"}
+        ]
+        if latest["payload"]["mode"] == "stop":
+            if active:
+                return active[0]
+            if any(item["state"] != "queued" for item in earlier):
+                raise RuntimeUnavailable("Codex stop is waiting for an earlier unknown delivery")
+            return None
+        if latest["payload"]["mode"] == "steering":
+            # Steering is the one ordered submission that intentionally joins
+            # the verified active turn.  It still cannot bypass an unknown or
+            # uncorrelated earlier effect.
+            if not active:
+                raise RuntimeUnavailable("Codex steering has no active turn")
+            if any(
+                item["state"] != "queued"
+                and (
+                    item["state"] != "active"
+                    or not isinstance(item["native_message_id"], str)
+                    or item["native_message_id"] not in active
+                )
+                for item in earlier
+            ):
+                raise RuntimeUnavailable("Codex steering is waiting for earlier native work")
+            return active[0]
+        if earlier or active:
+            raise RuntimeUnavailable("Codex delivery is waiting for earlier native work")
+        return active_turn_id
+
+    async def _codex_skill_input(
+        self, adapter: Any, organization_id: str, agent_id: str, directory: str, command: str
+    ) -> dict[str, str]:
+        """Resolve one configured explicit skill from App Server immediately before use."""
+        prefix, separator, name = command.partition("/")
+        if prefix != "fesnyng" or not separator or not name:
+            raise RuntimeUnavailable("Codex workflow command is not configured")
+        envelope = HostAgentConfiguration.model_validate_json(
+            self.store.host.agent(organization_id, agent_id)["applied_envelope"]
+        )
+        if name not in {
+            skill.name for skill in envelope.configuration.skills if skill.explicit_only
+        }:
+            raise RuntimeUnavailable("Codex workflow command is not configured")
+        reply = await adapter.call(
+            organization_id, agent_id, "skills/list", {"cwds": [directory], "forceReload": True}
+        )
+        data = reply.get("data") if isinstance(reply, Mapping) else None
+        if not isinstance(data, list):
+            raise RuntimeUnavailable("Codex skills inventory receipt is invalid")
+        matches: list[str] = []
+        for entry in data:
+            skills = entry.get("skills") if isinstance(entry, Mapping) else None
+            if not isinstance(skills, list):
+                raise RuntimeUnavailable("Codex skills inventory receipt is invalid")
+            for skill in skills:
+                if not isinstance(skill, Mapping):
+                    raise RuntimeUnavailable("Codex skills inventory receipt is invalid")
+                if skill.get("name") == name and isinstance(skill.get("path"), str):
+                    matches.append(skill["path"])
+        if len(set(matches)) != 1:
+            raise RuntimeUnavailable("Configured Codex skill is not available natively")
+        return {"type": "skill", "name": name, "path": matches[0]}
 
     async def _submit(
         self, row: dict[str, Any], session: dict[str, Any], history: list[dict[str, Any]]
@@ -749,17 +1169,46 @@ class Dispatcher:
 
     async def agent_activity(self, organization_id: str, agent_id: str) -> str:
         active: list[str] = []
+        sessions = self.store.host.sessions(organization_id, agent_id)
+        codex_sessions = [session for session in sessions if session["runtime_type"] == "codex"]
+        applied = self.store.host.agent(organization_id, agent_id).get("applied_envelope")
+        zero_thread_codex = (
+            not sessions
+            and isinstance(applied, str)
+            and HostAgentConfiguration.model_validate_json(applied).configuration.runtime_type
+            == "codex"
+        )
+        if codex_sessions:
+            statuses = getattr(self.runtime, "codex_thread_statuses", None)
+            if statuses is None:
+                raise RuntimeUnavailable(
+                    "Codex thread status capability is unavailable on this host"
+                )
+            threads = await statuses(organization_id, agent_id)
+            related = codex_thread_family(
+                {session["session_id"] for session in codex_sessions}, threads
+            )
+            for thread in related:
+                status = thread.get("status")
+                kind = status.get("type") if isinstance(status, Mapping) else None
+                if kind not in {"idle", "active", "notLoaded"}:
+                    raise RuntimeUnavailable("Codex native thread status is uncertain")
+                if kind == "active":
+                    active.append(f"codex:{thread['id']}:active")
         directories = {
-            session["directory"] for session in self.store.host.sessions(organization_id, agent_id)
+            session["directory"] for session in sessions if session["runtime_type"] == "opencode"
         }
-        for directory in [None, *sorted(directories)]:
-            statuses = await self.runtime.request(
-                organization_id, agent_id, "/session/status", directory=directory
-            )
-            active.extend(
-                f"{directory or '<default>'}:{native_id}:{statuses[native_id]['type']}"
-                for native_id in self._active_native_ids(statuses)
-            )
+        # A Codex-configured employee must never probe the OpenCode server,
+        # including before it has created its first mapped thread.
+        if directories or (not codex_sessions and not zero_thread_codex):
+            for directory in [None, *sorted(directories)]:
+                statuses = await self.runtime.request(
+                    organization_id, agent_id, "/session/status", directory=directory
+                )
+                active.extend(
+                    f"{directory or '<default>'}:{native_id}:{statuses[native_id]['type']}"
+                    for native_id in self._active_native_ids(statuses)
+                )
         return "|".join(sorted(set(active)))
 
     async def quiesce_agent(self, organization_id: str, agent_id: str, author: Actor) -> None:
@@ -767,43 +1216,140 @@ class Dispatcher:
             session["session_id"]: session
             for session in self.store.host.sessions(organization_id, agent_id)
         }
-        families = {
-            session_id: await self._session_family(organization_id, agent_id, session, mapped)
+        opencode = {
+            session_id: session
             for session_id, session in mapped.items()
+            if session["runtime_type"] == "opencode"
         }
-        known_ids = {native_id for family in families.values() for native_id, _ in family}
-        for session_id, session in mapped.items():
-            family = families[session_id]
-            statuses_by_directory = {
-                directory: await self.runtime.request(
-                    organization_id, agent_id, "/session/status", directory=directory
+        if opencode:
+            families = {
+                session_id: await self._session_family(organization_id, agent_id, session, opencode)
+                for session_id, session in opencode.items()
+            }
+            known_ids = {native_id for family in families.values() for native_id, _ in family}
+            for session_id, session in opencode.items():
+                family = families[session_id]
+                statuses_by_directory = {
+                    directory: await self.runtime.request(
+                        organization_id, agent_id, "/session/status", directory=directory
+                    )
+                    for directory in {directory for _, directory in family}
+                }
+                for statuses in statuses_by_directory.values():
+                    if set(self._active_native_ids(statuses)) - known_ids:
+                        raise RuntimeUnavailable(
+                            "Active native session has no mapped Fesnyng thread"
+                        )
+                active = {
+                    native_id
+                    for native_id, directory in family
+                    if self._thread_busy(statuses_by_directory[directory], native_id)
+                }
+                if not active:
+                    continue
+                stop = HostSubmission(
+                    id=UUID(int=secrets.randbits(128)), mode="stop", author=author
                 )
-                for directory in {directory for _, directory in family}
-            }
-            for statuses in statuses_by_directory.values():
-                if set(self._active_native_ids(statuses)) - known_ids:
-                    raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
-            active = {
-                native_id
-                for native_id, directory in family
-                if self._thread_busy(statuses_by_directory[directory], native_id)
-            }
-            if not active:
-                continue
-            stop = HostSubmission(id=UUID(int=secrets.randbits(128)), mode="stop", author=author)
-            receipt = self.store.enqueue(
-                organization_id,
-                agent_id,
-                session["session_id"],
-                stop,
-                author,
-                lifecycle_operation=True,
+                receipt = self.store.enqueue(
+                    organization_id, agent_id, session_id, stop, author, lifecycle_operation=True
+                )
+                await self._stop(receipt, session, family[1:])
+            default_statuses = await self.runtime.request(
+                organization_id, agent_id, "/session/status"
             )
-            await self._stop(receipt, session, family[1:])
-        default_statuses = await self.runtime.request(organization_id, agent_id, "/session/status")
-        unowned = set(self._active_native_ids(default_statuses)) - known_ids
-        if unowned:
-            raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
+            unowned = set(self._active_native_ids(default_statuses)) - known_ids
+            if unowned:
+                raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
+        elif not mapped and not (
+            isinstance(
+                self.store.host.agent(organization_id, agent_id).get("applied_envelope"), str
+            )
+            and HostAgentConfiguration.model_validate_json(
+                self.store.host.agent(organization_id, agent_id)["applied_envelope"]
+            ).configuration.runtime_type
+            == "codex"
+        ):
+            default_statuses = await self.runtime.request(
+                organization_id, agent_id, "/session/status"
+            )
+            if self._active_native_ids(default_statuses):
+                raise RuntimeUnavailable("Active native session has no mapped Fesnyng thread")
+
+        codex_sessions = [
+            session for session in mapped.values() if session["runtime_type"] == "codex"
+        ]
+        codex_stops: list[dict[str, Any]] = []
+        if codex_sessions:
+            adapter = self._codex(codex_sessions[0])
+            statuses = getattr(self.runtime, "codex_thread_statuses", None)
+            if statuses is None:
+                raise RuntimeUnavailable(
+                    "Codex thread status capability is unavailable on this host"
+                )
+            threads = await statuses(organization_id, agent_id)
+            roots = {session["session_id"] for session in codex_sessions}
+            related = codex_thread_family(roots, threads)
+            owner_for: dict[str, str] = {root: root for root in roots}
+            changed = True
+            while changed:
+                changed = False
+                for thread in related:
+                    thread_id = thread["id"]
+                    parent = thread.get("parentThreadId")
+                    if parent in owner_for and thread_id not in owner_for:
+                        owner_for[thread_id] = owner_for[parent]
+                        changed = True
+            if set(owner_for) != {thread["id"] for thread in related}:
+                raise RuntimeUnavailable("Codex thread ancestry receipt is invalid")
+            active_turns: dict[str, list[tuple[str, str]]] = {}
+            for thread in related:
+                thread_id = thread["id"]
+                root = owner_for[thread_id]
+                status = thread.get("status")
+                kind = status.get("type") if isinstance(status, Mapping) else None
+                if kind not in {"idle", "active", "notLoaded"}:
+                    raise RuntimeUnavailable("Codex native thread status is uncertain")
+                if kind != "active":
+                    continue
+                turns = await full_turns(adapter, organization_id, agent_id, thread_id)
+                live = [
+                    turn.get("id")
+                    for turn in turns
+                    if isinstance(turn, Mapping)
+                    and isinstance(turn.get("id"), str)
+                    and turn.get("status") not in {"completed", "failed", "interrupted"}
+                ]
+                if not live:
+                    raise RuntimeUnavailable("Codex active thread has no interruptible turn")
+                active_turns.setdefault(root, []).extend((thread_id, turn_id) for turn_id in live)
+            for root, turns in active_turns.items():
+                stop = HostSubmission(
+                    id=UUID(int=secrets.randbits(128)), mode="stop", author=author
+                )
+                row = self.store.enqueue(
+                    organization_id, agent_id, root, stop, author, lifecycle_operation=True
+                )
+                if not self.store.change(row, "stopping", message_id=turns[0][1]):
+                    continue
+                try:
+                    for thread_id, turn_id in turns:
+                        interrupt = await adapter.call(
+                            organization_id,
+                            agent_id,
+                            "turn/interrupt",
+                            {"threadId": thread_id, "turnId": turn_id},
+                        )
+                        if not isinstance(interrupt, Mapping):
+                            raise RuntimeUnavailable("Codex interrupt receipt is invalid")
+                except RuntimeUnavailable:
+                    current = self.store.get(organization_id, agent_id, row["id"])
+                    self.store.change(
+                        current,
+                        "unresolved",
+                        error="Codex lifecycle interrupt needs reconciliation",
+                    )
+                    raise
+                codex_stops.append(row)
         for _ in range(30):
             if not await self.agent_active(organization_id, agent_id):
                 break
@@ -813,6 +1359,18 @@ class Dispatcher:
                 "Agent lifecycle change is waiting for native sessions to stop"
             )
         await self.reconcile_agent_effects(organization_id, agent_id)
+        for row in codex_stops:
+            current = self.store.get(organization_id, agent_id, row["id"])
+            if current["state"] == "stopping":
+                self.store.change(
+                    current,
+                    "completed",
+                    validated=True,
+                    outcome={
+                        "kind": "codex_interrupt_completed",
+                        "turn_id": current["native_message_id"],
+                    },
+                )
         if not self.agent_effects_settled(organization_id, agent_id):
             raise RuntimeUnavailable("Agent lifecycle change needs delivery reconciliation")
 
@@ -870,6 +1428,12 @@ class Dispatcher:
             ]
             for session_id in {row["session_id"] for row in rows}:
                 session = self.store.host.session(organization_id, agent_id, session_id)
+                session_rows = [row for row in rows if row["session_id"] == session_id]
+                if session["runtime_type"] == "codex":
+                    await self._codex_thread(
+                        (organization_id, agent_id, session_id), session_rows, session
+                    )
+                    continue
                 statuses = await self.runtime.request(
                     organization_id, agent_id, "/session/status", directory=session["directory"]
                 )
@@ -881,8 +1445,8 @@ class Dispatcher:
                     directory=session["directory"],
                 )
                 self._validate_history(history)
-                for row in rows:
-                    if row["session_id"] == session_id and row["native_message_id"]:
+                for row in session_rows:
+                    if row["native_message_id"]:
                         await self._reconcile(row, history, busy, session["directory"])
 
     def agent_effects_settled(self, organization_id: str, agent_id: str) -> bool:

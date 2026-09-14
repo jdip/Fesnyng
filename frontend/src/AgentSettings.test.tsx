@@ -52,3 +52,27 @@ test('submits Astra as the default model for a new agent without resetting exist
   expect(JSON.parse(create![1].body as string)).toMatchObject({ configuration: { model: 'gpt-6-astra' } });
   expect(agent.configuration.model).toBe('gpt-5.6-luna');
 });
+
+test('allows selecting Codex only while creating an employee', async () => {
+  const created = { ...agent, id: 'codex-agent', name: 'Codex agent', desired_version: 1, configuration: { ...agent.configuration, runtime_type: 'codex' as const } };
+  const request = vi.fn().mockImplementation(async (url: string, options: RequestInit = {}) => {
+    if (options.method === 'POST' && String(url).endsWith('/agents')) return new Response(JSON.stringify(created));
+    if (String(url).endsWith('/apply')) return new Response(JSON.stringify({}));
+    if (String(url).endsWith('/codex-agent')) return new Response(JSON.stringify(created));
+    return new Response(JSON.stringify(String(url).endsWith('/hosts') ? [{ id: 'host', name: 'Local host' }] : []));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+
+  fireEvent.change(await screen.findByLabelText('Harness'), { target: { value: 'codex' } });
+  fireEvent.change(screen.getByLabelText('Agent name'), { target: { value: 'Codex agent' } });
+  fireEvent.change(screen.getByLabelText('Home host'), { target: { value: 'host' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save and apply' }));
+
+  await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST')).toBe(true));
+  const create = request.mock.calls.find(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST');
+  expect(JSON.parse(create![1].body as string)).toMatchObject({ configuration: { runtime_type: 'codex' } });
+
+  render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+  expect(screen.queryByLabelText('Harness')).toBeNull();
+});

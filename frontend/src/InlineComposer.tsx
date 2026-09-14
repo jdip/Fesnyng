@@ -4,11 +4,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { ThreadComposerProps } from './components/assistant-ui/elements/thread.aui';
 import { type DraftAdmission, type DraftWorkflow, useConversationDrafts } from './ConversationDrafts';
 import { createFesnyngOpenCodeFetch } from './lib/opencode-client';
+import { createFesnyngCodexFetch } from './lib/codex-client';
 import { errorMessage } from './workspace-api';
 
 type Workflow = DraftWorkflow;
 type DeliveryMode = DraftAdmission['mode'];
-type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: string; sessionId?: string };
+type InlineComposerProps = ThreadComposerProps & { baseUrl: string; csrfToken: string; sessionId?: string; runtime?: 'opencode' | 'codex' };
 type Admission = DraftAdmission;
 
 const workflowInventoryUrl = (baseUrl: string) => `${baseUrl.replace(/\/$/, '')}/command`;
@@ -25,7 +26,7 @@ async function responseError(response: Response) {
 }
 
 /** A product slot around the maintained assistant-ui composer primitives. */
-export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken, sessionId }: InlineComposerProps) {
+export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken, sessionId, runtime = 'opencode' }: InlineComposerProps) {
   const aui = useAui();
   const drafts = useConversationDrafts();
   const text = useAuiState((state) => state.composer.text);
@@ -50,7 +51,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
   const skipFirstDraftWriteRef = useRef(true);
   const requestGenerationRef = useRef(0);
   const isMountedRef = useRef(true);
-  const fetchWithFesnyngAuth = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
+  const fetchWithFesnyngAuth = useMemo(() => runtime === 'codex' ? createFesnyngCodexFetch(csrfToken) : createFesnyngOpenCodeFetch(csrfToken), [csrfToken, runtime]);
 
   useEffect(() => { auiRef.current = aui; }, [aui]);
   useEffect(() => { textRef.current = text; }, [text]);
@@ -125,7 +126,7 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
         if (!controller.signal.aborted) setInventoryError(`Workflows are unavailable: ${errorMessage(error)}`);
       });
     return () => controller.abort();
-  }, [baseUrl, fetchWithFesnyngAuth]);
+  }, [baseUrl, fetchWithFesnyngAuth, runtime]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -213,9 +214,13 @@ export function InlineComposer({ autoFocus, allowAttachments, baseUrl, csrfToken
       if (isCurrentThread(requestThreadIdentity) && aui.threadListItem.getState().externalId !== resolvedSessionId) {
         await aui.threads.switchToThread(resolvedSessionId);
       }
-      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(resolvedSessionId)}/prompt_async`, {
+      const response = await fetchWithFesnyngAuth(`${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(resolvedSessionId)}${runtime === 'codex' ? '/prompt' : '/prompt_async'}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': currentAdmission.id },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime === 'codex' ? {
+          text: instructions,
+          command: workflow?.name,
+          mode: currentAdmission.mode,
+        } : {
           parts: instructions.trim() ? [{ type: 'text', text: instructions }] : [],
           command: workflow?.name,
           mode: currentAdmission.mode,

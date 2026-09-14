@@ -195,6 +195,82 @@ class Interactions:
             author,
         )
 
+    async def reply_codex(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        operation_id: UUID,
+        request_id: str,
+        response: dict[str, Any],
+        author: Actor,
+    ) -> dict[str, Any]:
+        """Durably acknowledge one App Server request without replaying it.
+
+        The existing interaction receipt store remains the recovery authority.
+        ``permission`` is its generic one-shot native-response category; the
+        opaque response remains in ``answer`` so App Server request methods do
+        not acquire a lossy local taxonomy.
+        """
+        session = self.host.session(organization_id, agent_id, session_id)
+        if session["runtime_type"] != "codex":
+            raise RuntimeUnavailable("Thread is not bound to the Codex harness")
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not all(hasattr(adapter, name) for name in ("pending", "respond")):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        async with self.runtime.lock(agent_id):
+            if self._has_operation(str(operation_id)):
+                return self._start_reply(
+                    organization_id,
+                    agent_id,
+                    session_id,
+                    operation_id,
+                    request_id,
+                    "permission",
+                    response,
+                    author,
+                )
+            envelope = self._applied_envelope(organization_id, agent_id)
+            if envelope.configuration.runtime_type != "codex":
+                raise RuntimeUnavailable("Codex configuration is not applied")
+            self._require_reply_admission(organization_id, agent_id, session_id)
+            pending = await adapter.pending(organization_id, agent_id, session_id)
+            if not isinstance(pending, list) or not any(
+                isinstance(item, dict) and item.get("id") == request_id for item in pending
+            ):
+                raise ValueError("Codex request is not pending for this thread")
+            receipt = self._start_reply(
+                organization_id,
+                agent_id,
+                session_id,
+                operation_id,
+                request_id,
+                "permission",
+                response,
+                author,
+            )
+            if receipt["state"] != "submitting":
+                return receipt
+            try:
+                await adapter.respond(organization_id, agent_id, session_id, request_id, response)
+            except RuntimeUnavailable as error:
+                self._set_operation_state(str(operation_id), "uncertain", str(error))
+                raise
+            except asyncio.CancelledError:
+                self._set_operation_state(
+                    str(operation_id),
+                    "uncertain",
+                    "Host stopped during Codex interaction reply; inspect before retrying",
+                )
+                raise
+        self._set_operation_state(str(operation_id), "completed")
+        return self._operation(organization_id, agent_id, str(operation_id))
+
     async def reply_scoped(
         self,
         organization_id: str,
@@ -370,10 +446,13 @@ class Interactions:
         session_id: str,
         candidate: HostAgentConfiguration | None = None,
     ) -> dict[str, Any]:
-        session = self._opencode_session(organization_id, agent_id, session_id)
+        session = self.host.session(organization_id, agent_id, session_id)
         envelope = candidate or self._applied_envelope(organization_id, agent_id)
         if str(envelope.organization_id) != organization_id or str(envelope.agent_id) != agent_id:
             raise ValueError("Policy configuration belongs to another agent")
+        if session["runtime_type"] == "codex":
+            return await self._apply_codex_policy(organization_id, agent_id, session_id, envelope)
+        RuntimeRouter.require_supported(session["runtime_type"])
         async with self.runtime.lock(agent_id):
             record = self._policy_record(organization_id, agent_id, session_id)
             if (
@@ -399,6 +478,68 @@ class Interactions:
                 record["desired_revision"],
                 envelope.policy_version,
             )
+        return _policy_receipt(applied, envelope)
+
+    async def _apply_codex_policy(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        envelope: HostAgentConfiguration,
+    ) -> dict[str, Any]:
+        """Apply only the policy App Server can represent, then record that receipt."""
+        router = getattr(self.runtime, "runtime_router", None)
+        session = self.host.session(organization_id, agent_id, session_id)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "apply_policy"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        async with self.runtime.lock(agent_id):
+            return await self.apply_policy_locked(organization_id, agent_id, session_id, envelope)
+
+    async def apply_policy_locked(
+        self,
+        organization_id: str,
+        agent_id: str,
+        session_id: str,
+        candidate: HostAgentConfiguration | None = None,
+    ) -> dict[str, Any]:
+        """Apply a Codex policy while the caller already holds the agent runtime lock."""
+        session = self.host.session(organization_id, agent_id, session_id)
+        envelope = candidate or self._applied_envelope(organization_id, agent_id)
+        if session["runtime_type"] != "codex":
+            raise RuntimeUnavailable("Thread is not bound to the Codex harness")
+        router = getattr(self.runtime, "runtime_router", None)
+        adapter = (
+            router.for_session(session)
+            if router is not None
+            else getattr(self.runtime, "codex", None)
+        )
+        if adapter is None or not hasattr(adapter, "apply_policy"):
+            raise RuntimeUnavailable("Codex harness is not available on this host")
+        record = self._policy_record(organization_id, agent_id, session_id)
+        if (
+            record["desired_revision"] == record["applied_revision"]
+            and record["applied_policy_version"] == envelope.policy_version
+        ):
+            return _policy_receipt(record, envelope)
+        if self.native_admissions_settled is not None and not self.native_admissions_settled(
+            organization_id, agent_id, session_id
+        ):
+            raise RuntimeUnavailable("Thread policy change is waiting for native admissions")
+        await adapter.apply_policy(
+            organization_id, agent_id, session_id, envelope, record["overrides"]
+        )
+        applied = self._mark_policy_applied(
+            organization_id,
+            agent_id,
+            session_id,
+            record["desired_revision"],
+            envelope.policy_version,
+        )
         return _policy_receipt(applied, envelope)
 
     async def _session_family(

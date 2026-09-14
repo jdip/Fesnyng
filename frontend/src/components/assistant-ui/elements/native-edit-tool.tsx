@@ -6,6 +6,7 @@ type EditChange = {
   action: 'added' | 'changed' | 'deleted';
   before?: string;
   after?: string;
+  diff?: string;
 };
 
 const EDIT_TOOLS = new Set(['edit', 'write', 'apply_patch']);
@@ -62,8 +63,21 @@ function parseEditChanges(toolName: string, argsText: string | undefined): EditC
     if (!args) return undefined;
     if (toolName === 'apply_patch') {
       const patchText = readString(args, ['patchText', 'patch']);
-      const changes = patchText ? parsePatchChanges(patchText) : [];
-      return changes.length > 0 ? changes : undefined;
+      const parsed = patchText ? parsePatchChanges(patchText) : [];
+      if (parsed.length > 0) return parsed;
+      if (Array.isArray(args.changes)) {
+        const changes = args.changes.flatMap((change): EditChange[] => {
+          const entry = asRecord(change);
+          const path = entry && readString(entry, ['path', 'filePath']);
+          if (!entry || !path) return [];
+          const diff = readString(entry, ['diff', 'patch']);
+          const typed = asRecord(entry.kind);
+          const kind = readString(entry, ['action']) ?? (typed && readString(typed, ['type']));
+          return [{ path, action: kind === 'add' || kind === 'added' ? 'added' : kind === 'delete' || kind === 'deleted' ? 'deleted' : 'changed', ...(diff ? { diff } : {}) }];
+        });
+        return changes.length > 0 ? changes : undefined;
+      }
+      return undefined;
     }
     const path = readString(args, ['filePath', 'path', 'file']);
     const before = readString(args, ['oldString', 'oldText', 'before']);
@@ -100,6 +114,7 @@ export const NativeEditToolFallback: ToolCallMessagePartComponent = (props) => {
             <p><code>{change.path}</code></p>
             {change.before !== undefined && <pre><del>{change.before}</del></pre>}
             {change.after !== undefined && <pre><ins>{change.after}</ins></pre>}
+            {change.diff !== undefined && <pre>{change.diff}</pre>}
           </section>
         ))}
       </div>

@@ -15,7 +15,7 @@ from fesnyng_backend.host_dispatch_resolution import (
     HostDispatchResolution,
 )
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import DockerRuntime, RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.settings import ControlPlaneSessionSettings, ServiceSettings
 
@@ -44,7 +44,7 @@ class Native:
         raise AssertionError(path)
 
 
-def _system(tmp_path):
+def _system(tmp_path, runtime_type="opencode"):
     settings = ServiceSettings(
         service="agent-host",
         state_directory=tmp_path / "state",
@@ -60,10 +60,18 @@ def _system(tmp_path):
         agent_id=agent_id,
         version=1,
         name="Resolution agent",
+        configuration={"runtime_type": runtime_type},
     )
     host.stage_agent(envelope)
     host.mark_applied(envelope)
-    host.save_session(organization_id, agent_id, "ses_primary", "/workspace/primary", "Primary")
+    host.save_session(
+        organization_id,
+        agent_id,
+        "ses_primary",
+        "/workspace/primary",
+        "Primary",
+        runtime_type=runtime_type,
+    )
     dispatches = DispatchStore(host)
     dispatches.initialize()
     native = Native()
@@ -156,6 +164,60 @@ def test_operator_resolution_requires_idle_no_local_task_and_no_running_tools(tm
             await asyncio.gather(waiting, return_exceptions=True)
 
     asyncio.run(check_local_task())
+
+
+def test_codex_resolution_waits_for_native_descendants_and_running_tools(tmp_path, monkeypatch):
+    org, agent, dispatches, dispatcher, _, _, author, receipt = _system(tmp_path, "codex")
+
+    class Codex:
+        child_status = "active"
+        tool_status = "completed"
+
+        async def call(self, organization, employee, method, params):
+            if method == "thread/list":
+                return {
+                    "data": [
+                        {"id": "ses_primary", "status": {"type": "idle"}},
+                        {
+                            "id": "thr_child",
+                            "parentThreadId": "ses_primary",
+                            "status": {"type": self.child_status},
+                        },
+                    ]
+                }
+            assert method == "thread/turns/list"
+            return {
+                "data": [
+                    {
+                        "id": "turn_root",
+                        "status": "interrupted",
+                        "items": [{"type": "commandExecution", "status": self.tool_status}],
+                    }
+                ]
+            }
+
+    native = DockerRuntime(dispatches.host, "http://unused.example")
+    adapter = Codex()
+    monkeypatch.setattr(native, "codex", adapter)
+    native.runtime_router = RuntimeRouter(native, adapter)
+    resolver = DispatchResolutionService(dispatches.host, dispatches, dispatcher, native)
+    resolution = HostDispatchResolution(
+        operation_id=uuid4(), outcome="failed", evidence="Inspected native effects.", author=author
+    )
+
+    async def resolve():
+        return await resolver.resolve(org, agent, "ses_primary", UUID(receipt["id"]), resolution)
+
+    with pytest.raises(RuntimeUnavailable, match="native work is active"):
+        asyncio.run(resolve())
+    assert dispatches.get(org, agent, receipt["id"])["state"] == "uncertain"
+    adapter.child_status = "idle"
+    adapter.tool_status = "inProgress"
+    with pytest.raises(ValueError, match="running tool"):
+        asyncio.run(resolve())
+    assert dispatches.get(org, agent, receipt["id"])["state"] == "uncertain"
+    adapter.tool_status = "completed"
+    assert asyncio.run(resolve())["state"] == "failed"
 
 
 @pytest.mark.parametrize(

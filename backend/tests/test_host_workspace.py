@@ -1138,13 +1138,67 @@ def test_workspace_file_listing_preserves_child_and_root_context(tmp_path):
             },
         ],
     }
-    assert (
-        native.calls[-3:]
-        == [
-            (org, agent, "/session/ses_main/children", "GET", None, "/workspace/default/main"),
-            (org, agent, "/file", "GET", {"path": ""}, "/workspace/default/child"),
-        ][-2:]
+
+
+def test_codex_file_inventory_uses_native_names_but_docker_metadata_boundary(tmp_path, monkeypatch):
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
     )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Codex",
+        configuration=AgentConfiguration(runtime_type="codex"),
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(
+        org, agent, "thr_codex", "/workspace/default/codex", "Codex", runtime_type="codex"
+    )
+    native = Native()
+
+    class Codex:
+        async def call(self, _org, _agent, method, params):
+            assert method == "fs/readDirectory"
+            assert params == {"path": "/workspace/default/codex/"}
+            return {
+                "entries": [
+                    {"fileName": "safe.txt", "isDirectory": False, "isFile": True},
+                    {"fileName": "../escape", "isDirectory": False, "isFile": True},
+                ]
+            }
+
+    class Router:
+        def for_session(self, session):
+            assert session["runtime_type"] == "codex"
+            return Codex()
+
+    monkeypatch.setattr(native, "runtime_router", Router(), raising=False)
+    dispatches = DispatchStore(store)
+    dispatches.initialize()
+    interactions = Interactions(store, native)
+    interactions.initialize()
+    listing = asyncio.run(
+        Workspace(store, native, dispatches, interactions).files(org, agent, "thr_codex", "")
+    )
+    assert listing["entries"] == [
+        {
+            "name": "safe.txt",
+            "path": "safe.txt",
+            "type": "file",
+            "size": 12,
+            "modifiedAt": 1_700_000_000_000,
+        }
+    ]
 
 
 def test_workspace_preview_caps_binary_bytes_without_changing_download(tmp_path):

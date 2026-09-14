@@ -130,12 +130,18 @@ class Workspace:
     ):
         self.host = host
         self.runtime = runtime
-        self.runtime_router = RuntimeRouter(runtime)
+        self.runtime_router = getattr(runtime, "runtime_router", None) or RuntimeRouter(runtime)
         self.dispatches = dispatches
         self.interactions = interactions
 
     def _runtime_for(self, session: Mapping[str, Any]) -> NativeRuntime:
         return self.runtime_router.for_session(session)
+
+    def _filesystem_runtime(self, session: Mapping[str, Any]) -> NativeRuntime:
+        """Docker path/descriptor checks remain the filesystem authority for both harnesses."""
+        return (
+            self.runtime if session.get("runtime_type") == "codex" else self._runtime_for(session)
+        )
 
     def sessions(self, org: str, agent: str, *, archived: bool = False) -> list[dict[str, Any]]:
         sessions = self.host.sessions(org, agent, archived=None if archived else False)
@@ -194,7 +200,7 @@ class Workspace:
     async def context(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         """Return safe workspace context for one mapped native thread."""
         session = await self._scoped_session(org, agent, session_id)
-        runtime = self._runtime_for(session)
+        runtime = self._filesystem_runtime(session)
         try:
             context = await runtime.workspace_context(org, agent, session["directory"])
         except RuntimeUnavailable:
@@ -586,11 +592,26 @@ class Workspace:
     async def files(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
         path = self._artifact_path(path, allow_root=True)
         session = await self._scoped_session(org, agent, session_id)
-        runtime = self._runtime_for(session)
+        runtime = self._filesystem_runtime(session)
         await runtime.workspace_path(org, agent, session["directory"], path)
-        native = await runtime.request_with_query(
-            org, agent, "/file", {"path": path}, directory=session["directory"]
-        )
+        if session.get("runtime_type") == "codex":
+            adapter: Any = self._runtime_for(session)
+            directory = await runtime.workspace_path(org, agent, session["directory"], path)
+            receipt = await adapter.call(org, agent, "fs/readDirectory", {"path": directory})
+            entries = receipt.get("entries") if isinstance(receipt, Mapping) else None
+            if not isinstance(entries, list) or not all(
+                isinstance(item, Mapping)
+                and isinstance(item.get("fileName"), str)
+                and isinstance(item.get("isDirectory"), bool)
+                and isinstance(item.get("isFile"), bool)
+                for item in entries
+            ):
+                raise RuntimeUnavailable("Codex file listing response is invalid")
+            native = [{"name": item["fileName"]} for item in entries]
+        else:
+            native = await runtime.request_with_query(
+                org, agent, "/file", {"path": path}, directory=session["directory"]
+            )
         if not isinstance(native, list):
             raise RuntimeUnavailable("Native file listing response is invalid")
         candidates: list[tuple[str, str]] = []
@@ -640,7 +661,7 @@ class Workspace:
     async def preview(self, org: str, agent: str, session_id: str, path: str) -> dict[str, Any]:
         path = self._artifact_path(path)
         session = await self._scoped_session(org, agent, session_id)
-        runtime = self._runtime_for(session)
+        runtime = self._filesystem_runtime(session)
         async with runtime.workspace_download(org, agent, session["directory"], path) as (
             metadata,
             stream,
@@ -676,7 +697,7 @@ class Workspace:
     ) -> AsyncIterator[tuple[dict[str, Any], AsyncIterator[bytes]]]:
         path = self._artifact_path(path)
         session = await self._scoped_session(org, agent, session_id)
-        runtime = self._runtime_for(session)
+        runtime = self._filesystem_runtime(session)
         async with runtime.workspace_download(org, agent, session["directory"], path) as (
             metadata,
             stream,

@@ -11,7 +11,7 @@ export type Delivery = {
   payload: { text: string; mode: string; origin_id?: string };
   updated_at: number;
   error?: string;
-  outcome?: { kind?: string; message_id?: string; operation_id?: string; evidence?: string; outcome?: string };
+  outcome?: { kind?: string; message_id?: string; turn_id?: string; operation_id?: string; evidence?: string; outcome?: string };
 };
 
 export type ThreadAcknowledgement = {
@@ -52,6 +52,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 export function resultIdentity(delivery: Delivery): string | undefined {
   if (delivery.state !== 'completed') return undefined;
   if (delivery.outcome?.kind === 'native_run_completed' && delivery.outcome.message_id) return `native:${delivery.outcome.message_id}`;
+  if (delivery.outcome?.kind === 'codex_turn_completed' && delivery.outcome.turn_id) return `codex:${delivery.outcome.turn_id}`;
   if (delivery.outcome?.kind === 'operator_resolution' && delivery.outcome.outcome === 'completed' && delivery.outcome.operation_id && UUID.test(delivery.outcome.operation_id)) return `resolution:${delivery.outcome.operation_id.toLowerCase()}`;
   return undefined;
 }
@@ -159,7 +160,10 @@ export function ThreadNotificationsProvider({
       const path = agentPath(organization, agent);
       const acknowledgementRequest = api<{ acknowledgements: ThreadAcknowledgement[] }>(`${path}/thread-acknowledgements`, { signal });
       const sessionsRequest = api<{ session_id: string }[]>(`${path}/sessions`, { signal });
-      const pendingRequests = Promise.allSettled((['question', 'permission'] as const).map((kind) => api<unknown>(`${path}/opencode/${kind}`, { signal })));
+      const codex = agents.find((entry) => entry.id === agent)?.configuration?.runtime_type === 'codex';
+      const pendingRequests = codex
+        ? Promise.resolve([] as PromiseSettledResult<unknown>[])
+        : Promise.allSettled((['question', 'permission'] as const).map((kind) => api<unknown>(`${path}/opencode/${kind}`, { signal })));
       const [[acknowledgements, sessions], pendingResults] = await Promise.all([Promise.allSettled([acknowledgementRequest, sessionsRequest]), pendingRequests]);
 
       if (acknowledgements.status === 'fulfilled') {
@@ -200,6 +204,26 @@ export function ThreadNotificationsProvider({
         return;
       }
       const rows = sessions.value;
+      if (codex) {
+        const codexPending = await Promise.allSettled(rows.map(async (session) => {
+          const value = await api<unknown>(`${path}/codex/pending?sessionID=${encodeURIComponent(session.session_id)}`, { signal });
+          if (!Array.isArray(value) || !value.every((entry) => entry && typeof entry === 'object')) {
+            throw new Error('Could not read Codex pending thread input.');
+          }
+          return value.map((entry) => ({ sessionID: session.session_id, ...(entry as Record<string, unknown>) })) as PendingRequest[];
+        }));
+        const entries: PendingRequest[] = [];
+        let unavailable = false;
+        codexPending.forEach((result) => {
+          if (result.status === 'fulfilled') entries.push(...result.value);
+          else unavailable = true;
+        });
+        if (unavailable && current()) failures.push(`${agents.find((entry) => entry.id === agent)?.name ?? agent}: Codex pending input could not be refreshed.`);
+        if (!unavailable && current()) setPending((stored) => ({
+          ...stored,
+          [agent]: replacePendingKind(stored[agent] ?? {}, 'question', entries),
+        }));
+      }
       const dispatches = await Promise.allSettled(rows.map((session) => api<Delivery[]>(`${path}/sessions/${encodeURIComponent(session.session_id)}/dispatches`, { signal })));
       const failedDispatches = dispatches.filter((result) => result.status === 'rejected');
       if (failedDispatches.length && current()) failures.push(`${agents.find((entry) => entry.id === agent)?.name ?? agent}: Some thread results could not be refreshed.`);

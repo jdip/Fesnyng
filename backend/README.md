@@ -62,10 +62,11 @@ Agent workspaces are logical names, not arbitrary filesystem paths. New agents d
 Agent configuration also identifies the harness with `runtime_type`, defaulting to
 `opencode` when omitted. Existing configurations and thread IDs remain valid.
 Each host thread retains its original runtime binding; saving thread metadata must
-not reassign that binding or its organization/agent ownership. The binding
-foundation does not enable Codex execution or harness switching: unsupported
-runtime requests fail rather than falling through to OpenCode. Codex execution
-and permanent thread freezing follow the approved
+not reassign that binding or its organization/agent ownership. New employees may
+select `codex` to use the pinned Codex App Server. Existing employees remain on
+their applied harness until the safe-switching operation is delivered; an
+ordinary configuration update cannot bypass that boundary. Unsupported native
+operations fail visibly. Both integrations follow the approved
 [harness integration specification](https://github.com/jdip/Fesnyng/issues/83).
 
 The authorized `opencode/session/{id}/context` read exposes display-safe repository
@@ -81,7 +82,7 @@ as the owner of these read-only repository calculations.
 
 ## Install an agent host
 
-The host launches one OpenCode container per applied agent. Build the pinned runtime image from the repository root before applying an agent configuration:
+The host launches one container running the selected OpenCode or Codex harness per applied agent. Build the pinned runtime image from the repository root before applying an agent configuration:
 
 ```bash
 docker build -t fesnyng-agent:local agent-runtime
@@ -134,9 +135,16 @@ Credential profiles are organization-scoped metadata in the control plane and du
 
 The host is the only login and refresh owner. It derives the assigned profile from each container's host-issued agent key, serializes refreshes per profile, and fails closed on an uncertain rotation or account mismatch. Several agents on one host can share a profile. A second host can authenticate the same account through a separate login, but it keeps independent refresh credentials and receives no cross-host token synchronization.
 
+Codex uses App Server's experimental externally managed ChatGPT token mode. The
+host supplies access credentials and answers native refresh requests, including
+rejection before expiry. A rejected credential generation is refreshed once for
+all agents sharing that host profile; stale rejection requests use the newer
+credential. Refresh tokens remain with the host, and uncertain refresh outcomes
+require reconciliation instead of falling back to a rejected access token.
+
 ## Container state and replacement
 
-Applied agents use labeled Docker volumes for `/home/agent` and `/workspace`; the native OpenCode server binds its port only to loopback. The host writes the agent's configuration, skill files, and broker configuration with a private umask. Docker receives no socket mount from this runtime.
+Applied agents use labeled Docker volumes for `/home/agent` and `/workspace`; native server ports are published only on loopback. The host writes the agent's configuration, skill files, and broker configuration with a private umask. Codex uses an authenticated App Server connection for native requests and events. Docker receives no socket mount from this runtime.
 
 Organization owners and admins manage **Start**, **Stop**, **Restart**, and
 **Rebuild** from Agent settings. The control-plane
