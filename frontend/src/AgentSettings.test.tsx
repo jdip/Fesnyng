@@ -62,7 +62,7 @@ test('allows selecting Codex only while creating an employee', async () => {
     return new Response(JSON.stringify(String(url).endsWith('/hosts') ? [{ id: 'host', name: 'Local host' }] : []));
   });
   vi.stubGlobal('fetch', request);
-  render(<AgentSettings organization="org" agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+  const { unmount } = render(<AgentSettings organization="org" agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
 
   fireEvent.change(await screen.findByLabelText('Harness'), { target: { value: 'codex' } });
   fireEvent.change(screen.getByLabelText('Agent name'), { target: { value: 'Codex agent' } });
@@ -72,7 +72,91 @@ test('allows selecting Codex only while creating an employee', async () => {
   await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST')).toBe(true));
   const create = request.mock.calls.find(([url, options]) => String(url).endsWith('/agents') && options.method === 'POST');
   expect(JSON.parse(create![1].body as string)).toMatchObject({ configuration: { runtime_type: 'codex' } });
+  expect(await screen.findByLabelText('Harness')).toHaveProperty('value', 'codex');
 
+  unmount();
   render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
-  expect(screen.queryByLabelText('Harness')).toBeNull();
+  expect(screen.getByLabelText('Harness')).toHaveProperty('value', 'opencode');
+  expect(screen.getByRole('button', { name: 'Switch to OpenCode' })).toHaveProperty('disabled', true);
+});
+
+test('switches an existing employee through the dedicated pending harness operation', async () => {
+  const switched: Agent = {
+    ...agent,
+    desired_version: 5,
+    applied_version: 4,
+    configuration_status: 'pending',
+    configuration: { ...agent.configuration, runtime_type: 'codex' },
+  };
+  const saved = vi.fn();
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (String(url).endsWith('/harness-switch') && options.method === 'POST') {
+      return new Response(JSON.stringify({
+        agent: switched,
+        switch_state: 'pending_apply',
+        message: 'Historical threads are permanently frozen; apply the selected harness.',
+        intent: { state: 'frozen', target_runtime_type: 'codex' },
+      }));
+    }
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf-example" onSaved={saved} />);
+
+  fireEvent.change(await screen.findByLabelText('Harness'), { target: { value: 'codex' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Switch to Codex' }));
+
+  await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/harness-switch') && options?.method === 'POST')).toBe(true));
+  const switchRequest = request.mock.calls.find(([url, options]) => String(url).endsWith('/harness-switch') && options?.method === 'POST')!;
+  expect(JSON.parse(switchRequest[1]!.body as string)).toEqual({ expected_version: 4, target_runtime_type: 'codex' });
+  expect(await screen.findByText('Historical threads are permanently frozen; apply the selected harness.')).toBeTruthy();
+  expect(saved).toHaveBeenCalledWith(switched);
+});
+
+test('shows the host switch preflight error without changing the selected harness', async () => {
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (String(url).endsWith('/harness-switch') && options.method === 'POST') {
+      return new Response(JSON.stringify({ detail: 'Queued messages must complete or be cancelled before switching.' }), { status: 409 });
+    }
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+
+  fireEvent.change(await screen.findByLabelText('Harness'), { target: { value: 'codex' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Switch to Codex' }));
+
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Queued messages must complete or be cancelled before switching.');
+  expect(screen.getByLabelText('Harness')).toHaveProperty('value', 'codex');
+});
+
+test('recovers a frozen switch after a browser reload by applying its selected harness', async () => {
+  const selected: Agent = { ...agent, desired_version: 5, applied_version: 4, configuration_status: 'pending', configuration: { ...agent.configuration, runtime_type: 'codex' } };
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (String(url).endsWith('/runtime')) return new Response(JSON.stringify({ switch_state: 'frozen', switch_target_runtime: 'codex' }));
+    if (String(url).endsWith('/apply') && options.method === 'POST') return new Response(JSON.stringify({}));
+    if (String(url).endsWith('/agents/agent')) return new Response(JSON.stringify(selected));
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={selected} agents={[selected]} csrf="csrf-example" onSaved={vi.fn()} />);
+
+  expect(await screen.findByRole('region', { name: 'Harness switch recovery' })).toHaveProperty('textContent', expect.stringContaining('Historical threads are frozen. Apply Codex when ready.'));
+  fireEvent.click(screen.getByRole('button', { name: 'Apply selected harness' }));
+  await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/apply') && options?.method === 'POST')).toBe(true));
+});
+
+test('retries a frozen switch whose control-plane acknowledgement was lost', async () => {
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (String(url).endsWith('/runtime')) return new Response(JSON.stringify({ switch_state: 'frozen', switch_target_runtime: 'codex' }));
+    if (String(url).endsWith('/harness-switch') && options.method === 'POST') return new Response(JSON.stringify({ detail: 'Retry was observed' }), { status: 409 });
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={agent} agents={[agent]} csrf="csrf-example" onSaved={vi.fn()} />);
+
+  expect(await screen.findByRole('region', { name: 'Harness switch recovery' })).toHaveProperty('textContent', expect.stringContaining('Retry the switch to record Codex'));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry harness switch' }));
+  await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/harness-switch') && options?.method === 'POST')).toBe(true));
+  expect(screen.queryByRole('button', { name: 'Apply selected harness' })).toBeNull();
 });

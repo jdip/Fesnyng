@@ -101,6 +101,8 @@ export type ThreadComposerProps = {
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
+  /** Historical snapshots retain copy and acknowledgement context but cannot mutate native state. */
+  readOnly?: boolean | undefined;
   autoFocus?: boolean | undefined;
   /**
    * Fesnyng's MVP OpenCode facade accepts text-only prompt parts. Keep the
@@ -115,7 +117,7 @@ const EMPTY_COMPONENTS: ThreadComponents = {};
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
-const ThreadConfigurationContext = createContext({ allowAttachments: true });
+const ThreadConfigurationContext = createContext({ allowAttachments: true, readOnly: false });
 
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
@@ -153,13 +155,14 @@ const ThreadHistorySkeleton: FC = () => (
 
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
+  readOnly = false,
   autoFocus = true,
   allowAttachments = true,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
-    <ThreadConfigurationContext.Provider value={{ allowAttachments }}>
+    <ThreadConfigurationContext.Provider value={{ allowAttachments, readOnly }}>
       <ThreadComponentsContext.Provider value={components}>
         <ThreadRoot
           isEmpty={isEmpty}
@@ -181,6 +184,7 @@ const ThreadRoot: FC<{
   allowAttachments,
 }) => {
   const { Welcome = ThreadWelcome, ThreadFooter } = useContext(ThreadComponentsContext);
+  const { readOnly } = useContext(ThreadConfigurationContext);
 
   return (
     <ThreadPrimitive.Root
@@ -229,11 +233,11 @@ const ThreadRoot: FC<{
             )}
           >
             <ThreadScrollToBottom />
-            <ThreadFollowupSuggestions />
+            {!readOnly && <ThreadFollowupSuggestions />}
             <ThreadComposer autoFocus={autoFocus} allowAttachments={allowAttachments} />
-            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
+            {!readOnly && <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
-            </AuiIf>
+            </AuiIf>}
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
@@ -246,9 +250,9 @@ const ThreadMessage: FC = () => {
     useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
-  const { allowAttachments } = useContext(ThreadConfigurationContext);
+  const { allowAttachments, readOnly } = useContext(ThreadConfigurationContext);
 
-  if (isEditing) return <EditComposer allowAttachments={allowAttachments} />;
+  if (isEditing && !readOnly) return <EditComposer allowAttachments={allowAttachments} />;
   if (role === "user") return <UserMessage />;
   return <AssistantMessageComponent />;
 };
@@ -541,6 +545,7 @@ const AssistantMessage: FC = () => {
 const AssistantActionBar: FC<Pick<ThreadComponents, "MessageAction">> = ({
   MessageAction,
 }) => {
+  const { readOnly } = useContext(ThreadConfigurationContext);
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -557,13 +562,13 @@ const AssistantActionBar: FC<Pick<ThreadComponents, "MessageAction">> = ({
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
+      {!readOnly && <ActionBarPrimitive.Reload asChild>
         <TooltipIconButton tooltip="Refresh">
           <RefreshCwIcon />
         </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
-      {MessageAction && <MessageAction />}
-      <ActionBarMorePrimitive.Root>
+      </ActionBarPrimitive.Reload>}
+      {!readOnly && MessageAction && <MessageAction />}
+      {!readOnly && <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
             tooltip="More"
@@ -585,7 +590,7 @@ const AssistantActionBar: FC<Pick<ThreadComponents, "MessageAction">> = ({
             </ActionBarMorePrimitive.Item>
           </ActionBarPrimitive.ExportMarkdown>
         </ActionBarMorePrimitive.Content>
-      </ActionBarMorePrimitive.Root>
+      </ActionBarMorePrimitive.Root>}
     </ActionBarPrimitive.Root>
   );
 };
@@ -633,6 +638,8 @@ const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  const { readOnly } = useContext(ThreadConfigurationContext);
+  if (readOnly) return null;
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning

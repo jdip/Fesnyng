@@ -122,6 +122,15 @@ CREATE TABLE IF NOT EXISTS agent_configurations (
     created_by TEXT NOT NULL REFERENCES users(id),
     PRIMARY KEY (agent_id, version)
 );
+CREATE TABLE IF NOT EXISTS agent_harness_switches (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    expected_version INTEGER NOT NULL,
+    source_runtime_type TEXT NOT NULL CHECK(source_runtime_type IN ('opencode','codex')),
+    target_runtime_type TEXT NOT NULL CHECK(target_runtime_type IN ('opencode','codex')),
+    state TEXT NOT NULL CHECK(state IN ('capturing','frozen')),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
 """
 
 
@@ -258,6 +267,10 @@ class AgentStore:
             ).fetchone()
             if current is None:
                 raise LookupError("Agent not found")
+            if connection.execute(
+                "SELECT 1 FROM agent_harness_switches WHERE agent_id=?", (agent_id,)
+            ).fetchone():
+                raise ValueError("Harness switch is in progress")
             if values["expected_version"] != current["desired_version"]:
                 raise ConfigurationConflict("Agent configuration version conflict")
             version = current["desired_version"] + 1
@@ -288,6 +301,159 @@ class AgentStore:
                 "VALUES(?,?,?,?)",
                 (agent_id, version, json.dumps(configuration), actor_id),
             )
+        return self.get_agent(organization_id, agent_id)
+
+    def harness_switch(self, organization_id: str, agent_id: str) -> dict[str, Any] | None:
+        with self.control.connect() as connection:
+            row = connection.execute(
+                """SELECT switch.* FROM agent_harness_switches AS switch
+                JOIN agents AS agent ON agent.id=switch.agent_id
+                WHERE agent.organization_id=? AND agent.id=?""",
+                (organization_id, agent_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def begin_harness_switch(
+        self,
+        organization_id: str,
+        agent_id: str,
+        actor_id: str,
+        expected_version: int,
+        target_runtime_type: str,
+    ) -> dict[str, Any]:
+        """Reserve the durable control-plane intent before host history capture."""
+        if target_runtime_type not in {"opencode", "codex"}:
+            raise ValueError("Unknown target harness")
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """SELECT agent.desired_version, configuration.configuration
+                FROM agents AS agent JOIN agent_configurations AS configuration
+                  ON configuration.agent_id=agent.id AND configuration.version=agent.desired_version
+                WHERE agent.organization_id=? AND agent.id=?""",
+                (organization_id, agent_id),
+            ).fetchone()
+            if current is None:
+                raise LookupError("Agent not found")
+            source_runtime_type = AgentConfiguration.model_validate_json(
+                current["configuration"]
+            ).runtime_type
+            if current["desired_version"] != expected_version:
+                raise ConfigurationConflict("Agent configuration version conflict")
+            if source_runtime_type == target_runtime_type:
+                raise ValueError("Target harness is already selected")
+            existing = connection.execute(
+                "SELECT * FROM agent_harness_switches WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["expected_version"] == expected_version
+                    and existing["target_runtime_type"] == target_runtime_type
+                ):
+                    return dict(existing)
+                raise ValueError("Harness switch is in progress")
+            connection.execute(
+                """INSERT INTO agent_harness_switches(
+                    agent_id,expected_version,source_runtime_type,target_runtime_type,state,created_by
+                ) VALUES(?,?,?,?,?,?)""",
+                (
+                    agent_id,
+                    expected_version,
+                    source_runtime_type,
+                    target_runtime_type,
+                    "capturing",
+                    actor_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM agent_harness_switches WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def mark_harness_switch_frozen(
+        self,
+        organization_id: str,
+        agent_id: str,
+        expected_version: int,
+        target_runtime_type: str,
+    ) -> None:
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """UPDATE agent_harness_switches AS switch
+                SET state='frozen'
+                WHERE switch.agent_id=? AND switch.expected_version=?
+                  AND switch.target_runtime_type=?
+                  AND EXISTS (
+                    SELECT 1 FROM agents AS agent
+                    WHERE agent.id=switch.agent_id AND agent.organization_id=?
+                  )
+                  AND switch.state='capturing'""",
+                (agent_id, expected_version, target_runtime_type, organization_id),
+            ).rowcount
+            if changed != 1:
+                existing = connection.execute(
+                    """SELECT state FROM agent_harness_switches AS switch
+                    JOIN agents AS agent ON agent.id=switch.agent_id
+                    WHERE agent.organization_id=? AND switch.agent_id=?
+                      AND switch.expected_version=? AND switch.target_runtime_type=?""",
+                    (organization_id, agent_id, expected_version, target_runtime_type),
+                ).fetchone()
+                if existing is None or existing["state"] != "frozen":
+                    raise ValueError("Harness switch intent is no longer current")
+
+    def abort_harness_switch(
+        self, organization_id: str, agent_id: str, expected_version: int, target_runtime_type: str
+    ) -> None:
+        """Discard only an uncommitted intent after host capture definitively failed."""
+        with self.control.connect() as connection:
+            connection.execute(
+                """DELETE FROM agent_harness_switches
+                WHERE agent_id=? AND expected_version=? AND target_runtime_type=? AND state='capturing'
+                  AND EXISTS (SELECT 1 FROM agents WHERE organization_id=? AND id=agent_id)""",
+                (agent_id, expected_version, target_runtime_type, organization_id),
+            )
+
+    def commit_harness_switch(
+        self,
+        organization_id: str,
+        agent_id: str,
+        actor_id: str,
+        expected_version: int,
+        target_runtime_type: str,
+    ) -> dict[str, Any]:
+        """Select the replacement harness only after host freeze is durable."""
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """SELECT agent.*, configuration.configuration, switch.state, switch.source_runtime_type
+                FROM agents AS agent
+                JOIN agent_configurations AS configuration
+                  ON configuration.agent_id=agent.id AND configuration.version=agent.desired_version
+                JOIN agent_harness_switches AS switch ON switch.agent_id=agent.id
+                WHERE agent.organization_id=? AND agent.id=?
+                  AND switch.expected_version=? AND switch.target_runtime_type=?""",
+                (organization_id, agent_id, expected_version, target_runtime_type),
+            ).fetchone()
+            if current is None or current["state"] != "frozen":
+                raise ValueError("Harness switch freeze is not committed")
+            if current["desired_version"] != expected_version:
+                raise ConfigurationConflict("Agent configuration version conflict")
+            source = AgentConfiguration.model_validate_json(current["configuration"])
+            if source.runtime_type != current["source_runtime_type"]:
+                raise ValueError("Harness switch source configuration is no longer current")
+            target = source.model_copy(update={"runtime_type": target_runtime_type})
+            version = expected_version + 1
+            connection.execute(
+                "UPDATE agents SET desired_version=? WHERE organization_id=? AND id=?",
+                (version, organization_id, agent_id),
+            )
+            connection.execute(
+                "INSERT INTO agent_configurations(agent_id,version,configuration,created_by) VALUES(?,?,?,?)",
+                (agent_id, version, target.model_dump_json(), actor_id),
+            )
+            connection.execute("DELETE FROM agent_harness_switches WHERE agent_id=?", (agent_id,))
         return self.get_agent(organization_id, agent_id)
 
     def create_profile(

@@ -219,6 +219,8 @@ def _authenticated_agent(host_store: HostStore) -> dict[str, str]:
 
 def _owned_source_session(host: HostStore, identity: dict[str, str], session_id: str) -> None:
     try:
-        host.session(identity["organization_id"], identity["agent_id"], session_id)
+        host.require_writable(identity["organization_id"], identity["agent_id"], session_id)
     except LookupError:
         raise ToolError("Source thread does not belong to the authenticated agent") from None
+    except ValueError as error:
+        raise ToolError(str(error)) from None

@@ -5,7 +5,7 @@ import { resultIdentity, useThreadNotifications, type Delivery, type ThreadNotif
 import { ViewedContent } from './ViewedContent';
 import { agentPath, api, errorMessage } from './workspace-api';
 
-type DeliveryConfiguration = { organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void };
+type DeliveryConfiguration = { organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; readOnly: boolean };
 type NativeMessage = { role?: string; session?: string; ids: Set<string>; clientIds: Set<string>; turnId?: string };
 
 const ConversationDeliveryContext = createContext<DeliveryConfiguration | undefined>(undefined);
@@ -31,8 +31,8 @@ export function nativeMessage(message: unknown): NativeMessage {
   return { role: typeof message.role === 'string' ? message.role : undefined, session: typeof original?.sessionID === 'string' ? original.sessionID : typeof codex?.sessionId === 'string' ? codex.sessionId : undefined, ids, clientIds, turnId: typeof codex?.turnId === 'string' ? codex.turnId : undefined };
 }
 
-export function ConversationDeliveryProvider({ organization, agent, session, csrf, onOpen, children }: PropsWithChildren<{ organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void }>) {
-  const value = useMemo<DeliveryConfiguration>(() => ({ organization, agent, session, csrf, onOpen }), [agent, csrf, onOpen, organization, session]);
+export function ConversationDeliveryProvider({ organization, agent, session, csrf, onOpen, readOnly = false, children }: PropsWithChildren<{ organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; readOnly?: boolean }>) {
+  const value = useMemo<DeliveryConfiguration>(() => ({ organization, agent, session, csrf, onOpen, readOnly }), [agent, csrf, onOpen, organization, readOnly, session]);
   return <ConversationDeliveryContext.Provider value={value}>{children}</ConversationDeliveryContext.Provider>;
 }
 
@@ -95,7 +95,7 @@ function DeliveryContext({ delivery, configuration, notifications, session, role
     {delivery.error && <p className="app-error">{delivery.error}</p>}
     {failure && (handled ? <p className="muted">Failure handled</p> : <button className="app-button" onClick={() => { void notifications.acknowledge(configuration.agent, session, delivery, 'failure_handled'); }}>Mark failure handled</button>)}
     {resolution?.evidence && <><p className="muted">Observed outcome: {resolution.outcome === 'failed' ? 'Failed' : 'Completed'}. {resolution.evidence}</p>{unreadResolution(notifications, configuration.agent, session, delivery) && <ViewedContent identity={`${delivery.id}:${resultIdentity(delivery)}`} onView={() => notifications.acknowledge(configuration.agent, session, delivery, 'read')} />}</>}
-    {actionableStates.has(delivery.state) && <details><summary>Investigate outcome</summary><RecoveryActions delivery={delivery} configuration={configuration} notifications={notifications} session={session} /></details>}
+    {!configuration.readOnly && actionableStates.has(delivery.state) && <details><summary>Investigate outcome</summary><RecoveryActions delivery={delivery} configuration={configuration} notifications={notifications} session={session} /></details>}
   </article>;
 }
 

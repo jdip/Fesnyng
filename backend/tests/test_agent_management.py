@@ -78,6 +78,28 @@ def test_ordinary_settings_cannot_switch_an_existing_employee_harness(
     assert agents.get_agent(org.id, agent["id"]) == agent
 
 
+def test_durable_harness_switch_intent_blocks_ordinary_updates_until_freeze_commits(organization):
+    _, _, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+
+    intent = agents.begin_harness_switch(org.id, agent["id"], owner.id, 1, "codex")
+
+    assert intent["state"] == "capturing"
+    assert agents.get_agent(org.id, agent["id"])["configuration"]["runtime_type"] == "opencode"
+    with pytest.raises(ValueError, match="switch is in progress"):
+        agents.update_agent(
+            org.id, agent["id"], owner.id, {"expected_version": 1, "name": "Changed"}
+        )
+
+    agents.mark_harness_switch_frozen(org.id, agent["id"], 1, "codex")
+    switched = agents.commit_harness_switch(org.id, agent["id"], owner.id, 1, "codex")
+
+    assert switched["desired_version"] == 2
+    assert switched["applied_version"] is None
+    assert switched["configuration"]["runtime_type"] == "codex"
+    assert agents.harness_switch(org.id, agent["id"]) is None
+
+
 def test_assignment_and_reporting_cannot_cross_organizations_or_create_cycles(organization):
     _, control, owner, org, agents, host_id = organization
     other_org = control.create_organization(owner.id, "Separate organization")

@@ -4,6 +4,27 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 const WRITE_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 
+const isOpenCodeThreadList = (input: RequestInfo | URL, method: string) => {
+  if (method !== 'GET') return false;
+  const url = input instanceof Request ? input.url : String(input);
+  try { return new URL(url, window.location.origin).pathname.endsWith('/experimental/session'); }
+  catch { return false; }
+};
+
+const writableOpenCodeThreads = (value: unknown) => Array.isArray(value) ? value.filter((entry) => {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return true;
+  const thread = entry as Record<string, unknown>;
+  return thread.runtime_type !== 'codex' && thread.frozen !== true && typeof thread.frozen_at !== 'number';
+}) : value;
+
+async function activeOpenCodeThreadList(response: Response) {
+  const value = await response.clone().json().catch(() => undefined);
+  if (!Array.isArray(value)) return response;
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(JSON.stringify(writableOpenCodeThreads(value)), { status: response.status, statusText: response.statusText, headers });
+}
+
 async function nativeFailure(response: Response) {
   const body: unknown = await response.clone().json().catch(() => undefined);
   const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
@@ -30,7 +51,7 @@ export function createFesnyngOpenCodeFetch(csrfToken: string, fetchImpl: FetchLi
 
     return fetchImpl(input, { ...init, credentials: 'include', headers }).then(async (response) => {
       if (!response.ok) throw await nativeFailure(response);
-      return response;
+      return isOpenCodeThreadList(input, method) ? activeOpenCodeThreadList(response) : response;
     });
   };
 }

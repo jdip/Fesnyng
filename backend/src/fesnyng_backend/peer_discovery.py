@@ -35,6 +35,8 @@ class PeerThread(Contract):
     created_at: int
     workspace: Slug
     active: bool
+    runtime_type: str = "opencode"
+    frozen: bool = False
 
 
 class UnavailablePeer(Contract):
@@ -104,6 +106,8 @@ class PeerDiscovery:
                             created_at=session["created_at"],
                             workspace=workspace,
                             active=active,
+                            runtime_type=session["runtime_type"],
+                            frozen=session.get("frozen_at") is not None,
                         ).model_dump(mode="json")
                     )
             except (LookupError, RuntimeUnavailable):
@@ -184,6 +188,13 @@ class PeerDiscovery:
 
     async def read_local(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = self.host.session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            snapshot = self.host.frozen_snapshot(org, agent, session_id)
+            if snapshot is None:
+                raise RuntimeUnavailable("Frozen history snapshot is unavailable")
+            if session["runtime_type"] == "codex":
+                return _codex_peer_history({"data": snapshot["history"]["turns"]}, session_id)
+            return _validated_history(snapshot["history"], session_id)
         if session["runtime_type"] == "codex":
             adapter = self._codex(session)
             try:
@@ -210,6 +221,8 @@ class PeerDiscovery:
         return adapter
 
     async def _active(self, org: str, agent: str, session: dict[str, Any]) -> bool:
+        if session.get("frozen_at") is not None:
+            return False
         if session["runtime_type"] == "codex":
             try:
                 turns = await full_turns(self._codex(session), org, agent, session["session_id"])

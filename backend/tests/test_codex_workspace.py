@@ -522,3 +522,98 @@ def test_codex_archive_and_unarchive_keep_the_mapped_thread_visible(tmp_path):
         "thread/unarchive",
     ]
     assert app.state.host_store.session(org, agent, "thr_codex")["archived_at"] is None
+
+
+def test_frozen_codex_history_and_native_write_rejection_survive_host_reload(tmp_path):
+    app, org, agent, token, native = _app(tmp_path)
+    from fesnyng_backend.host_routes import router as host_router
+
+    app.include_router(host_router)
+    store = app.state.host_store
+    store.begin_harness_switch(org, agent, 1, "opencode")
+    retained = {
+        "thread": {"id": "thr_codex"},
+        "turns": [
+            {
+                "id": "turn_retained",
+                "status": "completed",
+                "items": [
+                    {
+                        "id": "patch",
+                        "type": "fileChange",
+                        "changes": [
+                            {"path": "proof.txt", "kind": {"type": "add"}, "diff": "+retained"}
+                        ],
+                    }
+                ],
+            }
+        ],
+        "historyState": "complete",
+    }
+    store.commit_freeze(
+        org,
+        agent,
+        {
+            "thr_codex": {
+                "runtime_type": "codex",
+                "session": {"id": "thr_codex", "title": "Retained"},
+                "history": retained,
+                "children": {
+                    "thr_child": {
+                        "session": {
+                            "id": "thr_child",
+                            "cwd": "/workspace/proof/child",
+                            "title": "Child",
+                        },
+                        "history": {
+                            "thread": {"id": "thr_child"},
+                            "turns": [],
+                            "historyState": "complete",
+                        },
+                    }
+                },
+            }
+        },
+    )
+    # A freshly opened host store must own reads even if no native connection exists.
+    app.state.host_store = HostStore(store.settings)
+    before = len(native.calls)
+    actor = {"kind": "human", "id": str(uuid4()), "name": "Owner"}
+
+    async def exercise():
+        async with AsyncClient(
+            transport=ASGITransport(app),
+            base_url="http://host",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Fesnyng-Actor": json.dumps(actor),
+                "Idempotency-Key": str(uuid4()),
+            },
+        ) as client:
+            prefix = f"/organizations/{org}/agents/{agent}/codex"
+            history = await client.get(f"{prefix}/session/thr_codex/history")
+            assert history.status_code == 200
+            assert history.json() == retained
+            generic = await client.get(
+                f"/organizations/{org}/agents/{agent}/sessions/thr_codex/messages"
+            )
+            assert generic.status_code == 200 and generic.json() == retained
+            info = await client.get(f"{prefix}/session/thr_codex")
+            assert info.json()["frozen"] is True
+            child = await client.get(f"{prefix}/session/thr_child")
+            assert child.status_code == 200
+            assert child.json()["directory"] == "/workspace/proof/child"
+            assert (
+                await client.get(f"{prefix}/pending", params={"sessionID": "thr_codex"})
+            ).json() == []
+            for path, method, body in (
+                ("session/thr_codex", "PATCH", {"title": "Changed"}),
+                ("session/thr_codex/prompt", "POST", {"text": "new work"}),
+                ("session/thr_codex/abort", "POST", {}),
+            ):
+                response = await client.request(method, f"{prefix}/{path}", json=body)
+                assert response.status_code == 409, response.text
+                assert "permanently frozen" in response.text
+
+    asyncio.run(exercise())
+    assert len(native.calls) == before

@@ -45,9 +45,10 @@ test('anchors peer source context to a rendered native user input', async () => 
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
   }));
 
-  render(<ThreadNotificationsProvider organization="org" agents={[agent]} csrf="csrf-example" selectedAgent="junior"><ConversationDeliveryProvider organization="org" agent="junior" session="session-one" csrf="csrf-example" onOpen={open}><Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="session-one" showThreadList={false} /></ConversationDeliveryProvider></ThreadNotificationsProvider>);
+  render(<ThreadNotificationsProvider organization="org" agents={[agent]} csrf="csrf-example" selectedAgent="junior"><ConversationDeliveryProvider organization="org" agent="junior" session="session-one" csrf="csrf-example" onOpen={open} readOnly><Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="session-one" showThreadList={false} readOnly /></ConversationDeliveryProvider></ThreadNotificationsProvider>);
 
   expect(await screen.findByText('Senior engineer')).toBeTruthy();
+  expect(screen.queryByText('Investigate outcome')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Open source thread' }));
   expect(open).toHaveBeenCalledWith('senior', 'source-thread');
 });

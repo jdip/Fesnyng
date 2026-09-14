@@ -118,6 +118,7 @@ class DispatchStore:
                 "failed",
             }:
                 raise RuntimeUnavailable("Agent lifecycle transition is holding new work")
+            self.host.require_writable(org, agent, session, connection=connection)
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence),0)+1 FROM host_dispatches WHERE session_id=?",
                 (session,),
@@ -300,6 +301,13 @@ class Dispatcher:
             agent = self.store.host.agent(row["organization_id"], row["agent_id"])
             if agent["desired_state"] != "running" or agent["lifecycle_state"] != "running":
                 continue
+            if (
+                self.store.host.session(row["organization_id"], row["agent_id"], row["session_id"])[
+                    "frozen_at"
+                ]
+                is not None
+            ):
+                continue
             key = (row["organization_id"], row["agent_id"], row["session_id"])
             groups.setdefault(key, []).append(row)
         for key, rows in groups.items():
@@ -320,6 +328,8 @@ class Dispatcher:
     async def _thread(self, key: tuple[str, str, str], rows: list[dict[str, Any]]) -> None:
         org, agent, session_id = key
         session = self.store.host.session(org, agent, session_id)
+        if session["frozen_at"] is not None:
+            return
         if session["runtime_type"] == "codex":
             await self._codex_thread(key, rows, session)
             return
@@ -544,6 +554,7 @@ class Dispatcher:
             else:
                 await self._require_codex_admission(org, agent, session_id, apply_policy=True)
             async with self.runtime.lock(agent):
+                self.store.host.require_writable(org, agent, session_id)
                 if row["payload"]["mode"] == "stop":
                     self._require_codex_stop_admission(org, agent)
                 else:
@@ -641,7 +652,7 @@ class Dispatcher:
                     raise RuntimeUnavailable("Codex turn receipt is invalid")
                 current = self.store.get(org, agent, row["id"])
                 self.store.change(current, "active", message_id=turn_id, validated=True)
-        except RuntimeUnavailable as error:
+        except (RuntimeUnavailable, ValueError) as error:
             current = self.store.get(org, agent, row["id"])
             # Codex has no caller-selected native idempotency key.  Once a call
             # might have reached App Server, only an operator may resolve it.
@@ -848,6 +859,7 @@ class Dispatcher:
             if self.interactions is not None:
                 await self.interactions.apply_policy(org, agent, session["session_id"])
             async with self.runtime.lock(agent):
+                self.store.host.require_writable(org, agent, session["session_id"])
                 configured = self.store.host.agent(org, agent)
                 if not configured["applied_envelope"] or HostAgentConfiguration.model_validate_json(
                     configured["applied_envelope"]
@@ -930,7 +942,7 @@ class Dispatcher:
             await self.runtime.request(
                 org, agent, path, method="POST", body=body, directory=session["directory"]
             )
-        except RuntimeUnavailable as error:
+        except (RuntimeUnavailable, ValueError) as error:
             current = self.store.get(org, agent, row["id"])
             self.store.change(
                 current,
@@ -1169,7 +1181,11 @@ class Dispatcher:
 
     async def agent_activity(self, organization_id: str, agent_id: str) -> str:
         active: list[str] = []
-        sessions = self.store.host.sessions(organization_id, agent_id)
+        sessions = [
+            session
+            for session in self.store.host.sessions(organization_id, agent_id)
+            if session["frozen_at"] is None
+        ]
         codex_sessions = [session for session in sessions if session["runtime_type"] == "codex"]
         applied = self.store.host.agent(organization_id, agent_id).get("applied_envelope")
         zero_thread_codex = (
@@ -1215,6 +1231,7 @@ class Dispatcher:
         mapped = {
             session["session_id"]: session
             for session in self.store.host.sessions(organization_id, agent_id)
+            if session["frozen_at"] is None
         }
         opencode = {
             session_id: session
@@ -1428,6 +1445,8 @@ class Dispatcher:
             ]
             for session_id in {row["session_id"] for row in rows}:
                 session = self.store.host.session(organization_id, agent_id, session_id)
+                if session["frozen_at"] is not None:
+                    continue
                 session_rows = [row for row in rows if row["session_id"] == session_id]
                 if session["runtime_type"] == "codex":
                     await self._codex_thread(

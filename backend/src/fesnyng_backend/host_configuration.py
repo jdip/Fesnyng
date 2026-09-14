@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
+from fesnyng_backend.codex_runtime import native_policy
 from fesnyng_backend.host_credentials import CredentialStore
 from fesnyng_backend.host_dispatch import DispatchStore
+from fesnyng_backend.host_history import capture_history
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
@@ -81,6 +83,42 @@ class HostConfiguration:
         envelope = HostAgentConfiguration.model_validate_json(current["desired_envelope"])
         return (await self._reconcile_agent(envelope, lifecycle_operation=True))[1]
 
+    async def switch_harness(
+        self, organization_id: str, agent_id: str, expected_version: int, target_runtime: str
+    ) -> dict[str, object]:
+        """Capture old native provenance, then atomically freeze every mapped root."""
+        source = self.host.agent(organization_id, agent_id)
+        if not isinstance(source.get("applied_envelope"), str):
+            raise RuntimeUnavailable("Harness switch source configuration is not applied")
+        source_envelope = HostAgentConfiguration.model_validate_json(source["applied_envelope"])
+        if target_runtime == "codex":
+            target = source_envelope.model_copy(
+                update={
+                    "configuration": source_envelope.configuration.model_copy(
+                        update={"runtime_type": "codex"}
+                    )
+                }
+            )
+            native_policy(target, [])
+        self.host.begin_harness_switch(organization_id, agent_id, expected_version, target_runtime)
+        try:
+            async with self.runtime.lock(agent_id):
+                state = self.host.agent(organization_id, agent_id)
+                if state["switch_state"] == "frozen":
+                    return self.host.agent_status(organization_id, agent_id)
+                if state["desired_state"] != "running" or state["lifecycle_state"] != "running":
+                    raise RuntimeUnavailable("Harness switching requires a running, stable agent")
+                self._require_safe_switch_effects(organization_id, agent_id)
+                await self.runtime.assert_quiet(organization_id, agent_id)
+                snapshots = await capture_history(
+                    self.host, self.runtime, organization_id, agent_id
+                )
+                self.host.commit_freeze(organization_id, agent_id, snapshots)
+        except BaseException:
+            self.host.abort_harness_switch(organization_id, agent_id)
+            raise
+        return self.host.agent_status(organization_id, agent_id)
+
     async def _reconcile_agent(
         self, envelope: HostAgentConfiguration, *, lifecycle_operation: bool = False
     ) -> tuple[str, str]:
@@ -102,8 +140,15 @@ class HostConfiguration:
             if current["applied_envelope"]
             else None
         )
-        if previous is not None and (
-            previous.configuration.runtime_type != envelope.configuration.runtime_type
+        if (
+            previous is not None
+            and (previous.configuration.runtime_type != envelope.configuration.runtime_type)
+            and not self.host.harness_switch_frozen_for(
+                organization_id,
+                agent_id,
+                previous.version,
+                envelope.configuration.runtime_type,
+            )
         ):
             raise RuntimeUnavailable("Harness changes require the thread freeze workflow")
         if envelope.configuration.runtime_type == "codex":
@@ -117,6 +162,8 @@ class HostConfiguration:
         # still withheld until every mapped thread has accepted that policy.
         if policy_changed and envelope.configuration.runtime_type != "codex":
             for session in self.host.sessions(organization_id, agent_id):
+                if session["frozen_at"] is not None:
+                    continue
                 await self.interactions.apply_policy(
                     organization_id, agent_id, session["session_id"], envelope
                 )
@@ -124,6 +171,17 @@ class HostConfiguration:
             current = self.host.agent(organization_id, agent_id)
             if HostAgentConfiguration.model_validate_json(current["desired_envelope"]) != envelope:
                 raise RuntimeUnavailable("Configuration changed during application")
+            current_applied = (
+                HostAgentConfiguration.model_validate_json(current["applied_envelope"])
+                if current["applied_envelope"]
+                else None
+            )
+            # A concurrent reconciler may have observed the old harness before
+            # waiting for this lock.  The first apply can already have rebuilt
+            # the runtime and cleared its freeze receipt.  Never run that
+            # replacement again from stale pre-lock state.
+            if current_applied == envelope and current["lifecycle_state"] == "running":
+                return
             lifecycle_allowed = (
                 current["lifecycle_state"] in {"pending", "recovering"}
                 if lifecycle_operation
@@ -133,6 +191,13 @@ class HostConfiguration:
             if not lifecycle_allowed:
                 raise RuntimeUnavailable("Configuration is waiting for the lifecycle transition")
             self._require_safe_delivery_effects(organization_id, agent_id)
+            if previous is not None and (
+                previous.configuration.runtime_type != envelope.configuration.runtime_type
+            ):
+                switch = getattr(self.runtime, "switch_harness", None)
+                if switch is None:
+                    raise RuntimeUnavailable("Host runtime cannot replace the selected harness")
+                await switch(organization_id, agent_id)
             await self.runtime.assert_quiet(organization_id, agent_id)
             profile_id = envelope.configuration.profile_id
             if profile_id is None:
@@ -144,6 +209,8 @@ class HostConfiguration:
             await self.runtime.configure(envelope)
             if policy_changed and envelope.configuration.runtime_type == "codex":
                 for session in self.host.sessions(organization_id, agent_id):
+                    if session["frozen_at"] is not None:
+                        continue
                     await self.interactions.apply_policy_locked(
                         organization_id, agent_id, session["session_id"], envelope
                     )
@@ -159,6 +226,52 @@ class HostConfiguration:
         ]
         if unsettled:
             raise RuntimeUnavailable("Configuration pending: delivery effects need reconciliation")
+
+    def _require_safe_switch_effects(self, organization_id: str, agent_id: str) -> None:
+        """A freeze captures only a fully settled agent, including peer reservations."""
+        if any(
+            receipt["organization_id"] == organization_id and receipt["agent_id"] == agent_id
+            for receipt in self.dispatch_store.pending()
+        ):
+            raise RuntimeUnavailable(
+                "Harness switching requires queued work to complete or be explicitly cancelled"
+            )
+        with self.host.connect() as connection:
+            tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            checks: list[tuple[str, tuple[str, ...]]] = []
+            if "host_interaction_operations" in tables:
+                checks.append(
+                    (
+                        """SELECT 1 FROM host_interaction_operations
+                        WHERE organization_id=? AND agent_id=? AND state!='completed' LIMIT 1""",
+                        (organization_id, agent_id),
+                    )
+                )
+            if "peer_inbox" in tables:
+                checks.append(
+                    (
+                        """SELECT 1 FROM peer_inbox
+                        WHERE organization_id=? AND target_agent=?
+                          AND state IN ('reserved','creating','uncertain') LIMIT 1""",
+                        (organization_id, agent_id),
+                    )
+                )
+            if "peer_outbox" in tables:
+                checks.append(
+                    (
+                        """SELECT 1 FROM peer_outbox
+                        WHERE organization_id=? AND source_agent=?
+                          AND state IN ('pending','uncertain') LIMIT 1""",
+                        (organization_id, agent_id),
+                    )
+                )
+            if any(connection.execute(query, params).fetchone() for query, params in checks):
+                raise RuntimeUnavailable(
+                    "Harness switching needs peer or native-effect reconciliation"
+                )
 
     def _mark_pending(self, organization_id: str, agent_id: str, reason: str | None = None) -> None:
         self.host.set_runtime_state(

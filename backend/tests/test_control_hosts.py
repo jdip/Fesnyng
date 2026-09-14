@@ -5,10 +5,11 @@ from typing import Any
 import httpx
 import pytest
 
+from fesnyng_backend import agents as agent_routes
 from fesnyng_backend import control_host_routes
 from fesnyng_backend.agent_storage import AgentStore
 from fesnyng_backend.control_plane import create_app
-from fesnyng_backend.host_client import HostClient, HostUnavailable
+from fesnyng_backend.host_client import HostClient, HostResponse, HostUnavailable
 from fesnyng_backend.settings import ControlPlaneSessionSettings
 
 ORIGIN = "https://control.example"
@@ -144,6 +145,90 @@ def test_apply_route_maps_invalid_host_json_to_service_unavailable(
 
         assert response.status_code == 503
         assert "invalid JSON" in response.json()["detail"]
+
+    asyncio.run(exercise())
+
+
+def test_harness_switch_selects_target_only_after_verified_host_freeze(organization, monkeypatch):
+    async def exercise() -> None:
+        settings, _, owner, org, agents, host_id = organization
+        agents.set_host_credential(org.id, host_id, "host-binding-token-that-is-never-returned")
+        agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+
+        class FrozenHost:
+            async def raw_request(self, organization_id, host, path, *, method="GET", body=None):
+                assert organization_id == org.id and host == host_id
+                assert path == f"/agents/{agent['id']}/harness-switch"
+                assert method == "POST"
+                assert body == {"expected_version": 1, "target_runtime_type": "codex"}
+                return HostResponse(
+                    200,
+                    json.dumps(
+                        {
+                            "organization_id": org.id,
+                            "agent_id": agent["id"],
+                            "switch_state": "frozen",
+                            "switch_source_version": 1,
+                            "switch_target_runtime": "codex",
+                        }
+                    ).encode(),
+                    "application/json",
+                )
+
+        monkeypatch.setattr(agent_routes, "host_client", lambda _: FrozenHost())
+        app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            response = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/harness-switch",
+                json={"expected_version": 1, "target_runtime_type": "codex"},
+            )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["switch_state"] == "pending_apply"
+        assert body["agent"]["configuration_status"] == "pending"
+        assert body["agent"]["configuration"]["runtime_type"] == "codex"
+        assert agents.harness_switch(org.id, agent["id"]) is None
+
+    asyncio.run(exercise())
+
+
+def test_harness_switch_capture_rejection_keeps_original_selection_and_writable_intent(
+    organization, monkeypatch
+):
+    async def exercise() -> None:
+        settings, _, owner, org, agents, host_id = organization
+        agents.set_host_credential(org.id, host_id, "host-binding-token-that-is-never-returned")
+        agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+
+        class RejectedHost:
+            async def raw_request(self, organization_id, host, path, *, method="GET", body=None):
+                assert organization_id == org.id and host == host_id
+                if path.endswith("/harness-switch"):
+                    return HostResponse(
+                        409, b'{"detail":"Active work must finish first"}', "application/json"
+                    )
+                assert path == f"/agents/{agent['id']}" and method == "GET"
+                return HostResponse(200, b'{"switch_state":null}', "application/json")
+
+        monkeypatch.setattr(agent_routes, "host_client", lambda _: RejectedHost())
+        app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            response = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/harness-switch",
+                json={"expected_version": 1, "target_runtime_type": "codex"},
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Active work must finish first"
+        assert agents.get_agent(org.id, agent["id"])["configuration"]["runtime_type"] == "opencode"
+        assert agents.harness_switch(org.id, agent["id"]) is None
 
     asyncio.run(exercise())
 

@@ -6,10 +6,14 @@ class ResizeObserverStub { observe() {} unobserve() {} disconnect() {} }
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-test('uses the Codex facade for the maintained remote thread inventory and mutations', async () => {
+test('uses the Codex facade for the writable native thread inventory and mutations', async () => {
   const request = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
-    if (url.endsWith('/session') && !init.method) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Investigate', time: { created: 1 } }]));
+    if (url.endsWith('/session') && !init.method) return new Response(JSON.stringify([
+      { id: 'thread-one', title: 'Investigate', runtime_type: 'codex', time: { created: 1 } },
+      { id: 'old-codex', title: 'Frozen history', runtime_type: 'codex', frozen_at: 0, time: { created: 1 } },
+      { id: 'old-opencode', title: 'Other harness', runtime_type: 'opencode', time: { created: 1 } },
+    ]));
     if (url.endsWith('/session') && init.method === 'POST') return new Response(JSON.stringify({ id: 'thread-two', title: 'New thread' }));
     if (url.endsWith('/thread-one') && init.method === 'PATCH') return new Response(JSON.stringify({ id: 'thread-one', title: 'Renamed' }));
     if (url.endsWith('/thread-one') && init.method === 'PATCH') return new Response(JSON.stringify({ id: 'thread-one', title: 'Renamed' }));
@@ -141,4 +145,37 @@ test('clears a transient pending-request reload error after the host recovers', 
   window.dispatchEvent(new Event('focus'));
   await waitFor(() => expect(pendingReads).toBeGreaterThan(4));
   expect(screen.queryByText('Agent host is unreachable')).toBeNull();
+});
+
+test('renders frozen Codex snapshot history without native write controls', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'old-codex-thread', title: 'Frozen Codex thread', frozen: true, time: {} }]));
+    if (url.includes('/history')) return new Response(JSON.stringify({
+      thread: { id: 'old-codex-thread', title: 'Frozen Codex thread' },
+      turns: [{ id: 'turn-one', status: 'completed', items: [
+        { id: 'assistant-one', type: 'agentMessage', text: 'Frozen Codex analysis.' },
+        { id: 'change-one', type: 'fileChange', changes: [{ path: 'src/frozen.ts', kind: { type: 'delete' }, diff: '@@ -1 +0,0 @@\n-export const frozen = true;' }], result: { output: 'Done!' } },
+      ] }], historyState: 'complete',
+    }));
+    if (url.includes('/pending?')) throw new Error('Frozen history must not poll pending requests');
+    return new Response(JSON.stringify({ id: 'old-codex-thread', title: 'Frozen Codex thread', time: {} }));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  class EventSourceStub { constructor() { throw new Error('Frozen history must not open a live native event stream'); } }
+  vi.stubGlobal('EventSource', EventSourceStub);
+
+  render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="old-codex-thread" showThreadList={false} readOnly />);
+
+  expect(await screen.findByText('Frozen Codex analysis.')).toBeTruthy();
+  fireEvent.click(await screen.findByRole('button', { name: '1 tool call' }));
+  expect(await screen.findByLabelText('deleted src/frozen.ts')).toBeTruthy();
+  expect(screen.getByText('This thread is permanently frozen and read-only.')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
 });

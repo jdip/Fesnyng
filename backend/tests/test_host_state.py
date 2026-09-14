@@ -114,3 +114,52 @@ def test_legacy_sessions_receive_immutable_opencode_provenance_without_rewriting
             "Legacy",
             runtime_type="codex",
         )
+
+
+def test_harness_switch_gate_freezes_verified_history_atomically_and_survives_restart(tmp_path):
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    host = HostStore(settings)
+    host.initialize()
+    organization_id, agent_id = str(uuid4()), str(uuid4())
+    host.bind_organization(organization_id, secrets.token_urlsafe(32))
+    source = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Engineer",
+    )
+    host.stage_agent(source)
+    host.mark_applied(source)
+    host.save_session(
+        organization_id, agent_id, "ses_history", "/workspace/default/history", "History"
+    )
+
+    host.begin_harness_switch(organization_id, agent_id, 1, "codex")
+    with pytest.raises(ValueError, match="switch"):
+        host.require_writable(organization_id, agent_id, "ses_history")
+    with pytest.raises(ValueError, match="switch"):
+        host.set_lifecycle_state(organization_id, agent_id, state="transitioning")
+
+    snapshot = {
+        "runtime_type": "opencode",
+        "session": {"id": "ses_history", "directory": "/workspace/default/history"},
+        "history": [{"info": {"sessionID": "ses_history"}, "parts": []}],
+        "children": {},
+    }
+    host.commit_freeze(organization_id, agent_id, {"ses_history": snapshot})
+
+    session = host.session(organization_id, agent_id, "ses_history")
+    assert session["frozen_at"] is not None
+    assert host.frozen_snapshot(organization_id, agent_id, "ses_history") == snapshot
+    with pytest.raises(ValueError, match="permanently frozen"):
+        host.require_writable(organization_id, agent_id, "ses_history")
+
+    restarted = HostStore(settings)
+    restarted.initialize()
+    assert restarted.frozen_snapshot(organization_id, agent_id, "ses_history") == snapshot
+    assert restarted.agent_status(organization_id, agent_id)["switch_state"] == "frozen"

@@ -35,6 +35,11 @@ class SessionCreate(Contract):
     workspace: Slug = "default"
 
 
+class HarnessSwitch(Contract):
+    expected_version: int = Field(ge=1)
+    target_runtime_type: Literal["opencode", "codex"]
+
+
 class Actor(Contract):
     kind: Literal["human", "agent"]
     id: UUID

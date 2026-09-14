@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { BrainIcon, LogOutIcon, PlusIcon, RefreshCwIcon, SettingsIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react';
 import { readWorkspaceLocation, saveWorkspaceLocation } from './workspace-location';
 import { ConversationBoundary } from './ConversationBoundary';
@@ -16,7 +17,7 @@ import { AgentSettings } from './AgentSettings';
 import { OrganizationSettings } from './OrganizationSettings';
 import { AgentMemory } from './AgentMemory';
 import { DepartmentChart } from './DepartmentChart';
-import { api, ApiError, errorMessage, type LoginSession, type Organization, type Agent, type Member } from './workspace-api';
+import { agentPath, api, ApiError, errorMessage, type LoginSession, type Organization, type Agent, type Member } from './workspace-api';
 
 function Brand() { return <div className="brand"><span className="brand-mark" aria-hidden="true">f</span>Fesnyng</div>; }
 export function App() {
@@ -140,10 +141,51 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
     {view === 'chart' && <DepartmentChart key={`${organization}:${version}`} organization={organization} agents={agents} manager={manager} csrf={session.csrf_token} onSelect={(item) => openAgent(item.id)} />}
     </div></main></div></ThreadNotificationsProvider></ConversationDraftsProvider>;
 }
-function AgentConversation({ organization, agent, csrfToken, hidden, refreshKey, sessionId, threadListTarget, newThreadRequest, onNewThreadStarted, threadPageSize, onThreadSelect, onSessionChange, onError, onOpen }: { organization: string; agent: Agent; csrfToken: string; hidden: boolean; refreshKey: number; sessionId: string | undefined; threadListTarget: HTMLElement | null; newThreadRequest: number | undefined; onNewThreadStarted: (request: number) => void; threadPageSize: number; onThreadSelect: () => void; onSessionChange: (id: string | undefined) => void; onError: (cause: unknown) => void; onOpen: (id: string, session?: string) => void }) {
-  const harness = agent.configuration.runtime_type ?? 'opencode';
-  const conversation = <ConversationBoundary key={`${agent.id}:${harness}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}>{harness === 'codex' ? <CodexConversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/codex`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={threadListTarget} newThreadRequest={newThreadRequest} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={onSessionChange} onError={onError} /> : <Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={threadListTarget} newThreadRequest={newThreadRequest} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={onSessionChange} onError={onError} />}</Suspense></ConversationBoundary>;
-  return <ConversationDeliveryProvider organization={organization} agent={agent.id} session={sessionId} csrf={csrfToken} onOpen={onOpen}><div className="conversation-region" hidden={hidden}>{conversation}</div></ConversationDeliveryProvider>;
+type SessionBinding = { session_id: string; title: string; runtime_type: 'opencode' | 'codex'; frozen: boolean; frozen_at?: number | null };
+const sessionBindings = (value: unknown, defaultRuntime: SessionBinding['runtime_type']): SessionBinding[] => {
+  if (!Array.isArray(value)) throw new Error('Could not read the agent thread inventory.');
+  return value.filter((row): row is Record<string, unknown> => Boolean(
+    row && typeof row === 'object'
+    && typeof (row as Record<string, unknown>).session_id === 'string'
+    && typeof (row as Record<string, unknown>).title === 'string'
+  )).map((row) => ({
+    session_id: row.session_id as string,
+    title: row.title as string,
+    runtime_type: row.runtime_type === 'codex' || row.runtime_type === 'opencode' ? row.runtime_type : defaultRuntime,
+    frozen: row.frozen === true || typeof row.frozen_at === 'number',
+    ...(typeof row.frozen_at === 'number' ? { frozen_at: row.frozen_at } : {}),
+  }));
+};
+
+function FrozenHistoryNavigation({ bindings, current, onSelect }: { bindings: SessionBinding[]; current?: string; onSelect: (session: string) => void }) {
+  const frozen = bindings.filter((binding) => binding.frozen);
+  if (!frozen.length) return null;
+  return <section className="app-panel" aria-label="Frozen thread history"><h3>Frozen history</h3><p className="muted">These original threads remain permanently read-only.</p>{frozen.map((binding) => <button key={binding.session_id} type="button" className="app-button quiet" aria-current={binding.session_id === current ? 'page' : undefined} onClick={() => onSelect(binding.session_id)}>{binding.title} <span className="muted">({binding.runtime_type === 'codex' ? 'Codex' : 'OpenCode'})</span></button>)}</section>;
+}
+
+export function AgentConversation({ organization, agent, csrfToken, hidden, refreshKey, sessionId, threadListTarget, newThreadRequest, onNewThreadStarted, threadPageSize, onThreadSelect, onSessionChange, onError, onOpen }: { organization: string; agent: Agent; csrfToken: string; hidden: boolean; refreshKey: number; sessionId: string | undefined; threadListTarget: HTMLElement | null; newThreadRequest: number | undefined; onNewThreadStarted: (request: number) => void; threadPageSize: number; onThreadSelect: () => void; onSessionChange: (id: string | undefined) => void; onError: (cause: unknown) => void; onOpen: (id: string, session?: string) => void }) {
+  const inventoryKey = `${organization}:${agent.id}:${refreshKey}:${sessionId ?? ''}`;
+  const [inventory, setInventory] = useState<{ key: string; bindings?: SessionBinding[]; error?: string }>({ key: '' });
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<unknown>(`${agentPath(organization, agent.id)}/sessions`, { signal: controller.signal }).then((value) => {
+      if (!controller.signal.aborted) setInventory({ key: inventoryKey, bindings: sessionBindings(value, agent.configuration.runtime_type ?? 'opencode') });
+    }).catch((cause: unknown) => { if (!controller.signal.aborted) setInventory({ key: inventoryKey, error: errorMessage(cause) }); });
+    return () => controller.abort();
+  }, [agent.configuration.runtime_type, agent.id, inventoryKey, organization]);
+  const bindings = inventory.key === inventoryKey ? inventory.bindings : undefined;
+  const bindingError = inventory.key === inventoryKey ? inventory.error ?? '' : '';
+  const selectedBinding = sessionId ? bindings?.find((binding) => binding.session_id === sessionId) : undefined;
+  const harness = selectedBinding?.runtime_type ?? (agent.configuration.runtime_type ?? 'opencode');
+  const readOnly = selectedBinding?.frozen === true;
+  if (sessionId && !selectedBinding && bindings && bindings.length > 0) return <div className="conversation-region" hidden={hidden}><p className="app-error" role="alert">This thread is not available in the immutable agent inventory.</p></div>;
+  if (sessionId && !selectedBinding && !bindings && !bindingError) return <div className="conversation-region" hidden={hidden}><p role="status" className="app-empty">Loading thread history…</p></div>;
+  if (bindingError) return <div className="conversation-region" hidden={hidden}><p className="app-error" role="alert">{bindingError}</p></div>;
+  const navigation = <FrozenHistoryNavigation bindings={bindings ?? []} current={sessionId} onSelect={(id) => { onSessionChange(id); onThreadSelect(); }} />;
+  if (!sessionId && agent.configuration_status === 'pending') return <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}<p className="app-notice" role="status">The selected harness is still applying. New threads will be available after configuration finishes.</p></div>;
+  const conversation = <ConversationBoundary key={`${agent.id}:${sessionId ?? 'new'}:${harness}:${readOnly}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}>{harness === 'codex' ? <CodexConversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/codex`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={onSessionChange} onError={onError} readOnly={readOnly} /> : <Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={onSessionChange} onError={onError} readOnly={readOnly} />}</Suspense></ConversationBoundary>;
+  const shell = <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}{conversation}</div>;
+  return <ConversationDeliveryProvider organization={organization} agent={agent.id} session={sessionId} csrf={csrfToken} onOpen={onOpen} readOnly={readOnly}>{shell}</ConversationDeliveryProvider>;
 }
 function UserPreferencesPanel({ organization, csrf, onChange }: { organization: string; csrf: string; onChange: (size: number) => void }) {
   const [open, setOpen] = useState(false);

@@ -320,6 +320,20 @@ class DockerRuntime:
         self.native_ports[(organization_id, agent_id)] = self._port(info)
         await self._wait_healthy(organization_id, agent_id)
 
+    async def switch_harness(self, organization_id: str, agent_id: str) -> None:
+        """Replace the frozen harness under the configuration owner's runtime lock."""
+        agent = self.store.agent(organization_id, agent_id)
+        desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
+        if not agent["applied_envelope"]:
+            raise RuntimeUnavailable("Harness switch has no applied source configuration")
+        previous = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
+        if not self.store.harness_switch_frozen_for(
+            organization_id, agent_id, previous.version, desired.configuration.runtime_type
+        ):
+            raise RuntimeUnavailable("Harness replacement requires a committed history freeze")
+        await self.codex.transport.close_agent(organization_id, agent_id)
+        await self.rebuild(organization_id, agent_id)
+
     async def _require_retained_volumes(self, agent_id: str) -> None:
         name = self.name(agent_id)
         for suffix in ("home", "workspace"):
@@ -453,14 +467,17 @@ class DockerRuntime:
         envelope = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
         for _ in range(120):
             try:
-                if envelope.configuration.runtime_type == "codex":
-                    port = self.native_port(organization_id, agent_id)
-                    async with httpx.AsyncClient(timeout=2) as client:
-                        response = await client.get(f"http://127.0.0.1:{port}/readyz")
-                    if response.status_code != 200:
-                        raise RuntimeUnavailable("Codex App Server is not ready")
-                else:
-                    await self.request(organization_id, agent_id, "/global/health")
+                codex = envelope.configuration.runtime_type == "codex"
+                port = self.native_port(organization_id, agent_id)
+                path = "/readyz" if codex else "/global/health"
+                # A socket accepted during startup can stall before HTTP is ready.
+                # Health probes use a short timeout, unlike native execution calls.
+                async with httpx.AsyncClient(
+                    timeout=2, auth=None if codex else ("opencode", agent["runtime_password"])
+                ) as client:
+                    response = await client.get(f"http://127.0.0.1:{port}{path}")
+                if response.status_code != 200:
+                    raise RuntimeUnavailable("Native runtime is not ready")
                 return
             except (RuntimeUnavailable, httpx.HTTPError):
                 await asyncio.sleep(0.5)
@@ -868,19 +885,28 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
             return
         agent = self.store.agent(organization_id, agent_id)
         configured = agent["applied_envelope"] or agent["desired_envelope"]
+        if agent.get("switch_state") == "frozen":
+            # The admission gate stays closed until target configuration applies.
+            # Every old thread was verified quiet before the atomic freeze; the
+            # replacement container may now speak a different native protocol.
+            return
         envelope = HostAgentConfiguration.model_validate_json(configured)
         if envelope.configuration.runtime_type == "codex":
             roots = {
                 session["session_id"]
                 for session in self.store.sessions(organization_id, agent_id)
-                if session["runtime_type"] == "codex" and session["deleted_at"] is None
+                if session["runtime_type"] == "codex"
+                and session["deleted_at"] is None
+                and session.get("frozen_at") is None
             }
             if roots:
                 threads = await self.codex_thread_statuses(organization_id, agent_id)
                 _assert_codex_threads_quiet(roots, threads)
             return
         directories = {
-            session["directory"] for session in self.store.sessions(organization_id, agent_id)
+            session["directory"]
+            for session in self.store.sessions(organization_id, agent_id)
+            if session.get("frozen_at") is None and session["runtime_type"] == "opencode"
         }
         for directory in [None, *sorted(directories)]:
             statuses = await self.request(
@@ -929,7 +955,9 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         roots = {
             session["session_id"]
             for session in self.store.sessions(organization_id, agent_id)
-            if session["runtime_type"] == "codex" and session["deleted_at"] is None
+            if session["runtime_type"] == "codex"
+            and session["deleted_at"] is None
+            and session.get("frozen_at") is None
         }
         listed = {thread.get("id") for thread in threads}
         for thread_id in roots - listed:
@@ -1027,7 +1055,11 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         # The server caches global configuration. Its native update endpoint owns
         # both persistence and cache invalidation; writing JSON alone is insufficient.
         await self.request(org, agent_id, "/global/config", method="PATCH", body=config)
-        directories = {session["directory"] for session in self.store.sessions(org, agent_id)}
+        directories = {
+            session["directory"]
+            for session in self.store.sessions(org, agent_id)
+            if session.get("frozen_at") is None and session["runtime_type"] == "opencode"
+        }
         for directory in [None, *sorted(directories)]:
             await self.request(
                 org, agent_id, "/instance/dispose", method="POST", body={}, directory=directory
@@ -1080,34 +1112,36 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         directory: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        agent = self.store.agent(organization_id, agent_id)
-        if not agent["applied_envelope"]:
-            raise RuntimeUnavailable("Agent configuration is not applied")
-        envelope = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
-        if envelope.configuration.runtime_type == "codex":
-            return await self.codex.create_session(
+        async with self.lock(agent_id):
+            self.store.require_writable(organization_id, agent_id)
+            agent = self.store.agent(organization_id, agent_id)
+            if not agent["applied_envelope"]:
+                raise RuntimeUnavailable("Agent configuration is not applied")
+            envelope = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
+            if envelope.configuration.runtime_type == "codex":
+                return await self.codex.create_session(
+                    organization_id,
+                    agent_id,
+                    title,
+                    workspace,
+                    directory=directory,
+                    metadata=metadata,
+                )
+            if workspace != envelope.configuration.workspace:
+                raise ValueError("Workspace is not assigned to this agent")
+            directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"
+            await self.docker("exec", self.name(agent_id), "mkdir", "-p", directory)
+            session = await self.request(
                 organization_id,
                 agent_id,
-                title,
-                workspace,
+                "/session",
+                method="POST",
+                body={
+                    "title": title,
+                    "permission": permission_rules(envelope),
+                    **({"metadata": metadata} if metadata else {}),
+                },
                 directory=directory,
-                metadata=metadata,
             )
-        if workspace != envelope.configuration.workspace:
-            raise ValueError("Workspace is not assigned to this agent")
-        directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"
-        await self.docker("exec", self.name(agent_id), "mkdir", "-p", directory)
-        session = await self.request(
-            organization_id,
-            agent_id,
-            "/session",
-            method="POST",
-            body={
-                "title": title,
-                "permission": permission_rules(envelope),
-                **({"metadata": metadata} if metadata else {}),
-            },
-            directory=directory,
-        )
-        self.store.save_session(organization_id, agent_id, session["id"], directory, title)
-        return session
+            self.store.save_session(organization_id, agent_id, session["id"], directory, title)
+            return session
