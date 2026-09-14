@@ -282,9 +282,15 @@ FESNYNG_DOCKER_TESTS=true uv run --locked --project backend \
   pytest backend/tests/test_docker_integration.py -q -s
 ```
 
-This creates an isolated temporary host, container, labeled volumes, and state;
-it removes them only after its native configuration, replacement, and scoped-file
-checks pass. A failure retains diagnostic state rather than guessing cleanup.
+The two original tests create an isolated temporary host, container, labeled
+volumes and state, and print their identities before setup. They stop temporary
+compute on success, ordinary failure and handled interruption. Successful checks
+remove their fixtures; failures retain stopped containers and required diagnostic
+state, volumes and checkpoint images. Inspect the reported disposition before
+resuming a failed proof, and preserve the original failure when investigating a
+teardown error. Hard termination or host loss can bypass handlers and requires
+later ownership-based cleanup. Use the [preview stop/restart procedure](../docs/local-mvp.md#end-a-temporary-preview)
+for a full installation; its durable agents have a separate lifecycle.
 The credential-free Codex dispatch/reconnect and both-direction harness-switch
 checks use the pinned image explicitly:
 
