@@ -14,7 +14,7 @@ vi.mock('./CodexConversation', () => ({
   CodexConversation: ({ sessionId, readOnly }: { sessionId?: string; readOnly?: boolean }) => <><p>Codex conversation {sessionId}</p>{readOnly && <p>This thread is permanently frozen and read-only.</p>}</>,
 }));
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.clear(); window.history.replaceState(null, '', '/'); });
 
 test('requires sign in when no authenticated browser session exists', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 401 })));
@@ -198,6 +198,33 @@ test('refreshes the immutable inventory before opening a newly created thread', 
   expect(reads).toBeGreaterThan(1);
 });
 
+test('keeps a Project grouping warning with its created native thread', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 2, applied_version: 2, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  let grouped = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => new Response(JSON.stringify(input.endsWith('/thread-projects') ? { threads: grouped ? [{ session_id: 'created', project_id: 'website' }] : [] } : [
+    { session_id: 'created', title: 'Created thread', runtime_type: 'opencode' },
+    { session_id: 'other', title: 'Other thread', runtime_type: 'opencode' },
+  ]))));
+  const props = { organization: 'one', agent, csrfToken: 'csrf', hidden: false, refreshKey: 0, threadListTarget: null, newThreadRequest: undefined, onNewThreadStarted: vi.fn(), threadPageSize: 6, onThreadSelect: vi.fn(), onSessionChange: vi.fn(), onError: vi.fn(), onOpen: vi.fn() };
+  const view = render(<AgentConversation {...props} sessionId={undefined} />);
+  await screen.findByRole('textbox', { name: 'Composer draft' });
+
+  window.dispatchEvent(new CustomEvent('fesnyng-project-grouping-warning', { detail: {
+    state: 'ungrouped', requested_project_id: 'website',
+    retry_path: '/organizations/one/agents/agent-one/sessions/created/project',
+    detail: 'Grouping write failed.',
+  } }));
+  view.rerender(<AgentConversation {...props} sessionId="created" />);
+  expect(await screen.findByText(/Grouping write failed/)).toBeTruthy();
+
+  grouped = true;
+  view.rerender(<AgentConversation {...props} projectRevision={1} sessionId="created" />);
+  await waitFor(() => expect(screen.queryByText(/Grouping write failed/)).toBeNull());
+
+  view.rerender(<AgentConversation {...props} sessionId="other" />);
+  expect(screen.queryByText(/Grouping write failed/)).toBeNull();
+});
+
 test('holds a new target-harness thread until its configuration applies', async () => {
   const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 3, applied_version: 2, configuration_status: 'pending', configuration: { execution_type: 'docker', runtime_type: 'codex', provider: 'openai', model: 'gpt-6-astra', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
   vi.stubGlobal('fetch', vi.fn(async (input: string) => new Response(JSON.stringify(input.endsWith('/sessions') ? [{ session_id: 'old-codex', title: 'Frozen history', runtime_type: 'codex', frozen_at: 0 }] : []))));
@@ -329,8 +356,31 @@ test('starts a new native thread from every agent card without selecting the car
   expect(screen.getByRole('button', { name: 'New thread for Alpha' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'New thread for Beta' }));
   expect(alpha.getAttribute('aria-pressed')).toBe('false');
-  expect(beta.getAttribute('aria-pressed')).toBe('true');
+  await waitFor(() => expect(beta.getAttribute('aria-pressed')).toBe('true'));
   expect(await screen.findByRole('textbox', { name: 'Composer draft' })).toBeTruthy();
+});
+
+test('switches to Projects without replacing the current conversation draft and reveals its Project group', async () => {
+  window.history.replaceState(null, '', '/#organization=org&agent=agent&thread=thread-a');
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'agent', name: 'Researcher', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects?include_archived=true' ? [{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : input.endsWith('/agents/agent/thread-projects') ? { threads: [{ session_id: 'thread-a', project_id: 'website' }] }
+      : input.endsWith('/agents/agent/sessions') ? [{ session_id: 'thread-a', title: 'Current work' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : [];
+    return Response.json(body);
+  }));
+  render(<App />);
+  const draft = await screen.findByRole('textbox', { name: 'Composer draft' });
+  fireEvent.change(draft, { target: { value: 'Keep this draft while organizing.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Projects' }));
+  expect(await screen.findByRole('button', { name: 'Website', pressed: true })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Composer draft' })).toHaveProperty('value', 'Keep this draft while organizing.');
 });
 
 test('keeps the role selectable inside the compact agent card while threads remain outside it', async () => {

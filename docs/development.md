@@ -40,6 +40,26 @@ Keep these evidence types separate when recording acceptance:
 
 The delivered proof in issue #89 distinguishes real OpenCode/Codex replies and native tool execution from simulated refresh, failure and cross-account cases. Do not describe a simulated rejection or refresh race as a live provider event. Stop verification once the relevant gates and acceptance evidence pass; later source changes require checks and review of the affected behavior.
 
+### Projects and native thread identity
+
+The [Projects specification](https://github.com/jdip/Fesnyng/issues/117) extends
+organization navigation while retaining employee and native thread ownership.
+Run the opt-in grouping proof against the pinned runtime image:
+
+```bash
+FESNYNG_PROJECT_DOCKER_TESTS=true uv run --locked --project backend pytest \
+  backend/tests/test_project_docker_integration.py -q -s
+```
+
+It exercises the control-plane and host APIs with real OpenCode and Codex
+containers. Project assignment, archive, restore and deletion must preserve the
+native thread identity, workspace and readable history. HTTP transport between
+the application services runs in process; native execution uses Docker. This is
+credential-free evidence, not an authenticated model-reply test. Each case reports
+its exact resources and uses the existing proof teardown owner: stop compute on
+failure and retain diagnostics; remove successful isolated fixtures. Inspect the
+reported disposition before claiming cleanup.
+
 ## Run locally
 
 Run the independent backend commands documented in [backend/README.md](../backend/README.md). The control plane normally listens on `127.0.0.1:8000`; each host uses a separate port and state directory. The host is independently runnable and does not require control-plane reachability for startup. Local SQLite state, credentials and runtime files stay outside Git.

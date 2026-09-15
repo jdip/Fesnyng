@@ -50,6 +50,10 @@ export type ConversationProps = {
   threadListTarget?: HTMLElement | null;
   /** Monotonic shell request that starts a maintained native new thread. */
   newThreadRequest?: number;
+  /** A newly-created native thread may receive this control-plane Project after its native receipt. */
+  projectId?: string | null;
+  /** Fesnyng-owned grouping labels for employee navigation. */
+  projectLabels?: Readonly<Record<string, string>>;
   /** Acknowledges the request only after the runtime accepts its transition. */
   onNewThreadStarted?: (request: number) => void;
   threadPageSize?: number;
@@ -81,6 +85,8 @@ export function Conversation({
   refreshKey = 0,
   threadListTarget,
   newThreadRequest,
+  projectId,
+  projectLabels,
   onNewThreadStarted,
   threadPageSize = 6,
   onThreadSelect,
@@ -113,8 +119,8 @@ export function Conversation({
     if (document.activeElement !== permissionTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
   };
   const client = useMemo(
-    () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
-    [baseUrl, csrfToken],
+    () => projectId ? createFesnyngOpenCodeClient(baseUrl, csrfToken, projectId) : createFesnyngOpenCodeClient(baseUrl, csrfToken),
+    [baseUrl, csrfToken, projectId],
   );
   const runtime = useOpenCodeRuntime({
     client,
@@ -165,7 +171,7 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} /></aside>}
+          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} /></aside>}
           <div className="fesnyng-thread-pane">{!readOnly && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={readOnly} />{!readOnly && <PendingQuestions />}</div>
           {!readOnly && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {!readOnly && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}

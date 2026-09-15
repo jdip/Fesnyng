@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from fesnyng_backend import auth
+from fesnyng_backend import auth, projects
 from fesnyng_backend.control_host_routes import host_client, host_errors
 from fesnyng_backend.host_client import HostResponse, HostStream
 from fesnyng_backend.host_models import Actor
@@ -172,6 +172,16 @@ async def facade(
     if resource_path == "file/download":
         return await _download(request, organization, agent)
     body = await _body(request) if mutation else None
+    project_id = (
+        projects.project_id_for_native_session_create(body) if resource_path == "session" else None
+    )
+    if project_id is not None:
+        try:
+            projects.require_project_for_native_session_create(request, organization, project_id)
+        except projects.RepositoryWorkspaceUnavailable as error:
+            raise HTTPException(409, str(error)) from None
+        except (LookupError, ValueError) as error:
+            raise HTTPException(422, str(error)) from None
     idempotency_key = None
     headers: dict[str, str] = {}
     if actor is not None:
@@ -194,6 +204,11 @@ async def facade(
             headers=headers,
             params=dict(request.query_params),
         )
+    reply = await projects.attach_created_native_session_project(
+        request, organization, agent, project_id, reply, _NATIVE_ID
+    )
+    if resource_path in {"session", "experimental/session"} and request.method == "GET":
+        reply = projects.reconcile_host_session_response(request, organization, agent, reply)
     if user is not None:
         reply = _pinned_sessions(
             reply, auth.get_store(request).list_thread_pins(organization, user.id, agent)

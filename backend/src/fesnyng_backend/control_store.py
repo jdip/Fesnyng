@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fesnyng_backend.agent_storage import AGENT_SCHEMA
 
-CONTROL_PLANE_SCHEMA_VERSION = 2
+CONTROL_PLANE_SCHEMA_VERSION = 4
 PASSWORD_MAX_BYTES = 256
 PASSWORD_MIN_BYTES = 12
 SCRYPT_N = 2**17
@@ -57,6 +58,19 @@ class Organization:
     created_by_user_id: str
     icon_kind: Literal["emoji", "image"] | None = None
     icon_value: str | None = None
+
+
+@dataclass(frozen=True)
+class Project:
+    """Organization-owned navigation grouping for employee-native threads."""
+
+    id: str
+    organization_id: str
+    name: str
+    description: str | None
+    target_repository_url: str | None
+    default_checkout_branch: str | None
+    archived: bool
 
 
 @dataclass(frozen=True)
@@ -110,7 +124,7 @@ class ControlPlaneStore:
             schema_version = connection.execute(
                 "SELECT schema_version FROM control_plane_schema WHERE singleton = 1"
             ).fetchone()[0]
-            if schema_version not in {1, CONTROL_PLANE_SCHEMA_VERSION}:
+            if schema_version not in {1, 2, 3, CONTROL_PLANE_SCHEMA_VERSION}:
                 raise RuntimeError(
                     "Unsupported control-plane schema version "
                     f"{schema_version}; expected {CONTROL_PLANE_SCHEMA_VERSION}."
@@ -156,6 +170,46 @@ class ControlPlaneStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id),
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    target_repository_url TEXT,
+                    default_checkout_branch TEXT,
+                    archived_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    CHECK (
+                        (target_repository_url IS NULL AND default_checkout_branch IS NULL)
+                        OR (target_repository_url IS NOT NULL AND default_checkout_branch IS NOT NULL)
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_projects (
+                    organization_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                    explicit_choice INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (organization_id, agent_id, session_id),
+                    FOREIGN KEY (organization_id, agent_id)
+                        REFERENCES agents(organization_id, id)
+                )
+                """
+            )
+            thread_project_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(thread_projects)")
+            }
+            if "explicit_choice" not in thread_project_columns:
+                connection.execute(
+                    "ALTER TABLE thread_projects ADD COLUMN explicit_choice INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -252,6 +306,223 @@ class ControlPlaneStore:
         return Membership(
             user_id=row["user_id"], organization_id=row["organization_id"], role=row["role"]
         )
+
+    def create_project(self, organization_id: str, values: dict[str, str | None]) -> Project:
+        project = Project(
+            id=str(uuid4()),
+            organization_id=organization_id,
+            name=_normalize_project_name(values["name"]),
+            description=_normalize_project_description(values.get("description")),
+            target_repository_url=_normalize_repository_url(values.get("target_repository_url")),
+            default_checkout_branch=_normalize_checkout_branch(
+                values.get("default_checkout_branch")
+            ),
+            archived=False,
+        )
+        _validate_project_repository(project.target_repository_url, project.default_checkout_branch)
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM organizations WHERE id=?", (organization_id,)
+            ).fetchone():
+                raise LookupError("Organization not found.")
+            connection.execute(
+                """INSERT INTO projects(
+                id,organization_id,name,description,target_repository_url,default_checkout_branch,created_at
+                ) VALUES(?,?,?,?,?,?,unixepoch())""",
+                (
+                    project.id,
+                    project.organization_id,
+                    project.name,
+                    project.description,
+                    project.target_repository_url,
+                    project.default_checkout_branch,
+                ),
+            )
+        return project
+
+    def list_projects(self, organization_id: str, include_archived: bool = False) -> list[Project]:
+        where = (
+            "organization_id=?" if include_archived else "organization_id=? AND archived_at IS NULL"
+        )
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM projects WHERE {where} ORDER BY name,id", (organization_id,)
+            ).fetchall()
+        return [_project_from_row(row) for row in rows]
+
+    def project_for(self, organization_id: str, project_id: str) -> Project:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM projects WHERE organization_id=? AND id=?",
+                (organization_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise LookupError("Project not found.")
+        return _project_from_row(row)
+
+    def update_project(
+        self, organization_id: str, project_id: str, values: dict[str, str | None]
+    ) -> Project:
+        current = self.project_for(organization_id, project_id)
+        project = Project(
+            id=current.id,
+            organization_id=current.organization_id,
+            name=_normalize_project_name(values.get("name", current.name)),
+            description=_normalize_project_description(
+                values.get("description", current.description)
+            ),
+            target_repository_url=_normalize_repository_url(
+                values.get("target_repository_url", current.target_repository_url)
+            ),
+            default_checkout_branch=_normalize_checkout_branch(
+                values.get("default_checkout_branch", current.default_checkout_branch)
+            ),
+            archived=current.archived,
+        )
+        _validate_project_repository(project.target_repository_url, project.default_checkout_branch)
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE projects SET name=?,description=?,target_repository_url=?,
+                default_checkout_branch=? WHERE organization_id=? AND id=?""",
+                (
+                    project.name,
+                    project.description,
+                    project.target_repository_url,
+                    project.default_checkout_branch,
+                    organization_id,
+                    project_id,
+                ),
+            ).rowcount
+        if not changed:
+            raise LookupError("Project not found.")
+        return project
+
+    def set_project_archived(
+        self, organization_id: str, project_id: str, archived: bool
+    ) -> Project:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE projects SET archived_at=CASE WHEN ? THEN unixepoch() ELSE NULL END
+                WHERE organization_id=? AND id=?""",
+                (archived, organization_id, project_id),
+            ).rowcount
+        if not changed:
+            raise LookupError("Project not found.")
+        return self.project_for(organization_id, project_id)
+
+    def delete_project(self, organization_id: str, project_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE thread_projects SET project_id=NULL,explicit_choice=1
+                WHERE organization_id=? AND project_id=?""",
+                (organization_id, project_id),
+            )
+            changed = connection.execute(
+                "DELETE FROM projects WHERE organization_id=? AND id=?",
+                (organization_id, project_id),
+            ).rowcount
+        if not changed:
+            raise LookupError("Project not found.")
+
+    def project_id_for_thread(
+        self, organization_id: str, agent_id: str, session_id: str
+    ) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT project_id FROM thread_projects
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+        return str(row["project_id"]) if row is not None and row["project_id"] is not None else None
+
+    def list_thread_projects(self, organization_id: str, agent_id: str) -> list[dict[str, str]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT session_id,project_id FROM thread_projects
+                WHERE organization_id=? AND agent_id=? AND project_id IS NOT NULL ORDER BY session_id""",
+                (organization_id, agent_id),
+            ).fetchall()
+        return [{"session_id": row["session_id"], "project_id": row["project_id"]} for row in rows]
+
+    def set_thread_project(
+        self, organization_id: str, agent_id: str, session_id: str, project_id: str | None
+    ) -> str | None:
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM agents WHERE organization_id=? AND id=?", (organization_id, agent_id)
+            ).fetchone():
+                raise LookupError("Agent not found")
+            if project_id is None:
+                connection.execute(
+                    """INSERT INTO thread_projects(
+                    organization_id,agent_id,session_id,project_id,explicit_choice,created_at
+                    ) VALUES(?,?,?,?,1,unixepoch())
+                    ON CONFLICT(organization_id,agent_id,session_id)
+                    DO UPDATE SET project_id=NULL,explicit_choice=1""",
+                    (organization_id, agent_id, session_id, None),
+                )
+                return None
+            self._active_project(connection, organization_id, project_id)
+            connection.execute(
+                """INSERT INTO thread_projects(
+                organization_id,agent_id,session_id,project_id,explicit_choice,created_at
+                ) VALUES(?,?,?,?,1,unixepoch())
+                ON CONFLICT(organization_id,agent_id,session_id)
+                DO UPDATE SET project_id=excluded.project_id,explicit_choice=1""",
+                (organization_id, agent_id, session_id, project_id),
+            )
+        return project_id
+
+    def attach_project_if_ungrouped(
+        self, organization_id: str, agent_id: str, session_id: str, project_id: str
+    ) -> str | None:
+        """Attach recovered host provenance once without replacing a human choice."""
+
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM agents WHERE organization_id=? AND id=?", (organization_id, agent_id)
+            ).fetchone():
+                raise LookupError("Agent not found")
+            existing = connection.execute(
+                """SELECT project_id FROM thread_projects
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["project_id"]) if existing["project_id"] is not None else None
+            self._existing_project(connection, organization_id, project_id)
+            connection.execute(
+                """INSERT INTO thread_projects(
+                organization_id,agent_id,session_id,project_id,explicit_choice,created_at
+                ) VALUES(?,?,?,?,0,unixepoch())""",
+                (organization_id, agent_id, session_id, project_id),
+            )
+            row = connection.execute(
+                """SELECT project_id FROM thread_projects
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+        return str(row["project_id"]) if row is not None else None
+
+    @staticmethod
+    def _active_project(
+        connection: sqlite3.Connection, organization_id: str, project_id: str
+    ) -> None:
+        if not connection.execute(
+            "SELECT 1 FROM projects WHERE organization_id=? AND id=? AND archived_at IS NULL",
+            (organization_id, project_id),
+        ).fetchone():
+            raise ValueError("Project is not available for new thread grouping.")
+
+    @staticmethod
+    def _existing_project(
+        connection: sqlite3.Connection, organization_id: str, project_id: str
+    ) -> None:
+        if not connection.execute(
+            "SELECT 1 FROM projects WHERE organization_id=? AND id=?",
+            (organization_id, project_id),
+        ).fetchone():
+            raise ValueError("Project is not available for thread grouping.")
 
     def thread_list_page_size(self, organization_id: str, user_id: str) -> int:
         with self.connect() as connection:
@@ -638,6 +909,18 @@ def _organization_from_row(row: sqlite3.Row) -> Organization:
     )
 
 
+def _project_from_row(row: sqlite3.Row) -> Project:
+    return Project(
+        id=row["id"],
+        organization_id=row["organization_id"],
+        name=row["name"],
+        description=row["description"],
+        target_repository_url=row["target_repository_url"],
+        default_checkout_branch=row["default_checkout_branch"],
+        archived=row["archived_at"] is not None,
+    )
+
+
 def _normalize_login(login: str) -> str:
     normalized = login.strip().lower()
     if not _LOGIN_PATTERN.fullmatch(normalized):
@@ -659,6 +942,65 @@ def _normalize_organization_name(name: str) -> str:
     if not 1 <= len(normalized) <= 120:
         raise ValueError("Organization name must contain 1-120 characters.")
     return normalized
+
+
+def _normalize_project_name(name: str | None) -> str:
+    normalized = (name or "").strip()
+    if not 1 <= len(normalized) <= 120:
+        raise ValueError("Project name must contain 1-120 characters.")
+    return normalized
+
+
+def _normalize_project_description(description: str | None) -> str | None:
+    if description is None:
+        return None
+    normalized = description.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 4_000:
+        raise ValueError("Project description must contain at most 4000 characters.")
+    return normalized
+
+
+def _normalize_repository_url(repository_url: str | None) -> str | None:
+    if repository_url is None:
+        return None
+    normalized = repository_url.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 2_000:
+        raise ValueError("Project repository URL must contain at most 2000 characters.")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"https", "http", "ssh"} or not parsed.hostname:
+        raise ValueError("Project repository URL must use an HTTP(S) or SSH repository origin.")
+    if (
+        parsed.password is not None
+        or (parsed.scheme in {"https", "http"} and parsed.username is not None)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "Project repository URL must not contain credentials, queries, or fragments."
+        )
+    return normalized
+
+
+def _normalize_checkout_branch(branch: str | None) -> str | None:
+    if branch is None:
+        return None
+    normalized = branch.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 500:
+        raise ValueError("Project default checkout branch must contain at most 500 characters.")
+    return normalized
+
+
+def _validate_project_repository(repository_url: str | None, branch: str | None) -> None:
+    if (repository_url is None) != (branch is None):
+        raise ValueError(
+            "A Project repository requires an explicit default checkout branch, and vice versa."
+        )
 
 
 def _hash_password(password: str) -> str:

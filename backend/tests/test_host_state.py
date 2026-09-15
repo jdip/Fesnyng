@@ -92,6 +92,7 @@ def test_legacy_sessions_receive_immutable_opencode_provenance_without_rewriting
     HostStore(settings).initialize()
     legacy = host.session(organization_id, agent_id, "ses_legacy")
     assert legacy["runtime_type"] == "opencode"
+    assert legacy["fesnyng_project_id"] is None
     assert host.stage_agent(envelope) is False
     assert host.agent(organization_id, agent_id)["applied_envelope"] == legacy_envelope_json
 

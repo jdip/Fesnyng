@@ -35,6 +35,10 @@ class SessionCreate(Contract):
     workspace: Slug = "default"
 
 
+class SessionProjectProvenance(Contract):
+    project_id: UUID | None = None
+
+
 class HarnessSwitch(Contract):
     expected_version: int = Field(ge=1)
     target_runtime_type: Literal["opencode", "codex"]

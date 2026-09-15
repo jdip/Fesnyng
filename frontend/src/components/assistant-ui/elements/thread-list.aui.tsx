@@ -40,16 +40,16 @@ import {
 } from "react";
 
 export type ThreadMenuTarget = { id: string; title: string };
-type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; allowDelete?: boolean; readOnly?: boolean };
+type ThreadNavigation = { onSelect?: () => void; onOpenFiles?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; onOpenPermissions?: (session: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void; allowDelete?: boolean; readOnly?: boolean; projectLabels?: Readonly<Record<string, string>> };
 const ThreadNavigationContext = createContext<ThreadNavigation>({});
 
-export const ThreadList: FC<ThreadNavigation & { pageSize?: number; showNew?: boolean }> = ({ pageSize = 6, showNew = true, onSelect, onOpenFiles, onOpenPermissions, allowDelete = true, readOnly = false }) => {
+export const ThreadList: FC<ThreadNavigation & { pageSize?: number; showNew?: boolean }> = ({ pageSize = 6, showNew = true, onSelect, onOpenFiles, onOpenPermissions, allowDelete = true, readOnly = false, projectLabels }) => {
   const pins = useThreadPins();
   const [showArchived, setShowArchived] = useState(false);
   const archivedCount = useAuiState((s) => s.threads.archivedThreadIds.length);
 
   return (
-    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions, allowDelete, readOnly }}><ThreadListRoot>
+    <ThreadNavigationContext.Provider value={{ onSelect, onOpenFiles, onOpenPermissions, allowDelete, readOnly, projectLabels }}><ThreadListRoot>
       {showNew && !readOnly && <ThreadListNew onClick={onSelect} />}
       {pins?.error && <div role="alert" className="text-sm px-2.5 py-1">{pins.error} <button type="button" onClick={() => { void pins.refresh(); }}>Retry pins</button></div>}
       <ThreadListItems key={pageSize} pageSize={pageSize} />
@@ -174,7 +174,7 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const { onSelect, allowDelete, readOnly } = useContext(ThreadNavigationContext);
+  const { onSelect, allowDelete, readOnly, projectLabels } = useContext(ThreadNavigationContext);
   const pins = useThreadPins();
   const session = useAuiState((s) => s.threadListItem.remoteId);
   const workspace = useThreadWorkspace();
@@ -225,6 +225,7 @@ export const ThreadListItem: FC = () => {
             className="min-w-0 flex-1 py-1"
           >
             <span className="block truncate"><ThreadListItemPrimitive.Title fallback="New Chat" /></span>
+            {session && projectLabels?.[session] && <small className="block truncate text-xs text-muted-foreground" aria-label={`Project: ${projectLabels[session]}`}>{projectLabels[session]}</small>}
             {session && workspace && <ThreadRepositorySubtitle id={subtitleId} session={session} {...workspace} />}
           </span>
           {session && <ThreadNotificationBadge session={session} />}

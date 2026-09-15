@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
-from fesnyng_backend import auth
+from fesnyng_backend import auth, projects
 from fesnyng_backend.agent_lifecycle import HostLifecycleRequest, LifecycleRequest
 from fesnyng_backend.agent_storage import AgentStore
 from fesnyng_backend.host_client import HostClient, HostRejected, HostUnavailable
@@ -80,7 +80,15 @@ async def sessions(request: Request, organization_id: UUID, agent_id: UUID):
     client = host_client(request)
     with host_errors():
         agent = client.agents.get_agent(org, aid)
-        return await client.request(org, agent["host_id"], f"/agents/{aid}/sessions")
+        inventory = await client.request(org, agent["host_id"], f"/agents/{aid}/sessions")
+    if not isinstance(inventory, list):
+        return inventory
+    return [
+        projects.reconcile_host_project_provenance(request, org, aid, session)
+        if isinstance(session, dict)
+        else session
+        for session in inventory
+    ]
 
 
 @router.post("/agents/{agent_id}/sessions", status_code=201)

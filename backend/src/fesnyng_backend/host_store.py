@@ -71,6 +71,9 @@ class HostStore:
                     agent_id TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL,
                     runtime_type TEXT NOT NULL DEFAULT 'opencode'
                         CHECK(runtime_type IN ('opencode','codex')),
+                    fesnyng_project_id TEXT,
+                    project_provenance_initialized INTEGER NOT NULL DEFAULT 0
+                        CHECK(project_provenance_initialized IN (0,1)),
                     deleted_at INTEGER,
                     archived_at INTEGER,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -95,6 +98,12 @@ class HostStore:
             if "runtime_type" not in columns:
                 connection.execute(
                     "ALTER TABLE host_sessions ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'opencode'"
+                )
+            if "fesnyng_project_id" not in columns:
+                connection.execute("ALTER TABLE host_sessions ADD COLUMN fesnyng_project_id TEXT")
+            if "project_provenance_initialized" not in columns:
+                connection.execute(
+                    "ALTER TABLE host_sessions ADD COLUMN project_provenance_initialized INTEGER NOT NULL DEFAULT 0"
                 )
             agent_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_agents)")
@@ -605,7 +614,41 @@ class HostStore:
                 query,
                 (organization_id, agent_id),
             ).fetchall()
-        return [dict(row) for row in rows]
+        sessions = [dict(row) for row in rows]
+        for session in sessions:
+            session.pop("project_provenance_initialized", None)
+        return sessions
+
+    def set_session_project_provenance(
+        self, organization_id: str, agent_id: str, session_id: str, project_id: str | None
+    ) -> None:
+        """Record the control-plane grouping known for one host-owned thread."""
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_sessions
+                SET fesnyng_project_id=?, project_provenance_initialized=1
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (project_id, organization_id, agent_id, session_id),
+            ).rowcount
+        if changed != 1:
+            raise LookupError("Thread not found")
+
+    def inherit_session_project_provenance(
+        self, organization_id: str, agent_id: str, session_id: str, project_id: str | None
+    ) -> None:
+        """Attach delegated-thread provenance once without changing an existing grouping."""
+        if project_id is None:
+            return
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_sessions
+                SET fesnyng_project_id=?, project_provenance_initialized=1
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL
+                  AND project_provenance_initialized=0""",
+                (project_id, organization_id, agent_id, session_id),
+            ).rowcount
+        if changed != 1:
+            self.session(organization_id, agent_id, session_id)
 
     def rename_session(
         self, organization_id: str, agent_id: str, session_id: str, title: str

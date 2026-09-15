@@ -1,6 +1,15 @@
 export type User = { id: string; login: string; display_name: string };
 export type LoginSession = { user: User; csrf_token: string };
 export type Organization = { id: string; name: string; icon?: { kind: 'emoji' | 'image'; value: string } | null };
+export type Project = {
+  id: string;
+  organization_id: string;
+  name: string;
+  description: string | null;
+  target_repository_url: string | null;
+  default_checkout_branch: string | null;
+  archived: boolean;
+};
 export type Member = { user_id: string; login: string; display_name: string; role: string };
 export type Host = { id: string; name: string };
 export type Profile = { id: string; name: string; provider: string };

@@ -7,6 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from fesnyng_backend.agent_host import create_app
+from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.settings import ServiceSettings
 
 
@@ -31,6 +32,52 @@ def test_host_requires_organization_binding_and_never_uses_human_cookie(tmp_path
             client.headers["Authorization"] = f"Bearer {token}"
             assert (await client.get(path)).status_code == 403
             assert (await client.get(f"/organizations/{org}/agents/{uuid4()}")).status_code == 404
+
+    asyncio.run(check())
+
+
+def test_host_project_provenance_is_binding_scoped_and_can_be_cleared(tmp_path):
+    app = create_app(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    org, other, agent, project = (str(uuid4()) for _ in range(4))
+    binding = secrets.token_urlsafe(32)
+    app.state.host_store.bind_organization(org, binding)
+    envelope = HostAgentConfiguration(
+        host_id=app.state.host_store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Engineer",
+    )
+    app.state.host_store.stage_agent(envelope)
+    app.state.host_store.mark_applied(envelope)
+    app.state.host_store.save_session(
+        org, agent, "ses_project", "/workspace/default/project", "Project"
+    )
+
+    async def check():
+        path = f"/organizations/{org}/agents/{agent}/sessions/ses_project/project-provenance"
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://host") as client:
+            assert (await client.put(path, json={"project_id": project})).status_code == 401
+            client.headers["Authorization"] = f"Bearer {binding}"
+            assigned = await client.put(path, json={"project_id": project})
+            assert assigned.status_code == 200
+            assert assigned.json()["fesnyng_project_id"] == project
+            assert "project_provenance_initialized" not in assigned.json()
+            assert (
+                await client.put(
+                    f"/organizations/{other}/agents/{agent}/sessions/ses_project/project-provenance",
+                    json={"project_id": project},
+                )
+            ).status_code == 403
+            cleared = await client.put(path, json={"project_id": None})
+            assert cleared.status_code == 200
+            assert cleared.json()["fesnyng_project_id"] is None
 
     asyncio.run(check())
 
