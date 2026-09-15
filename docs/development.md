@@ -28,7 +28,7 @@ FESNYNG_CODEX_DOCKER_TESTS=true \
   backend/tests/test_harness_switch_docker.py -q -s
 ```
 
-These tests default to `fesnyng-agent:local`; set `FESNYNG_CODEX_TEST_IMAGE` to an already built image to isolate this proof from another installation. They use no provider credentials. The switching proof creates fresh native threads, retains a workspace file across replacements, verifies snapshot reads with the original runtime replaced, and rejects old-thread writes after switching back. Successful runs remove their own containers, volumes and state. On failure, inspect the reported exact resources and retain diagnostic state; follow the repository cleanup rules before stopping or removing anything shared.
+These tests default to `fesnyng-agent:local`; set `FESNYNG_CODEX_TEST_IMAGE` to an already built image to isolate this proof from another installation. They use no provider credentials. The switching proof creates fresh native threads, retains a workspace file across replacements, verifies snapshot reads with the original runtime replaced, and rejects old-thread writes after switching back. Successful runs remove their own containers, volumes and state. On ordinary failure, timeout, or handled interruption, each proof waits for executor-backed Docker work to settle, stops only its reported compute, and retains diagnostic state; follow the repository cleanup rules before stopping or removing anything shared. Hard termination or host loss may bypass teardown and requires later exact-resource inspection.
 
 Keep these evidence types separate when recording acceptance:
 
