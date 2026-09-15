@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { ProjectNavigation } from './ProjectNavigation';
+import { EmployeeNewThreadChooser, ProjectNavigation } from './ProjectNavigation';
 import type { Agent } from './workspace-api';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -56,4 +56,35 @@ test('moves an existing Ungrouped thread into a Project without changing its nat
   fireEvent.click(await screen.findByRole('button', { name: 'Ungrouped' }));
   fireEvent.change(await screen.findByLabelText('Project for Explore colors'), { target: { value: 'website' } });
   await waitFor(() => expect(request).toHaveBeenCalledWith('/api/organizations/org/agents/junior/sessions/loose/project', expect.objectContaining({ method: 'PUT', headers: expect.objectContaining({ 'X-CSRF-Token': 'csrf-example' }), body: JSON.stringify({ project_id: 'website' }) })));
+});
+
+test('keeps Project search visible and saves an empty optional description as null', async () => {
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [] });
+    if (input.endsWith('/sessions')) return Response.json([]);
+    if (input === '/api/organizations/org/projects' && init.method === 'POST') return Response.json({ id: 'new', organization_id: 'org', name: 'New Project', description: '', target_repository_url: null, default_checkout_branch: null, archived: false });
+    throw new Error(`Unexpected ${input}`);
+  });
+  vi.stubGlobal('fetch', request);
+  const detailsTarget = document.body.appendChild(document.createElement('div'));
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager detailsTarget={detailsTarget} onOpenThread={vi.fn()} onNewThread={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Website' }));
+  const search = await screen.findByRole('searchbox', { name: 'Search Website threads' });
+  expect(search.closest('label')?.classList.contains('sr-only')).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New Project' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save Project' }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/api/organizations/org/projects', expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'New Project', description: null, target_repository_url: null, default_checkout_branch: null }) })));
+});
+
+test('shows a recoverable Project lookup failure before employee-first thread creation', async () => {
+  const request = vi.fn(async () => Response.json({ detail: 'Projects are temporarily unavailable.' }, { status: 503 }));
+  vi.stubGlobal('fetch', request);
+  const start = vi.fn();
+  render(<EmployeeNewThreadChooser organization="org" agent={agents[0]} onStart={start} onCancel={vi.fn()} />);
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Projects are temporarily unavailable.');
+  expect(start).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
 });

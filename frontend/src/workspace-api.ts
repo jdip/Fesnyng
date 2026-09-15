@@ -5,7 +5,7 @@ export type Project = {
   id: string;
   organization_id: string;
   name: string;
-  description: string;
+  description: string | null;
   target_repository_url: string | null;
   default_checkout_branch: string | null;
   archived: boolean;

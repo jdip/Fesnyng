@@ -276,6 +276,38 @@ def test_accepted_peer_retry_remains_readable_after_receiver_thread_freezes(tmp_
     assert asyncio.run(service.receive(str(host.instance_id), envelope)) == accepted
 
 
+def test_legacy_accepted_peer_inbox_replay_defaults_missing_project_provenance_to_null(tmp_path):
+    host, target_agent, configuration, dispatch, state = _local_receiver(tmp_path)
+    service = PeerDeliveryService(host, configuration, Native(), dispatch, Waker())
+    service.initialize()
+    envelope = PeerEnvelope(
+        id=uuid4(),
+        organization_id=state["organization_id"],
+        source_host=host.instance_id,
+        source_agent=state["source_agent"],
+        source_session="ses_sender",
+        target_agent=target_agent,
+        target_session="ses_source",
+        text="Retain this accepted receipt",
+    )
+    accepted = asyncio.run(service.receive(str(host.instance_id), envelope))
+    legacy_envelope = envelope.model_dump(mode="json")
+    del legacy_envelope["project_id"]
+    with host.connect() as connection:
+        connection.execute(
+            "UPDATE peer_inbox SET envelope=? WHERE id=?",
+            (json.dumps(legacy_envelope), str(envelope.id)),
+        )
+
+    assert asyncio.run(service.receive(str(host.instance_id), envelope)) == accepted
+    with pytest.raises(ValueError, match="conflict"):
+        asyncio.run(
+            service.receive(
+                str(host.instance_id), envelope.model_copy(update={"project_id": uuid4()})
+            )
+        )
+
+
 def test_terminal_peer_work_returns_one_result_to_its_original_source_thread(tmp_path):
     host = HostStore(
         ServiceSettings(

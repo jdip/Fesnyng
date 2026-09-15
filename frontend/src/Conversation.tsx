@@ -121,7 +121,7 @@ export function Conversation({
     if (document.activeElement !== permissionTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
   };
   const client = useMemo(
-    () => createFesnyngOpenCodeClient(baseUrl, csrfToken, projectId),
+    () => projectId ? createFesnyngOpenCodeClient(baseUrl, csrfToken, projectId) : createFesnyngOpenCodeClient(baseUrl, csrfToken),
     [baseUrl, csrfToken, projectId],
   );
   useEffect(() => {

@@ -223,7 +223,11 @@ class PeerDeliveryService:
                 "SELECT * FROM peer_inbox WHERE id=?", (delivery_id,)
             ).fetchone()
             if existing is not None:
-                if existing["organization_id"] != org or existing["envelope"] != encoded:
+                if (
+                    existing["organization_id"] != org
+                    or PeerEnvelope.model_validate_json(existing["envelope"]).model_dump()
+                    != envelope.model_dump()
+                ):
                     raise ValueError("Peer delivery identity conflict")
                 inbox = dict(existing)
                 # A durable acceptance is evidence, not a new native action.
