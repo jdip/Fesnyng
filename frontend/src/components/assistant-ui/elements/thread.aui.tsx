@@ -22,6 +22,7 @@ import {
   ToolGroupRoot,
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
+import { groupPreviewText, toolPreviewText } from "@/components/assistant-ui/elements/group-preview";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -118,6 +119,49 @@ const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
 const ThreadConfigurationContext = createContext({ allowAttachments: true, readOnly: false });
+
+const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
+  group,
+  children,
+}) => {
+  const latestIndex = group.indices[group.indices.length - 1];
+  const preview = useAuiState((state) => {
+    const part = latestIndex === undefined ? undefined : state.message.parts[latestIndex];
+    return part?.type === "tool-call" ? toolPreviewText(part.toolName, part.args) : "";
+  });
+
+  return (
+    <ToolGroupRoot variant="ghost">
+      <ToolGroupTrigger
+        count={group.indices.length}
+        preview={preview}
+        active={group.status.type === "running"}
+      />
+      <ToolGroupContent>{children}</ToolGroupContent>
+    </ToolGroupRoot>
+  );
+};
+
+const DefaultReasoningGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
+  group,
+  children,
+}) => {
+  const latestIndex = group.indices[group.indices.length - 1];
+  const running = group.status.type === "running";
+  const preview = useAuiState((state) => {
+    const part = latestIndex === undefined ? undefined : state.message.parts[latestIndex];
+    return part?.type === "reasoning" ? groupPreviewText(part.text) : "";
+  });
+
+  return (
+    <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
+      <ReasoningTrigger active={running} preview={preview} />
+      <ReasoningContent aria-busy={running}>
+        <ReasoningText>{children}</ReasoningText>
+      </ReasoningContent>
+    </ReasoningRoot>
+  );
+};
 
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
@@ -467,30 +511,14 @@ const AssistantMessage: FC = () => {
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;
                 }
-                return (
-                  <ToolGroupRoot variant="ghost">
-                    <ToolGroupTrigger
-                      count={part.indices.length}
-                      active={part.status.type === "running"}
-                    />
-                    <ToolGroupContent>{children}</ToolGroupContent>
-                  </ToolGroupRoot>
-                );
+                return <DefaultToolGroup group={part}>{children}</DefaultToolGroup>;
               case "group-reasoning": {
                 if (ReasoningGroup) {
                   return (
                     <ReasoningGroup group={part}>{children}</ReasoningGroup>
                   );
                 }
-                const running = part.status.type === "running";
-                return (
-                  <ReasoningRoot streaming={running}>
-                    <ReasoningTrigger active={running} />
-                    <ReasoningContent aria-busy={running}>
-                      <ReasoningText>{children}</ReasoningText>
-                    </ReasoningContent>
-                  </ReasoningRoot>
-                );
+                return <DefaultReasoningGroup group={part}>{children}</DefaultReasoningGroup>;
               }
               case "text":
                 return <MarkdownText />;

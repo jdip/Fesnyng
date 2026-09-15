@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-shimmer";
 
 /* Semantic colors consumed by the maintained assistant-ui and shadcn components. */
 @theme {

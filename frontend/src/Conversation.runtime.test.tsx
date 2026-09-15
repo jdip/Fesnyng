@@ -237,6 +237,122 @@ test('renders native question controls without generic Allow or Deny actions', a
   expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
 });
 
+test('uses the latest ordered thought and tool description in collapsed group previews', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const assistantMessage = [{
+    info: {
+      id: 'assistant-preview', role: 'assistant', sessionID: 'session-one', parentID: 'user-one',
+      modelID: 'model', providerID: 'provider', mode: 'primary', path: { cwd: '/', root: '/' },
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 }, finish: 'stop',
+    },
+    parts: [
+      { id: 'reasoning-first', sessionID: 'session-one', messageID: 'assistant-preview', type: 'reasoning', text: 'First thought.' },
+      { id: 'reasoning-latest', sessionID: 'session-one', messageID: 'assistant-preview', type: 'reasoning', text: 'Latest thought explains the decision.' },
+      { id: 'tool-first', callID: 'tool-first', sessionID: 'session-one', messageID: 'assistant-preview', type: 'tool', tool: 'read', state: { status: 'completed', input: { description: 'Read the first file' }, output: {} } },
+      { id: 'tool-latest', callID: 'tool-latest', sessionID: 'session-one', messageID: 'assistant-preview', type: 'tool', tool: 'bash', state: { status: 'completed', input: { description: 'Run the latest migration' }, output: {} } },
+    ],
+  }];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Preview', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? assistantMessage
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Preview', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }));
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      sessionId="session-one"
+      showThreadList={false}
+    />,
+  );
+
+  const reasoning = await screen.findByRole('button', {
+    name: 'Reasoning: Latest thought explains the decision.',
+  });
+  const tools = screen.getByRole('button', {
+    name: '2 tool calls: Run the latest migration',
+  });
+  expect(reasoning.getAttribute('aria-expanded')).toBe('false');
+  expect(tools.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(reasoning);
+  fireEvent.click(tools);
+  expect(screen.getByText('First thought.')).toBeTruthy();
+  expect(screen.getByText('Run the latest migration')).toBeTruthy();
+});
+
+test('updates collapsed previews as streamed parts change and newer tools arrive', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const encoder = new TextEncoder();
+  let events: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const emit = (type: string, properties: Record<string, unknown>) => {
+    events?.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`));
+  };
+  const assistantMessage = [{
+    info: {
+      id: 'assistant-live-preview', role: 'assistant', sessionID: 'session-one', parentID: 'user-one',
+      modelID: 'model', providerID: 'provider', mode: 'primary', path: { cwd: '/', root: '/' },
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 }, finish: 'stop',
+    },
+    parts: [
+      { id: 'reasoning-live', sessionID: 'session-one', messageID: 'assistant-live-preview', type: 'reasoning', text: 'Initial thought' },
+      { id: 'tool-live-first', callID: 'tool-live-first', sessionID: 'session-one', messageID: 'assistant-live-preview', type: 'tool', tool: 'read', state: { status: 'running', input: {}, output: {} } },
+    ],
+  }];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.endsWith('/event')) return new Response(new ReadableStream({
+      start(controller) { events = controller; },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Live preview', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? assistantMessage
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Live preview', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }));
+
+  render(
+    <Conversation
+      baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode"
+      csrfToken="csrf-example"
+      sessionId="session-one"
+      showThreadList={false}
+    />,
+  );
+
+  expect(await screen.findByRole('button', { name: 'Reasoning: Initial thought' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '1 tool call: read' })).toBeTruthy();
+  await waitFor(() => expect(events).toBeTruthy());
+
+  emit('message.part.delta', {
+    sessionID: 'session-one', messageID: 'assistant-live-preview', partID: 'reasoning-live', field: 'text', delta: ' expands live',
+  });
+  expect(await screen.findByRole('button', { name: 'Reasoning: Initial thought expands live' })).toBeTruthy();
+
+  emit('message.part.updated', {
+    part: {
+      id: 'tool-live-latest', callID: 'tool-live-latest', sessionID: 'session-one', messageID: 'assistant-live-preview',
+      type: 'tool', tool: 'bash', state: { status: 'running', input: { description: '  Run\nlatest migration  ' }, output: {} },
+    },
+  });
+  expect(await screen.findByRole('button', { name: '2 tool calls: Run latest migration' })).toBeTruthy();
+});
+
 test('refreshes externally created threads without discarding composer text', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   let threads: { id: string; title: string; time: object }[] = [];
