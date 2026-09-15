@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from docker_proof import _defer_proof_interrupts, _dispose_proof, _stop_proof_compute_on_interrupt
+from docker_proof import _defer_proof_interrupts, _dispose_proof, _run_proof
 from fesnyng_backend.agent_models import AgentConfiguration, NativeSkill
 from fesnyng_backend.host_dispatch import DispatchStore
 from fesnyng_backend.host_interactions import Interactions
@@ -151,12 +151,12 @@ def test_native_configuration_and_replacement_preserve_agent_state():
 
     verified = False
     snapshot_image: str | None = None
+    received_interrupts: list[int] = []
     try:
-        with _stop_proof_compute_on_interrupt():
-            snapshot_image = asyncio.run(check())
+        snapshot_image = _run_proof(check(), received_interrupts)
         verified = True
     finally:
-        # asyncio.run has drained DockerRuntime's default-executor Docker calls before this loop.
+        # _run_proof keeps signals deferred while Runner drains executor Docker calls.
         with _defer_proof_interrupts() as deferred_interrupts:
             cleaned = asyncio.run(
                 _dispose_proof(
@@ -168,8 +168,9 @@ def test_native_configuration_and_replacement_preserve_agent_state():
                     snapshot_image=snapshot_image,
                 )
             )
-        if deferred_interrupts:
-            names = ", ".join(signal.Signals(signum).name for signum in deferred_interrupts)
+        received_interrupts.extend(deferred_interrupts)
+        if received_interrupts:
+            names = ", ".join(signal.Signals(signum).name for signum in received_interrupts)
             print(
                 f"Docker proof teardown deferred {names} until cleanup completed.",
                 file=sys.stderr,
@@ -177,7 +178,7 @@ def test_native_configuration_and_replacement_preserve_agent_state():
             )
         if verified and not cleaned:
             raise RuntimeError("Verified Docker proof fixture cleanup failed")
-        if verified and deferred_interrupts:
+        if verified and received_interrupts:
             raise KeyboardInterrupt("Docker proof interrupted during teardown")
 
 
@@ -281,16 +282,17 @@ def test_workspace_file_reads_are_scoped_and_byte_exact():
             await workspace.files(org, agent, session["id"], "")
 
     verified = False
+    received_interrupts: list[int] = []
     try:
-        with _stop_proof_compute_on_interrupt():
-            asyncio.run(check())
+        _run_proof(check(), received_interrupts)
         verified = True
     finally:
-        # asyncio.run has drained DockerRuntime's default-executor Docker calls before this loop.
+        # _run_proof keeps signals deferred while Runner drains executor Docker calls.
         with _defer_proof_interrupts() as deferred_interrupts:
             cleaned = asyncio.run(_dispose_proof(runtime, org, agent, tmp_path, verified=verified))
-        if deferred_interrupts:
-            names = ", ".join(signal.Signals(signum).name for signum in deferred_interrupts)
+        received_interrupts.extend(deferred_interrupts)
+        if received_interrupts:
+            names = ", ".join(signal.Signals(signum).name for signum in received_interrupts)
             print(
                 f"Docker proof teardown deferred {names} until cleanup completed.",
                 file=sys.stderr,
@@ -298,5 +300,5 @@ def test_workspace_file_reads_are_scoped_and_byte_exact():
             )
         if verified and not cleaned:
             raise RuntimeError("Verified Docker proof fixture cleanup failed")
-        if verified and deferred_interrupts:
+        if verified and received_interrupts:
             raise KeyboardInterrupt("Docker proof interrupted during teardown")

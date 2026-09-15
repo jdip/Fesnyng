@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from docker_proof import _defer_proof_interrupts, _dispose_proof, _stop_proof_compute_on_interrupt
+from docker_proof import _defer_proof_interrupts, _dispose_proof, _run_proof
 from fesnyng_backend.agent_models import AgentConfiguration, NativeSkill
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_interactions import Interactions
@@ -146,16 +146,17 @@ def test_codex_dispatch_interrupt_and_reconnect_preserve_native_history():
             await exercise()
 
     verified = False
+    received_interrupts: list[int] = []
     try:
-        with _stop_proof_compute_on_interrupt():
-            asyncio.run(bounded_exercise())
+        _run_proof(bounded_exercise(), received_interrupts)
         verified = True
     finally:
-        # asyncio.run drains DockerRuntime's default-executor Docker calls before this loop.
+        # _run_proof keeps signals deferred while Runner drains executor Docker calls.
         with _defer_proof_interrupts() as deferred_interrupts:
             cleaned = asyncio.run(_dispose_proof(runtime, org, agent, directory, verified=verified))
-        if deferred_interrupts:
-            names = ", ".join(signal.Signals(signum).name for signum in deferred_interrupts)
+        received_interrupts.extend(deferred_interrupts)
+        if received_interrupts:
+            names = ", ".join(signal.Signals(signum).name for signum in received_interrupts)
             print(
                 f"Docker proof teardown deferred {names} until cleanup completed.",
                 file=sys.stderr,
@@ -163,5 +164,5 @@ def test_codex_dispatch_interrupt_and_reconnect_preserve_native_history():
             )
         if verified and not cleaned:
             raise RuntimeError("Verified Docker proof fixture cleanup failed")
-        if verified and deferred_interrupts:
+        if verified and received_interrupts:
             raise KeyboardInterrupt("Docker proof interrupted during teardown")

@@ -1,5 +1,6 @@
 """Owned-resource teardown support for opt-in Docker proofs."""
 
+import asyncio
 import shutil
 import signal
 import sys
@@ -10,25 +11,37 @@ from typing import Any
 from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
 
 
-@contextmanager
-def _stop_proof_compute_on_interrupt():
-    """Raise once for cleanup, then defer repeated interrupts until the run finishes."""
+def _run_proof(coroutine, received_interrupts: list[int]):
+    """Cancel active proof work on interruption without interrupting executor shutdown."""
+    runner = asyncio.Runner()
     previous: dict[int, Any] = {}
-    received: list[int] = []
+    task = runner.get_loop().create_task(coroutine)
 
     def interrupt(signum, _frame):
-        received.append(signum)
-        if len(received) > 1:
-            return
-        raise KeyboardInterrupt(f"Docker proof interrupted by {signal.Signals(signum).name}")
+        received_interrupts.append(signum)
+        if not task.done() and task.cancelling() == 0:
+            task.cancel()
+
+    async def await_task():
+        return await task
 
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, interrupt)
-        yield
+        try:
+            return runner.run(await_task())
+        except asyncio.CancelledError:
+            if received_interrupts:
+                name = signal.Signals(received_interrupts[0]).name
+                raise KeyboardInterrupt(f"Docker proof interrupted by {name}") from None
+            raise
     finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        # Keep the signal handler in place while Runner drains default-executor Docker calls.
+        try:
+            runner.close()
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
 
 @contextmanager
