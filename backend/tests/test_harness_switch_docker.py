@@ -3,13 +3,15 @@
 import asyncio
 import os
 import secrets
-import shutil
+import signal
+import sys
 import tempfile
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from docker_proof import _defer_proof_interrupts, _dispose_proof, _stop_proof_compute_on_interrupt
 from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_configuration import HostConfiguration
 from fesnyng_backend.host_credentials import CredentialStore
@@ -61,7 +63,6 @@ def test_native_switch_both_directions_keeps_original_threads_frozen():
     print(f"Isolated switch proof: state={directory}, container={runtime.name(agent)}", flush=True)
 
     async def exercise():
-        passed = False
         try:
             await configuration.apply(envelope)
             original = await runtime.create_session(org, agent, "Original", "default")
@@ -92,25 +93,30 @@ def test_native_switch_both_directions_keeps_original_threads_frozen():
             )
             fresh = await runtime.create_session(org, agent, "Fresh", "default")
             assert fresh["id"] not in {original["id"], codex["id"]}
-            passed = True
         finally:
             await runtime.codex.transport.close()
-            info = await runtime.inspect(org, agent)
-            if info is not None:
-                await runtime.docker("stop", runtime.name(agent))
-                if passed:
-                    await runtime.docker("rm", runtime.name(agent))
-                    await runtime.docker(
-                        "volume",
-                        "rm",
-                        runtime.name(agent) + "-home",
-                        runtime.name(agent) + "-workspace",
-                    )
-            if passed:
-                shutil.rmtree(directory)
 
     async def bounded():
         async with asyncio.timeout(120):
             await exercise()
 
-    asyncio.run(bounded())
+    verified = False
+    try:
+        with _stop_proof_compute_on_interrupt():
+            asyncio.run(bounded())
+        verified = True
+    finally:
+        # asyncio.run drains DockerRuntime's default-executor Docker calls before this loop.
+        with _defer_proof_interrupts() as deferred_interrupts:
+            cleaned = asyncio.run(_dispose_proof(runtime, org, agent, directory, verified=verified))
+        if deferred_interrupts:
+            names = ", ".join(signal.Signals(signum).name for signum in deferred_interrupts)
+            print(
+                f"Docker proof teardown deferred {names} until cleanup completed.",
+                file=sys.stderr,
+                flush=True,
+            )
+        if verified and not cleaned:
+            raise RuntimeError("Verified Docker proof fixture cleanup failed")
+        if verified and deferred_interrupts:
+            raise KeyboardInterrupt("Docker proof interrupted during teardown")
