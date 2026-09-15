@@ -5,7 +5,7 @@ import { Thread } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { applyCodexEvent, createFesnyngCodexFetch, projectCodexHistory, type CodexEvent, type CodexHistory } from './lib/codex-client';
 import { errorMessage } from './workspace-api';
-import { publishProjectGroupingWarning, type ProjectGroupingWarning } from './project-grouping-warning';
+import { publishProjectGroupingWarning } from './project-grouping-warning';
 import { InlineComposer } from './InlineComposer';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
@@ -257,7 +257,6 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadStarted } = props;
   const [historyNotice, setHistoryNotice] = useState('');
-  const [groupingWarning, setGroupingWarning] = useState<ProjectGroupingWarning>();
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.projectId), [props.baseUrl, props.csrfToken, props.projectId]);
   const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: props.readOnly, onHistoryNotice: setHistoryNotice }); }, [props.baseUrl, props.csrfToken, props.onError, props.readOnly, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
@@ -267,11 +266,6 @@ function CodexConversationView(props: CodexConversationProps) {
     const request = newThreadRequest;
     void runtime.threads.switchToNewThread().then(() => { completed.current = request; onNewThreadStarted?.(request); }).catch((cause: unknown) => onError?.(cause));
   }, [newThreadRequest, onError, onNewThreadStarted, props.readOnly, runtime]);
-  useEffect(() => {
-    const report = (event: Event) => setGroupingWarning((event as CustomEvent<ProjectGroupingWarning>).detail);
-    window.addEventListener('fesnyng-project-grouping-warning', report);
-    return () => window.removeEventListener('fesnyng-project-grouping-warning', report);
-  }, []);
   const list = <ThreadList showNew={false} allowDelete={false} readOnly={props.readOnly} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
   const components = {
     ...(props.readOnly ? { Composer: FrozenThreadNotice } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),
@@ -279,7 +273,7 @@ function CodexConversationView(props: CodexConversationProps) {
     MessageFooter: ConversationMessageFooter,
     ThreadFooter: ConversationDeliveryRecovery,
   };
-  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}{groupingWarning && <p className="app-notice" role="status">This thread was created, but its Project could not be saved: {groupingWarning.detail} Open Projects and assign the thread to retry.</p>}<Thread allowAttachments={false} components={components} readOnly={props.readOnly} />{!props.readOnly && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={props.readOnly} />{!props.readOnly && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;

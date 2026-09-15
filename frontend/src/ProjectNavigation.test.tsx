@@ -28,6 +28,7 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   const website = await screen.findByRole('button', { name: 'Website' });
   fireEvent.click(website);
   const details = await screen.findByRole('region', { name: 'Website project' });
+  expect(within(details).getByRole('button', { name: 'Edit Project' })).toBeTruthy();
   expect(within(details).getByRole('button', { name: 'Build landing pageJunior developer' })).toBeTruthy();
   expect(within(details).getByRole('button', { name: 'Review copyReviewer' })).toBeTruthy();
   fireEvent.change(within(details).getByRole('searchbox', { name: 'Search Website threads' }), { target: { value: 'copy' } });
@@ -40,6 +41,28 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
 
   fireEvent.click(screen.getByRole('button', { name: 'Ungrouped' }));
   expect(await screen.findByText('Explore colors')).toBeTruthy();
+});
+
+test('keeps an archived Project visible on its assigned thread and requires restore before new work', async () => {
+  const request = vi.fn(async (input: string) => {
+    if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([
+      { id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: true },
+      { id: 'roadmap', organization_id: 'org', name: 'Roadmap', description: '', target_repository_url: null, default_checkout_branch: null, archived: false },
+    ]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [{ session_id: 'build', project_id: 'website' }] });
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'build', title: 'Build landing page' }]);
+    throw new Error(`Unexpected ${input}`);
+  });
+  vi.stubGlobal('fetch', request);
+  const detailsTarget = document.body.appendChild(document.createElement('div'));
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager detailsTarget={detailsTarget} onOpenThread={vi.fn()} onNewThread={vi.fn()} />);
+  fireEvent.click(await screen.findByText('Archived Projects'));
+  fireEvent.click(screen.getByRole('button', { name: 'Website' }));
+  const details = await screen.findByRole('region', { name: 'Website project' });
+  expect((within(details).getByRole('option', { name: 'Website (archived)' }) as HTMLOptionElement).selected).toBe(true);
+  expect((within(details).getByRole('option', { name: 'Website (archived)' }) as HTMLOptionElement).disabled).toBe(true);
+  expect((within(details).getByRole('button', { name: 'New thread' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(details).getByText('Restore this Project before starting a new thread.')).toBeTruthy();
 });
 
 test('moves an existing Ungrouped thread into a Project without changing its native session', async () => {

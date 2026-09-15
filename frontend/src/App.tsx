@@ -18,6 +18,7 @@ import { OrganizationSettings } from './OrganizationSettings';
 import { AgentMemory } from './AgentMemory';
 import { DepartmentChart } from './DepartmentChart';
 import { EmployeeNewThreadChooser, ProjectNavigation } from './ProjectNavigation';
+import { type ProjectGroupingWarning } from './project-grouping-warning';
 import { agentPath, api, ApiError, errorMessage, type LoginSession, type Organization, type Agent, type Member, type Project } from './workspace-api';
 
 function Brand() { return <div className="brand"><span className="brand-mark" aria-hidden="true">f</span>Fesnyng</div>; }
@@ -168,6 +169,19 @@ const sessionBindings = (value: unknown, defaultRuntime: SessionBinding['runtime
   }));
 };
 
+function groupingWarningSession(warning: ProjectGroupingWarning, organization: string, agent: string) {
+  try {
+    const parts = new URL(warning.retry_path, window.location.origin).pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    const organizationIndex = parts.indexOf('organizations');
+    const agentIndex = parts.indexOf('agents');
+    const sessionIndex = parts.indexOf('sessions');
+    const session = sessionIndex >= 0 ? parts[sessionIndex + 1] : undefined;
+    if (organizationIndex < 0 || agentIndex < 0 || sessionIndex < 0 || parts[organizationIndex + 1] !== organization || parts[agentIndex + 1] !== agent || parts[sessionIndex + 2] !== 'project' || !session) return undefined;
+    return session;
+  } catch { return undefined; }
+}
+const groupingWarningKey = (organization: string, agent: string, session: string) => `${organization}:${agent}:${session}`;
+
 function FrozenHistoryNavigation({ bindings, current, onSelect }: { bindings: SessionBinding[]; current?: string; onSelect: (session: string) => void }) {
   const frozen = bindings.filter((binding) => binding.frozen);
   if (!frozen.length) return null;
@@ -178,6 +192,17 @@ export function AgentConversation({ organization, agent, csrfToken, hidden, refr
   const inventoryKey = `${organization}:${agent.id}:${refreshKey}:${sessionId ?? ''}`;
   const [inventory, setInventory] = useState<{ key: string; bindings?: SessionBinding[]; error?: string }>({ key: '' });
   const [projectLabels, setProjectLabels] = useState<Record<string, string>>({});
+  const [projectGroupingWarnings, setProjectGroupingWarnings] = useState<Record<string, ProjectGroupingWarning>>({});
+  useEffect(() => {
+    const report = (event: Event) => {
+      const warning = (event as CustomEvent<ProjectGroupingWarning>).detail;
+      if (!warning) return;
+      const session = groupingWarningSession(warning, organization, agent.id);
+      if (session) setProjectGroupingWarnings((current) => ({ ...current, [groupingWarningKey(organization, agent.id, session)]: warning }));
+    };
+    window.addEventListener('fesnyng-project-grouping-warning', report);
+    return () => window.removeEventListener('fesnyng-project-grouping-warning', report);
+  }, [agent.id, organization]);
   useEffect(() => {
     const controller = new AbortController();
     void api<unknown>(`${agentPath(organization, agent.id)}/sessions`, { signal: controller.signal }).then((value) => {
@@ -195,6 +220,15 @@ export function AgentConversation({ organization, agent, csrfToken, hidden, refr
       if (controller.signal.aborted) return;
       const names = new Map(projects.map((project) => [project.id, project.name]));
       setProjectLabels(Object.fromEntries(grouping.threads.flatMap((thread) => thread.project_id && names.has(thread.project_id) ? [[thread.session_id, names.get(thread.project_id)!]] : [])));
+      const resolvedWarnings = new Set(grouping.threads.flatMap((thread) => thread.project_id ? [groupingWarningKey(organization, agent.id, thread.session_id)] : []));
+      if (resolvedWarnings.size) setProjectGroupingWarnings((current) => {
+        let changed = false;
+        const remaining = { ...current };
+        for (const key of resolvedWarnings) {
+          if (key in remaining) { delete remaining[key]; changed = true; }
+        }
+        return changed ? remaining : current;
+      });
     }).catch(() => { if (!controller.signal.aborted) setProjectLabels({}); });
     return () => controller.abort();
   }, [agent.id, organization, projectRevision, refreshKey]);
@@ -209,8 +243,9 @@ export function AgentConversation({ organization, agent, csrfToken, hidden, refr
   const navigation = <FrozenHistoryNavigation bindings={bindings ?? []} current={sessionId} onSelect={(id) => { onSessionChange(id); onThreadSelect(); }} />;
   if (!sessionId && agent.configuration_status === 'pending') return <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}<p className="app-notice" role="status">The selected harness is still applying. New threads will be available after configuration finishes.</p></div>;
   const sessionChanged = (id: string | undefined) => { onSessionChange(id); };
+  const groupingWarning = sessionId ? projectGroupingWarnings[groupingWarningKey(organization, agent.id, sessionId)] : undefined;
   const conversation = <ConversationBoundary key={`${agent.id}:${sessionId ?? 'new'}:${harness}:${readOnly}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}>{harness === 'codex' ? <CodexConversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/codex`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} projectId={projectId} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} /> : <Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} projectId={projectId} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} />}</Suspense></ConversationBoundary>;
-  const shell = <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}{conversation}</div>;
+  const shell = <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}{groupingWarning && <p className="app-notice" role="status">This thread was created, but its Project could not be saved: {groupingWarning.detail} Open Projects and assign the thread to retry.</p>}{conversation}</div>;
   return <ConversationDeliveryProvider organization={organization} agent={agent.id} session={sessionId} csrf={csrfToken} onOpen={onOpen} readOnly={readOnly}>{shell}</ConversationDeliveryProvider>;
 }
 function UserPreferencesPanel({ organization, csrf, onChange }: { organization: string; csrf: string; onChange: (size: number) => void }) {

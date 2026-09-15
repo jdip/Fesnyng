@@ -198,6 +198,33 @@ test('refreshes the immutable inventory before opening a newly created thread', 
   expect(reads).toBeGreaterThan(1);
 });
 
+test('keeps a Project grouping warning with its created native thread', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 2, applied_version: 2, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  let grouped = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => new Response(JSON.stringify(input.endsWith('/thread-projects') ? { threads: grouped ? [{ session_id: 'created', project_id: 'website' }] : [] } : [
+    { session_id: 'created', title: 'Created thread', runtime_type: 'opencode' },
+    { session_id: 'other', title: 'Other thread', runtime_type: 'opencode' },
+  ]))));
+  const props = { organization: 'one', agent, csrfToken: 'csrf', hidden: false, refreshKey: 0, threadListTarget: null, newThreadRequest: undefined, onNewThreadStarted: vi.fn(), threadPageSize: 6, onThreadSelect: vi.fn(), onSessionChange: vi.fn(), onError: vi.fn(), onOpen: vi.fn() };
+  const view = render(<AgentConversation {...props} sessionId={undefined} />);
+  await screen.findByRole('textbox', { name: 'Composer draft' });
+
+  window.dispatchEvent(new CustomEvent('fesnyng-project-grouping-warning', { detail: {
+    state: 'ungrouped', requested_project_id: 'website',
+    retry_path: '/organizations/one/agents/agent-one/sessions/created/project',
+    detail: 'Grouping write failed.',
+  } }));
+  view.rerender(<AgentConversation {...props} sessionId="created" />);
+  expect(await screen.findByText(/Grouping write failed/)).toBeTruthy();
+
+  grouped = true;
+  view.rerender(<AgentConversation {...props} projectRevision={1} sessionId="created" />);
+  await waitFor(() => expect(screen.queryByText(/Grouping write failed/)).toBeNull());
+
+  view.rerender(<AgentConversation {...props} sessionId="other" />);
+  expect(screen.queryByText(/Grouping write failed/)).toBeNull();
+});
+
 test('holds a new target-harness thread until its configuration applies', async () => {
   const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 3, applied_version: 2, configuration_status: 'pending', configuration: { execution_type: 'docker', runtime_type: 'codex', provider: 'openai', model: 'gpt-6-astra', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
   vi.stubGlobal('fetch', vi.fn(async (input: string) => new Response(JSON.stringify(input.endsWith('/sessions') ? [{ session_id: 'old-codex', title: 'Frozen history', runtime_type: 'codex', frozen_at: 0 }] : []))));
