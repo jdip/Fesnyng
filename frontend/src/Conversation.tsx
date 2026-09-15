@@ -27,6 +27,7 @@ import {
   ToolGroupRoot,
   ToolGroupTrigger,
 } from './components/assistant-ui/elements/tool-group.aui';
+import { toolPreviewText } from './components/assistant-ui/elements/group-preview';
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
@@ -219,11 +220,16 @@ function PendingApprovalToolGroup({
       && part.approval?.approved === undefined
       && part.approval?.resolution === undefined;
   }));
+  const latestIndex = group.indices[group.indices.length - 1];
+  const preview = useAuiState((state) => {
+    const part = latestIndex === undefined ? undefined : state.message.parts[latestIndex];
+    return part?.type === 'tool-call' ? toolPreviewText(part.toolName, part.args) : '';
+  });
   const [open, setOpen] = useState(false);
 
   return (
     <ToolGroupRoot variant="ghost" open={requiresAction || open} onOpenChange={setOpen}>
-      <ToolGroupTrigger count={group.indices.length} active={group.status.type === 'running'} />
+      <ToolGroupTrigger count={group.indices.length} preview={preview} active={group.status.type === 'running'} />
       <ToolGroupContent>{children}</ToolGroupContent>
     </ToolGroupRoot>
   );

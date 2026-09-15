@@ -170,7 +170,7 @@ test('renders frozen Codex snapshot history without native write controls', asyn
   render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="old-codex-thread" showThreadList={false} readOnly />);
 
   expect(await screen.findByText('Frozen Codex analysis.')).toBeTruthy();
-  fireEvent.click(await screen.findByRole('button', { name: '1 tool call' }));
+  fireEvent.click(await screen.findByRole('button', { name: '1 tool call: apply_patch' }));
   expect(await screen.findByLabelText('deleted src/frozen.ts')).toBeTruthy();
   expect(screen.getByText('This thread is permanently frozen and read-only.')).toBeTruthy();
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();

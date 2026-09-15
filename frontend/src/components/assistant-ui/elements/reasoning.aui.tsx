@@ -18,6 +18,7 @@ import {
   reasoningVariants,
   type ReasoningRootProps,
 } from "./reasoning";
+import { groupPreviewText } from "./group-preview";
 
 export type { ReasoningRootProps } from "./reasoning";
 
@@ -70,10 +71,14 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
     }
     return false;
   });
+  const preview = useAuiState((s) => {
+    const part = s.message.parts[endIndex];
+    return part?.type === "reasoning" ? groupPreviewText(part.text) : "";
+  });
 
   return (
     <ReasoningRoot streaming={isReasoningStreaming}>
-      <ReasoningTrigger active={isReasoningStreaming} />
+      <ReasoningTrigger active={isReasoningStreaming} preview={preview} />
       <ReasoningContent aria-busy={isReasoningStreaming}>
         <ReasoningText>{children}</ReasoningText>
       </ReasoningContent>
