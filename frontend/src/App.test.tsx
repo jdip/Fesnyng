@@ -14,7 +14,7 @@ vi.mock('./CodexConversation', () => ({
   CodexConversation: ({ sessionId, readOnly }: { sessionId?: string; readOnly?: boolean }) => <><p>Codex conversation {sessionId}</p>{readOnly && <p>This thread is permanently frozen and read-only.</p>}</>,
 }));
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.clear(); window.history.replaceState(null, '', '/'); });
 
 test('requires sign in when no authenticated browser session exists', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 401 })));
@@ -329,8 +329,31 @@ test('starts a new native thread from every agent card without selecting the car
   expect(screen.getByRole('button', { name: 'New thread for Alpha' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'New thread for Beta' }));
   expect(alpha.getAttribute('aria-pressed')).toBe('false');
-  expect(beta.getAttribute('aria-pressed')).toBe('true');
+  await waitFor(() => expect(beta.getAttribute('aria-pressed')).toBe('true'));
   expect(await screen.findByRole('textbox', { name: 'Composer draft' })).toBeTruthy();
+});
+
+test('switches to Projects without replacing the current conversation draft and reveals its Project group', async () => {
+  window.history.replaceState(null, '', '/#organization=org&agent=agent&thread=thread-a');
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'agent', name: 'Researcher', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects?include_archived=true' ? [{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : input.endsWith('/agents/agent/thread-projects') ? { threads: [{ session_id: 'thread-a', project_id: 'website' }] }
+      : input.endsWith('/agents/agent/sessions') ? [{ session_id: 'thread-a', title: 'Current work' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : [];
+    return Response.json(body);
+  }));
+  render(<App />);
+  const draft = await screen.findByRole('textbox', { name: 'Composer draft' });
+  fireEvent.change(draft, { target: { value: 'Keep this draft while organizing.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Projects' }));
+  expect(await screen.findByRole('button', { name: 'Website', pressed: true })).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: 'Composer draft' })).toHaveProperty('value', 'Keep this draft while organizing.');
 });
 
 test('keeps the role selectable inside the compact agent card while threads remain outside it', async () => {

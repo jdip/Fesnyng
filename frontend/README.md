@@ -21,6 +21,14 @@ New Docker agents recommend `gpt-6-astra`; an existing agent keeps its selected
 model until an authorized configuration change. An agent is persistent identity,
 rules, tools, skills, and memory that can own multiple threads.
 
+The sidebar can switch between **Projects** and **Employees**. Projects group
+authorized employee threads without changing their native session, harness, or
+workspace. Existing threads begin **Ungrouped**. Project details support thread
+searching, employee filtering, grouping changes, and complementary new-thread
+selection. A Project may record a repository and required default checkout, but
+repository-backed thread creation stays unavailable until host workspace
+preparation is configured; the UI does not create an empty substitute workspace.
+
 ## Harnesses and frozen history
 
 New employees choose **OpenCode** (the default) or **Codex** in Agent settings.

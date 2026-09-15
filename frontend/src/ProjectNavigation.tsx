@@ -1,0 +1,178 @@
+import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { agentPath, api, errorMessage, type Agent, type Project } from './workspace-api';
+
+type Thread = { agent: string; session_id: string; title: string; project_id: string | null };
+type ProjectDraft = Pick<Project, 'name' | 'description' | 'target_repository_url' | 'default_checkout_branch'>;
+
+const emptyDraft = (): ProjectDraft => ({ name: '', description: '', target_repository_url: null, default_checkout_branch: null });
+
+function projectDraft(project?: Project): ProjectDraft {
+  return project ? {
+    name: project.name,
+    description: project.description,
+    target_repository_url: project.target_repository_url,
+    default_checkout_branch: project.default_checkout_branch,
+  } : emptyDraft();
+}
+
+function threadRows(value: unknown, agent: string, projects: Record<string, string | null>): Thread[] {
+  if (!Array.isArray(value)) throw new Error('Could not read the employee thread inventory.');
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as Record<string, unknown>;
+    return typeof row.session_id === 'string' && typeof row.title === 'string'
+      ? [{ agent, session_id: row.session_id, title: row.title, project_id: projects[row.session_id] ?? null }]
+      : [];
+  });
+}
+
+export function ProjectNavigation({ organization, agents, csrf, manager, onOpenThread, onNewThread, detailsTarget, onOpenProject, currentThread }: {
+  organization: string;
+  agents: Agent[];
+  csrf: string;
+  manager: boolean;
+  onOpenThread: (agent: string, session: string) => void;
+  onNewThread: (selection: { agent: string; project: string | null }) => void;
+  detailsTarget?: HTMLElement | null;
+  onOpenProject?: () => void;
+  currentThread?: { agent: string; session: string };
+}) {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const [selected, setSelected] = useState<string | null>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [unavailableEmployees, setUnavailableEmployees] = useState<string[]>([]);
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<Project[]>(`/organizations/${organization}/projects?include_archived=true`, { signal: controller.signal }).then((items) => {
+      if (!controller.signal.aborted) { setProjects(items); setError(''); }
+    }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    void Promise.allSettled(agents.map(async (agent) => {
+        const sessions = await api<unknown>(`${agentPath(organization, agent.id)}/sessions`, { signal: controller.signal });
+        const grouping = await api<{ threads: Array<{ session_id: string; project_id: string | null }> }>(`${agentPath(organization, agent.id)}/thread-projects`, { signal: controller.signal });
+        const mappings = Object.fromEntries(grouping.threads.map((thread) => [thread.session_id, thread.project_id]));
+        return threadRows(sessions, agent.id, mappings);
+      })).then((records) => {
+      if (controller.signal.aborted) return;
+      setThreads(records.flatMap((result) => result.status === 'fulfilled' ? result.value : []));
+      setUnavailableEmployees(records.flatMap((result, index) => result.status === 'rejected' ? [agents[index]!.name] : []));
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [agents, organization, revision]);
+
+  const activeProjects = projects.filter((project) => !project.archived);
+  const knownProjectIds = new Set(projects.map((project) => project.id));
+  const visibleThreads = threads.map((thread) => knownProjectIds.has(thread.project_id ?? '') ? thread : { ...thread, project_id: null });
+  const revealedProject = selected === undefined && currentThread ? visibleThreads.find((thread) => thread.agent === currentThread.agent && thread.session_id === currentThread.session)?.project_id ?? null : selected;
+  const selectedProject = revealedProject === null ? undefined : projects.find((project) => project.id === revealedProject);
+  const selectedThreads = revealedProject === undefined ? [] : visibleThreads.filter((thread) => (selectedProject ? thread.project_id === selectedProject.id : thread.project_id === null));
+  const selectedName = selectedProject?.name ?? 'Ungrouped';
+
+  const moveThread = async (thread: Thread, project_id: string | null) => {
+    try {
+      await api(`${agentPath(organization, thread.agent)}/sessions/${encodeURIComponent(thread.session_id)}/project`, { method: 'PUT', csrf, body: { project_id } });
+      setThreads((items) => items.map((item) => item.agent === thread.agent && item.session_id === thread.session_id ? { ...item, project_id } : item));
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+  const saveProject = async (draft: ProjectDraft, project?: Project) => {
+    const body = {
+      name: draft.name.trim(), description: draft.description.trim() || null,
+      target_repository_url: draft.target_repository_url?.trim() || null,
+      default_checkout_branch: draft.default_checkout_branch?.trim() || null,
+    };
+    try {
+      const saved = await api<Project>(`/organizations/${organization}/projects${project ? `/${project.id}` : ''}`, { method: project ? 'PATCH' : 'POST', csrf, body });
+      setProjects((items) => [...items.filter((item) => item.id !== saved.id), saved]);
+      setSelected(saved.id);
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+  const lifecycleProject = async (project: Project, action: 'archive' | 'restore' | 'delete') => {
+    try {
+      await api(`/organizations/${organization}/projects/${project.id}${action === 'delete' ? '' : `/${action}`}`, { method: action === 'delete' ? 'DELETE' : 'POST', csrf });
+      setProjects((items) => action === 'delete' ? items.filter((item) => item.id !== project.id) : items.map((item) => item.id === project.id ? { ...item, archived: action === 'archive' } : item));
+      if (action === 'delete') setThreads((items) => items.map((item) => item.project_id === project.id ? { ...item, project_id: null } : item));
+      setSelected(undefined);
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const details = revealedProject !== undefined ? <ProjectDetails key={revealedProject ?? 'ungrouped'} project={selectedProject} threads={selectedThreads} allProjects={activeProjects} agents={agents} manager={manager} error={error} selectedName={selectedName} onOpenThread={onOpenThread} onMoveThread={moveThread} onNewThread={onNewThread} onSaveProject={saveProject} onLifecycleProject={lifecycleProject} /> : <p className="muted project-empty">Choose a Project to see its threads and settings.</p>;
+  if (loading) return <p role="status" className="muted">Loading Projects…</p>;
+  return <div className="projects-layout">
+    <nav className="project-list" aria-label="Projects">
+      <div className="sidebar-heading"><span>Projects · {activeProjects.length}</span><ProjectEditor trigger="Create Project" onSave={saveProject} /></div>
+      {activeProjects.map((project) => <button key={project.id} className="project-choice" aria-label={project.name} aria-pressed={revealedProject === project.id} onClick={() => { setSelected(project.id); onOpenProject?.(); }}><span>{project.name}</span><small>{visibleThreads.filter((thread) => thread.project_id === project.id).length} threads</small></button>)}
+      <button className="project-choice" aria-label="Ungrouped" aria-pressed={revealedProject === null} onClick={() => { setSelected(null); onOpenProject?.(); }}><span>Ungrouped</span><small>{visibleThreads.filter((thread) => thread.project_id === null).length} threads</small></button>
+      {manager && projects.some((project) => project.archived) && <details className="archived-projects"><summary>Archived Projects</summary>{projects.filter((project) => project.archived).map((project) => <button className="project-choice" key={project.id} aria-pressed={selected === project.id} onClick={() => setSelected(project.id)}>{project.name}</button>)}</details>}
+    </nav>
+    {detailsTarget ? createPortal(details, detailsTarget) : <div className="project-sidebar-threads">{selectedThreads.map((thread) => <button key={`${thread.agent}:${thread.session_id}`} className="project-sidebar-thread" onClick={() => onOpenThread(thread.agent, thread.session_id)}>{thread.title}<small>{agents.find((agent) => agent.id === thread.agent)?.name ?? thread.agent}</small></button>)}{revealedProject !== undefined && !selectedThreads.length && <p className="muted">No threads in this group.</p>}{revealedProject === undefined && <p className="muted">Select a Project to reveal its threads.</p>}</div>}
+    {unavailableEmployees.length > 0 && <p className="muted" role="status">Unavailable: {unavailableEmployees.join(', ')}</p>}
+    {error && <p className="app-error" role="alert">{error} <button className="app-button quiet" onClick={() => setRevision((value) => value + 1)}>Retry</button></p>}
+  </div>;
+}
+
+/** Employee-first creation keeps its established direct path when no Project exists. */
+export function EmployeeNewThreadChooser({ organization, agent, onStart, onCancel }: { organization: string; agent: Agent; onStart: (project: string | null) => void; onCancel: () => void }) {
+  const [projects, setProjects] = useState<Project[]>();
+  const [project, setProject] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<Project[]>(`/organizations/${organization}/projects`, { signal: controller.signal }).then((items) => {
+      if (!controller.signal.aborted) setProjects(items.filter((item) => !item.archived));
+    }).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, [organization]);
+  useEffect(() => { if (projects?.length === 0) onStart(null); }, [onStart, projects]);
+  if (!projects) return <section className="app-panel project-thread-creator" aria-label="New thread"><p role="status">Loading Projects…</p><button className="app-button" onClick={onCancel}>Cancel</button></section>;
+  if (projects.length === 0) return null;
+  const selected = projects.find((item) => item.id === project);
+  return <section className="app-panel project-thread-creator" aria-label={`New thread for ${agent.name}`}><h3>New thread for {agent.name}</h3><label>Project<select className="app-select" aria-label="Project" value={project} onChange={(event) => setProject(event.target.value)}><option value="">Ungrouped</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{selected?.target_repository_url && <p className="app-notice">Repository-backed threads become available after workspace preparation is delivered. Choose Ungrouped or another Project.</p>}{error && <p className="app-error" role="alert">{error}</p>}<div className="app-actions"><button className="app-button" onClick={onCancel}>Cancel</button><button className="app-button primary" disabled={Boolean(selected?.target_repository_url)} onClick={() => onStart(project || null)}>Start thread</button></div></section>;
+}
+
+function ProjectDetails({ project, threads, allProjects, agents, manager, error, selectedName, onOpenThread, onMoveThread, onNewThread, onSaveProject, onLifecycleProject }: {
+  project?: Project;
+  threads: Thread[];
+  allProjects: Project[];
+  agents: Agent[];
+  manager: boolean;
+  error: string;
+  selectedName: string;
+  onOpenThread: (agent: string, session: string) => void;
+  onMoveThread: (thread: Thread, project: string | null) => Promise<void>;
+  onNewThread: (selection: { agent: string; project: string | null }) => void;
+  onSaveProject: (draft: ProjectDraft, project?: Project) => Promise<void>;
+  onLifecycleProject: (project: Project, action: 'archive' | 'restore' | 'delete') => Promise<void>;
+}) {
+  const [search, setSearch] = useState('');
+  const [employee, setEmployee] = useState('');
+  const [creating, setCreating] = useState(false);
+  const filtered = useMemo(() => threads.filter((thread) => thread.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) && (!employee || thread.agent === employee)), [employee, search, threads]);
+  const repositoryBlocked = Boolean(project?.target_repository_url);
+  return <section className="project-details" aria-label={`${selectedName} project`}>
+    <div className="project-details-heading"><div><h2>{selectedName}</h2>{project?.description && <p className="page-intro">{project.description}</p>}{project?.target_repository_url && <p className="muted">Repository: {project.target_repository_url} · default checkout {project.default_checkout_branch}</p>}</div>
+      <div className="app-actions">{project && manager && <ProjectEditor trigger="Edit Project" project={project} onSave={onSaveProject} />}{project && manager && (project.archived ? <button className="app-button" onClick={() => { void onLifecycleProject(project, 'restore'); }}>Restore Project</button> : <button className="app-button" onClick={() => { void onLifecycleProject(project, 'archive'); }}>Archive Project</button>)}</div></div>
+    {project && manager && <button className="app-button danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its threads will remain Ungrouped.`)) void onLifecycleProject(project, 'delete'); }}>Delete Project</button>}
+    <div className="project-detail-toolbar"><label className="sr-only">Search {selectedName} threads<input type="search" className="app-input" value={search} onChange={(event) => setSearch(event.target.value)} /></label><label>Employee<select className="app-select" aria-label="Filter by employee" value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><button className="app-button primary" onClick={() => setCreating(true)}>New thread</button></div>
+    {repositoryBlocked && <p className="app-notice">Repository-backed threads become available after workspace preparation is delivered. This Project does not create an empty workspace.</p>}
+    {creating && <NewProjectThread project={project} agents={agents} blocked={repositoryBlocked} onClose={() => setCreating(false)} onStart={(agent) => { setCreating(false); onNewThread({ agent, project: project?.id ?? null }); }} />}
+    {error && <p className="app-error" role="alert">{error}</p>}
+    <div className="project-thread-list">{filtered.map((thread) => <div className="project-thread-row" key={`${thread.agent}:${thread.session_id}`}><button className="project-thread-open" onClick={() => onOpenThread(thread.agent, thread.session_id)}>{thread.title}<small>{agents.find((agent) => agent.id === thread.agent)?.name ?? thread.agent}</small></button><select aria-label={`Project for ${thread.title}`} value={thread.project_id ?? ''} onChange={(event) => { void onMoveThread(thread, event.target.value || null); }}><option value="">Ungrouped</option>{allProjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>)}{!filtered.length && <p className="muted">No matching threads.</p>}</div>
+  </section>;
+}
+
+function NewProjectThread({ project, agents, blocked, onClose, onStart }: { project?: Project; agents: Agent[]; blocked: boolean; onClose: () => void; onStart: (agent: string) => void }) {
+  const [agent, setAgent] = useState(agents[0]?.id ?? '');
+  return <section className="app-panel project-thread-creator" aria-label="New thread"><h3>New thread</h3><label>Employee<select className="app-select" aria-label="Employee" value={agent} onChange={(event) => setAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><p className="muted">{project ? `This thread will be grouped under ${project.name}.` : 'This thread will remain Ungrouped.'}</p><div className="app-actions"><button className="app-button" onClick={onClose}>Cancel</button><button className="app-button primary" disabled={blocked || !agent} onClick={() => onStart(agent)}>Start thread</button></div></section>;
+}
+
+function ProjectEditor({ trigger, project, onSave }: { trigger: string; project?: Project; onSave: (draft: ProjectDraft, project?: Project) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(() => projectDraft(project));
+  if (!open) return <button className="app-button" onClick={() => setOpen(true)}>{trigger}</button>;
+  const repositoryConfigured = Boolean(draft.target_repository_url?.trim());
+  return <section className="app-panel project-editor" aria-label={trigger}><h3>{trigger}</h3><form className="app-form" onSubmit={(event) => { event.preventDefault(); void onSave(draft, project).then(() => setOpen(false)); }}><label>Name<input className="app-input" required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label><label>Description<textarea className="app-textarea" value={draft.description ?? ''} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label><label>Target repository <span className="muted">Optional</span><input className="app-input" value={draft.target_repository_url ?? ''} onChange={(event) => setDraft({ ...draft, target_repository_url: event.target.value || null })} /></label><label>Default checkout <span className="muted">Required with a repository</span><input className="app-input" required={repositoryConfigured} value={draft.default_checkout_branch ?? ''} onChange={(event) => setDraft({ ...draft, default_checkout_branch: event.target.value || null })} /></label><p className="muted">Repository settings guide new workspaces only. Existing threads keep their current workspace.</p><div className="app-actions"><button type="button" className="app-button" onClick={() => setOpen(false)}>Cancel</button><button className="app-button primary">Save Project</button></div></form></section>;
+}

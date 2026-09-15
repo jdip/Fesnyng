@@ -1,4 +1,5 @@
 import { createOpencodeClient, type OpencodeClient } from '@assistant-ui/react-opencode';
+import { publishProjectGroupingWarning } from '../project-grouping-warning';
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -51,14 +52,25 @@ export function createFesnyngOpenCodeFetch(csrfToken: string, fetchImpl: FetchLi
 
     return fetchImpl(input, { ...init, credentials: 'include', headers }).then(async (response) => {
       if (!response.ok) throw await nativeFailure(response);
+      if (method === 'POST' && new URL(input instanceof Request ? input.url : String(input), window.location.origin).pathname.endsWith('/session')) {
+        void response.clone().json().then(publishProjectGroupingWarning).catch(() => {});
+      }
       return isOpenCodeThreadList(input, method) ? activeOpenCodeThreadList(response) : response;
     });
   };
 }
 
-export function createFesnyngOpenCodeClient(baseUrl: string, csrfToken: string): OpencodeClient {
+export function createFesnyngOpenCodeClient(baseUrl: string, csrfToken: string, projectId?: string | null): OpencodeClient {
+  const transport = createFesnyngOpenCodeFetch(csrfToken);
   return createOpencodeClient({
     baseUrl,
-    fetch: createFesnyngOpenCodeFetch(csrfToken),
+    fetch: (input, init = {}) => {
+      const method = (init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      const url = input instanceof Request ? input.url : String(input);
+      const isNewThread = projectId && method === 'POST' && new URL(url, window.location.origin).pathname.endsWith('/session');
+      if (!isNewThread) return transport(input, init);
+      const current = typeof init.body === 'string' && init.body ? JSON.parse(init.body) as Record<string, unknown> : {};
+      return transport(input, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers }, body: JSON.stringify({ ...current, project_id: projectId }) });
+    },
   });
 }

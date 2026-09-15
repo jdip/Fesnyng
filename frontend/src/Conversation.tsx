@@ -31,6 +31,7 @@ import { toolPreviewText } from './components/assistant-ui/elements/group-previe
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
+import { type ProjectGroupingWarning } from './project-grouping-warning';
 
 export type ConversationProps = {
   /** Absolute `/api/organizations/{org}/agents/{agent}/opencode` facade URL. */
@@ -50,6 +51,10 @@ export type ConversationProps = {
   threadListTarget?: HTMLElement | null;
   /** Monotonic shell request that starts a maintained native new thread. */
   newThreadRequest?: number;
+  /** A newly-created native thread may receive this control-plane Project after its native receipt. */
+  projectId?: string | null;
+  /** Fesnyng-owned grouping labels for employee navigation. */
+  projectLabels?: Readonly<Record<string, string>>;
   /** Acknowledges the request only after the runtime accepts its transition. */
   onNewThreadStarted?: (request: number) => void;
   threadPageSize?: number;
@@ -81,12 +86,15 @@ export function Conversation({
   refreshKey = 0,
   threadListTarget,
   newThreadRequest,
+  projectId,
+  projectLabels,
   onNewThreadStarted,
   threadPageSize = 6,
   onThreadSelect,
   readOnly = false,
 }: ConversationProps) {
   const [files, setFiles] = useState<ThreadMenuTarget>();
+  const [groupingWarning, setGroupingWarning] = useState<ProjectGroupingWarning>();
   const [fileFocusRequest, setFileFocusRequest] = useState(0);
   const [permissions, setPermissions] = useState<ThreadMenuTarget>();
   const permissionTrigger = useRef<HTMLButtonElement | null>(null);
@@ -113,9 +121,14 @@ export function Conversation({
     if (document.activeElement !== permissionTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
   };
   const client = useMemo(
-    () => createFesnyngOpenCodeClient(baseUrl, csrfToken),
-    [baseUrl, csrfToken],
+    () => createFesnyngOpenCodeClient(baseUrl, csrfToken, projectId),
+    [baseUrl, csrfToken, projectId],
   );
+  useEffect(() => {
+    const report = (event: Event) => setGroupingWarning((event as CustomEvent<ProjectGroupingWarning>).detail);
+    window.addEventListener('fesnyng-project-grouping-warning', report);
+    return () => window.removeEventListener('fesnyng-project-grouping-warning', report);
+  }, []);
   const runtime = useOpenCodeRuntime({
     client,
     initialSessionId: sessionId,
@@ -165,8 +178,8 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} /></aside>}
-          <div className="fesnyng-thread-pane">{!readOnly && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={readOnly} />{!readOnly && <PendingQuestions />}</div>
+          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} /></aside>}
+          <div className="fesnyng-thread-pane">{groupingWarning && <p className="app-notice" role="status">This thread was created, but its Project could not be saved: {groupingWarning.detail} Open Projects and assign the thread to retry.</p>}{!readOnly && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={readOnly} />{!readOnly && <PendingQuestions />}</div>
           {!readOnly && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {!readOnly && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
