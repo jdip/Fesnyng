@@ -22,6 +22,7 @@ from fesnyng_backend.control_workspace_preference_routes import (
 from fesnyng_backend.control_workspace_routes import router as workspace_router
 from fesnyng_backend.departments import router as departments_router
 from fesnyng_backend.organizations import router as organizations_router
+from fesnyng_backend.projects import router as projects_router
 from fesnyng_backend.settings import (
     ControlPlaneSessionSettings,
     ServiceSettings,
@@ -48,6 +49,7 @@ def create_app(
     )
     app.include_router(auth_router)
     app.include_router(organizations_router)
+    app.include_router(projects_router)
     app.include_router(agents_router)
     app.include_router(departments_router)
     app.include_router(host_router)

@@ -41,6 +41,7 @@ class PeerEnvelope(PeerSend):
     source_agent: UUID
     source_session: NativeID
     kind: Literal["message", "result"] = "message"
+    project_id: UUID | None = None
 
 
 class NativeRuntime(Protocol):
@@ -111,7 +112,7 @@ class PeerDeliveryService:
                     id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, source_host TEXT NOT NULL,
                     source_agent TEXT NOT NULL, source_session TEXT NOT NULL, target_agent TEXT NOT NULL,
                     target_session TEXT, directory TEXT, envelope TEXT NOT NULL, author TEXT, dispatch_id TEXT,
-                    result_id TEXT, state TEXT NOT NULL DEFAULT 'reserved', error TEXT,
+                    result_id TEXT, project_id TEXT, state TEXT NOT NULL DEFAULT 'reserved', error TEXT,
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
                 );
                 """
@@ -129,6 +130,8 @@ class PeerDeliveryService:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(peer_inbox)")}
             if "author" not in columns:
                 connection.execute("ALTER TABLE peer_inbox ADD COLUMN author TEXT")
+            if "project_id" not in columns:
+                connection.execute("ALTER TABLE peer_inbox ADD COLUMN project_id TEXT")
 
     def _codex(self, session: dict[str, Any]) -> Any:
         router = getattr(self.runtime, "runtime_router", None)
@@ -146,12 +149,14 @@ class PeerDeliveryService:
     ) -> dict[str, Any]:
         self.store.require_writable(organization_id, source_agent, source_session)
         target = self.config.agent(organization_id, str(body.target_agent))
+        source = self.store.session(organization_id, source_agent, source_session)
         envelope = PeerEnvelope(
             **body.model_dump(),
             organization_id=organization_id,
             source_host=self.store.instance_id,
             source_agent=source_agent,
             source_session=source_session,
+            project_id=source.get("fesnyng_project_id"),
         )
         encoded = envelope.model_dump_json()
         existing_delivery = False
@@ -164,10 +169,11 @@ class PeerDeliveryService:
                 "SELECT * FROM peer_outbox WHERE id=?", (str(body.id),)
             ).fetchone()
             if existing is not None:
-                if (
-                    existing["organization_id"] != organization_id
-                    or existing["envelope"] != encoded
-                ):
+                if existing[
+                    "organization_id"
+                ] != organization_id or PeerEnvelope.model_validate_json(
+                    existing["envelope"]
+                ).model_dump(exclude={"project_id"}) != envelope.model_dump(exclude={"project_id"}):
                     raise ValueError("Peer delivery identity conflict")
                 existing_delivery = True
             else:
@@ -240,7 +246,7 @@ class PeerDeliveryService:
                 directory = None if envelope.target_session else _directory(envelope)
                 connection.execute(
                     "INSERT INTO peer_inbox(id,organization_id,source_host,source_agent,source_session,"
-                    "target_agent,target_session,directory,envelope,author) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "target_agent,target_session,directory,envelope,author,project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         delivery_id,
                         org,
@@ -252,6 +258,7 @@ class PeerDeliveryService:
                         directory,
                         encoded,
                         author.model_dump_json(),
+                        str(envelope.project_id) if envelope.project_id else None,
                     ),
                 )
                 inbox = None
@@ -852,6 +859,12 @@ class PeerDeliveryService:
         else:
             if existing["directory"] != inbox["directory"] or existing["title"] != title:
                 raise RuntimeUnavailable("Native peer session does not match its reservation")
+        self.store.inherit_session_project_provenance(
+            inbox["organization_id"],
+            inbox["target_agent"],
+            session_id,
+            inbox["project_id"],
+        )
         return session_id
 
     def _local_session_match(self, inbox: dict[str, Any]) -> dict[str, Any] | None:

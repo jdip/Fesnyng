@@ -7,7 +7,12 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 
 from fesnyng_backend.agent_lifecycle import HostLifecycleRequest
-from fesnyng_backend.host_models import HarnessSwitch, HostAgentConfiguration, SessionCreate
+from fesnyng_backend.host_models import (
+    HarnessSwitch,
+    HostAgentConfiguration,
+    SessionCreate,
+    SessionProjectProvenance,
+)
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["host"])
@@ -113,6 +118,25 @@ def sessions(request: Request, organization_id: UUID, agent_id: UUID):
     require_binding(request, org)
     with host_errors():
         return request.app.state.host_store.sessions(org, aid)
+
+
+@router.put("/agents/{agent_id}/sessions/{session_id}/project-provenance")
+def set_project_provenance(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+    session_id: str,
+    body: SessionProjectProvenance,
+):
+    org, aid = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        request.app.state.host_store.set_session_project_provenance(
+            org, aid, session_id, str(body.project_id) if body.project_id else None
+        )
+        session = request.app.state.host_store.session(org, aid, session_id)
+        session.pop("project_provenance_initialized", None)
+        return session
 
 
 @router.get("/agents/{agent_id}/sessions/{session_id}/messages")

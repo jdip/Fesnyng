@@ -99,6 +99,147 @@ def test_same_host_peer_delivery_uses_durable_receiver_reservation_and_dispatch(
         )
 
 
+def test_delegation_carries_durable_source_project_provenance_only_to_a_new_thread(tmp_path):
+    host = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            state_directory=tmp_path / "state",
+            database_path=tmp_path / "state/host.sqlite3",
+        )
+    )
+    host.initialize()
+    organization_id = str(uuid4())
+    host.bind_organization(organization_id, secrets.token_urlsafe(32))
+    source_agent, target_agent = uuid4(), uuid4()
+    for agent_id, name in ((source_agent, "Source"), (target_agent, "Target")):
+        envelope = HostAgentConfiguration(
+            host_id=host.instance_id,
+            organization_id=organization_id,
+            agent_id=agent_id,
+            version=1,
+            name=name,
+        )
+        host.stage_agent(envelope)
+        host.mark_applied(envelope)
+    project_id, existing_project_id = str(uuid4()), str(uuid4())
+    host.save_session(
+        organization_id, str(source_agent), "ses_source", "/workspace/default/source", "Source"
+    )
+    host.save_session(
+        organization_id,
+        str(target_agent),
+        "ses_existing",
+        "/workspace/default/existing",
+        "Existing recipient",
+    )
+    host.set_session_project_provenance(
+        organization_id, str(source_agent), "ses_source", project_id
+    )
+    host.set_session_project_provenance(
+        organization_id, str(target_agent), "ses_existing", existing_project_id
+    )
+    configuration = PeerConfigurationStore(host)
+    configuration.initialize()
+    configuration.apply(
+        PeerConfiguration(
+            organization_id=organization_id,
+            host_id=host.instance_id,
+            version=1,
+            agents=[
+                PeerAgent(agent_id=source_agent, name="Source", title="", host_id=host.instance_id),
+                PeerAgent(agent_id=target_agent, name="Target", title="", host_id=host.instance_id),
+            ],
+        )
+    )
+    dispatch = DispatchStore(host)
+    dispatch.initialize()
+    service = PeerDeliveryService(host, configuration, Native(), dispatch, Waker())
+    service.initialize()
+
+    delegated = PeerSend(id=uuid4(), target_agent=target_agent, text="New Project work")
+    receipt = asyncio.run(service.send(organization_id, str(source_agent), "ses_source", delegated))
+
+    assert receipt["state"] == "accepted"
+    assert (
+        host.session(organization_id, str(target_agent), "ses_peer")["fesnyng_project_id"]
+        == project_id
+    )
+    assert service._inbox(str(delegated.id))["project_id"] == project_id
+    host.set_session_project_provenance(
+        organization_id, str(source_agent), "ses_source", str(uuid4())
+    )
+    assert (
+        asyncio.run(service.send(organization_id, str(source_agent), "ses_source", delegated))
+        == receipt
+    )
+
+    contributed = PeerSend(
+        id=uuid4(),
+        target_agent=target_agent,
+        target_session="ses_existing",
+        text="Leave existing recipient grouped as it is",
+    )
+    assert (
+        asyncio.run(service.send(organization_id, str(source_agent), "ses_source", contributed))[
+            "state"
+        ]
+        == "accepted"
+    )
+    assert (
+        host.session(organization_id, str(target_agent), "ses_existing")["fesnyng_project_id"]
+        == existing_project_id
+    )
+
+
+def test_peer_recovery_does_not_restore_provenance_explicitly_cleared_after_native_creation(
+    tmp_path,
+):
+    host, target_agent, configuration, dispatch, state = _local_receiver(tmp_path)
+    delivery_id, project_id = uuid4(), uuid4()
+    directory = f"/workspace/default/threads/peer-{delivery_id.hex}"
+    envelope = PeerEnvelope(
+        id=delivery_id,
+        organization_id=state["organization_id"],
+        source_host=host.instance_id,
+        source_agent=state["source_agent"],
+        source_session="ses_sender",
+        target_agent=target_agent,
+        text="Recover known Project work",
+        project_id=project_id,
+    )
+    host.save_session(
+        state["organization_id"], str(target_agent), "ses_peer", directory, envelope.title
+    )
+    with host.connect() as connection:
+        connection.execute(
+            "INSERT INTO peer_inbox(id,organization_id,source_host,source_agent,source_session,"
+            "target_agent,directory,envelope,project_id,state) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(delivery_id),
+                state["organization_id"],
+                str(host.instance_id),
+                str(state["source_agent"]),
+                "ses_sender",
+                str(target_agent),
+                directory,
+                envelope.model_dump_json(),
+                str(project_id),
+                "creating",
+            ),
+        )
+    host.set_session_project_provenance(
+        state["organization_id"], str(target_agent), "ses_peer", None
+    )
+    receiver = PeerDeliveryService(host, configuration, Native(), dispatch, Waker())
+    receiver.initialize()
+
+    assert asyncio.run(receiver.receive(str(host.instance_id), envelope))["state"] == "accepted"
+    assert (
+        host.session(state["organization_id"], str(target_agent), "ses_peer")["fesnyng_project_id"]
+        is None
+    )
+
+
 def test_accepted_peer_retry_remains_readable_after_receiver_thread_freezes(tmp_path):
     host, target_agent, _, dispatch, state = _local_receiver(tmp_path)
     configuration = PeerConfigurationStore(host)
