@@ -195,3 +195,23 @@ test('renders frozen Codex snapshot history without native write controls', asyn
   expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
 });
+
+test('keeps a removed managed Codex history mounted without native write controls', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'old-codex-thread', title: 'Removed Codex thread', time: {} }]));
+    if (url.includes('/history')) return new Response(JSON.stringify({ thread: { id: 'old-codex-thread', title: 'Removed Codex thread' }, turns: [], historyState: 'complete' }));
+    if (url.includes('/pending?')) throw new Error('Removed workspaces must not poll pending requests');
+    return new Response(JSON.stringify({ id: 'old-codex-thread', title: 'Removed Codex thread', time: {} }));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="old-codex-thread" showThreadList={false} executionBlocked executionBlockedState="removed" />);
+
+  expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
+  expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
+});

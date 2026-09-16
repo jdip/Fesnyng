@@ -1517,4 +1517,4 @@ class NativeBoundaryRuntime(DockerRuntime):
         assert path == "/session"
         assert method == "POST"
         self.session_posts.append(body)
-        return {"id": "ses_runtime"}
+        return {"id": "ses_runtime", "directory": directory}

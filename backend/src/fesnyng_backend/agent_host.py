@@ -19,12 +19,18 @@ from fesnyng_backend.host_dispatch_routes import router as dispatch_router
 from fesnyng_backend.host_interaction_routes import router as interaction_router
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_lifecycle import exclusive_host
-from fesnyng_backend.host_mcp import create_memory_mcp, register_collaboration_tools
+from fesnyng_backend.host_mcp import (
+    create_memory_mcp,
+    register_collaboration_tools,
+    register_workspace_tools,
+)
 from fesnyng_backend.host_memory import MemoryStore
 from fesnyng_backend.host_memory_routes import router as memory_router
 from fesnyng_backend.host_routes import router
 from fesnyng_backend.host_runtime import DockerRuntime
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.host_workspace import Workspace
+from fesnyng_backend.host_workspace_lifecycle_routes import router as workspace_lifecycle_router
 from fesnyng_backend.host_workspace_routes import router as workspace_router
 from fesnyng_backend.peer_configuration import PeerConfigurationStore
 from fesnyng_backend.peer_configuration_routes import router as peer_configuration_router
@@ -83,6 +89,11 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     )
     register_collaboration_tools(
         mcp_server, store, app.state.peer_discovery, app.state.peer_delivery
+    )
+    register_workspace_tools(
+        mcp_server,
+        store,
+        Workspace(store, app.state.host_runtime, app.state.dispatch_store, app.state.interactions),
     )
     app.state.mcp_server = mcp_server
     app.mount("/mcp", mcp_app)
@@ -145,6 +156,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.include_router(peer_configuration_router)
     app.include_router(peer_delivery_router)
     app.include_router(peer_discovery_router)
+    app.include_router(workspace_lifecycle_router)
     app.include_router(workspace_router)
     app.include_router(codex_workspace_router)
     return app

@@ -5,13 +5,13 @@ import type { Agent } from './workspace-api';
 vi.mock('./Conversation', async () => {
   const { createPortal } = await import('react-dom');
   const { useState } = await import('react');
-  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect, readOnly }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void; readOnly?: boolean }) => {
+  return { Conversation: ({ sessionId, threadListTarget, onThreadSelect, onSessionChange, readOnly, executionBlocked, executionBlockedState }: { sessionId?: string; threadListTarget?: HTMLElement; onThreadSelect?: () => void; onSessionChange?: (id: string) => void; readOnly?: boolean; executionBlocked?: boolean; executionBlockedState?: string }) => {
     const [draft, setDraft] = useState('');
-    return <><p>Native conversation {sessionId}</p>{readOnly ? <p>This thread is permanently frozen and read-only.</p> : <textarea aria-label="Composer draft" value={draft} onChange={(event) => setDraft(event.target.value)} />}{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button></>, threadListTarget)}</>;
+    return <><p>Native conversation {sessionId}</p>{readOnly ? <p>This thread is permanently frozen and read-only.</p> : executionBlocked ? <p>{executionBlockedState === 'removed' ? 'This workspace was removed. Prepare its replacement before continuing.' : 'This workspace cannot run until its state is resolved. Inspect the workspace before continuing.'}</p> : <textarea aria-label="Composer draft" value={draft} onChange={(event) => setDraft(event.target.value)} />}{threadListTarget && createPortal(<><button onClick={onThreadSelect}>Open sidebar thread</button><button onClick={onThreadSelect}>Create sidebar thread</button><button onClick={() => onSessionChange?.('other-thread')}>Select other sidebar thread</button></>, threadListTarget)}</>;
   } };
 });
 vi.mock('./CodexConversation', () => ({
-  CodexConversation: ({ sessionId, readOnly }: { sessionId?: string; readOnly?: boolean }) => <><p>Codex conversation {sessionId}</p>{readOnly && <p>This thread is permanently frozen and read-only.</p>}</>,
+  CodexConversation: ({ sessionId, readOnly, executionBlocked }: { sessionId?: string; readOnly?: boolean; executionBlocked?: boolean }) => <><p>Codex conversation {sessionId}</p>{readOnly ? <p>This thread is permanently frozen and read-only.</p> : executionBlocked && <p>This workspace is unavailable. Prepare its replacement before continuing.</p>}</>,
 }));
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.clear(); window.history.replaceState(null, '', '/'); });
@@ -232,6 +232,132 @@ test('holds a new target-harness thread until its configuration applies', async 
 
   expect(await screen.findByText('The selected harness is still applying. New threads will be available after configuration finishes.')).toBeTruthy();
   expect(screen.queryByText('Codex conversation')).toBeNull();
+});
+
+test('keeps the native history mounted but suspends execution after a managed workspace is removed', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'removed-thread', title: 'Retained history', runtime_type: 'opencode' }]);
+    if (input.endsWith('/sessions/removed-thread/workspace')) return Response.json({ workspace_id: 'workspace-one', generation: 2, safety_digest: 'a'.repeat(64), state: 'removed', kind: 'repository', directory: '/workspaces/one/agent-one/removed-thread', repository: { state: 'available' }, git: { kind: 'repository', state: 'safe', branch: 'work/removed-thread', dirty: 0, untracked: 0, ignored: 0, ahead: 0, upstream: 'origin/test' }, history: { state: 'verified' }, cleanup: { remove: { available: false, reason: 'Already removed.' }, discard: { available: false, reason: 'Already removed.' }, replace: { available: true } } });
+    return Response.json([]);
+  }));
+  render(<AgentConversation organization="one" agent={agent} csrfToken="csrf" hidden={false} refreshKey={0} sessionId="removed-thread" threadListTarget={null} newThreadRequest={undefined} onNewThreadStarted={vi.fn()} threadPageSize={6} onThreadSelect={vi.fn()} onSessionChange={vi.fn()} onError={vi.fn()} onOpen={vi.fn()} />);
+
+  expect(await screen.findByText('Native conversation removed-thread')).toBeTruthy();
+  expect(await screen.findByText(/^Removed · Repository worktree$/)).toBeTruthy();
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Prepare replacement' })).toBeTruthy();
+});
+
+test('keeps existing sidebar thread navigation available for a removed workspace without restoring execution', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'removed-thread', title: 'Removed history', runtime_type: 'opencode' }, { session_id: 'other-thread', title: 'Other history', runtime_type: 'opencode' }]);
+    if (input.endsWith('/sessions/removed-thread/workspace')) return Response.json({ workspace_id: 'workspace-one', generation: 2, safety_digest: 'a'.repeat(64), state: 'removed', kind: 'ordinary', directory: '/workspaces/one/agent-one/removed-thread', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false }, discard: { available: false }, replace: { available: true } } });
+    return Response.json([]);
+  }));
+  const target = document.body.appendChild(document.createElement('div'));
+  const selected = vi.fn();
+  render(<AgentConversation organization="one" agent={agent} csrfToken="csrf" hidden={false} refreshKey={0} sessionId="removed-thread" threadListTarget={target} newThreadRequest={1} onNewThreadStarted={vi.fn()} threadPageSize={6} onThreadSelect={vi.fn()} onSessionChange={selected} onError={vi.fn()} onOpen={vi.fn()} />);
+
+  expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
+  expect(within(target).getByRole('button', { name: 'Select other sidebar thread' })).toBeTruthy();
+  fireEvent.click(within(target).getByRole('button', { name: 'Select other sidebar thread' }));
+  expect(selected).toHaveBeenCalledWith('other-thread');
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
+  target.remove();
+});
+
+test('keeps execution blocked when a removed workspace becomes durably unavailable', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  let durableUnavailable = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'thread', title: 'History', runtime_type: 'opencode' }]);
+    if (input.endsWith('/sessions/thread/workspace')) return Response.json(durableUnavailable
+      ? { workspace_id: 'workspace-one', generation: 2, safety_digest: null, state: 'unavailable', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false }, discard: { available: false }, replace: { available: false } } }
+      : { workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'removed', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false }, discard: { available: false }, replace: { available: true } } });
+    return Response.json([]);
+  }));
+  const props = { organization: 'one', agent, csrfToken: 'csrf', hidden: false, refreshKey: 0, sessionId: 'thread', threadListTarget: null, newThreadRequest: undefined, onNewThreadStarted: vi.fn(), threadPageSize: 6, onThreadSelect: vi.fn(), onSessionChange: vi.fn(), onError: vi.fn(), onOpen: vi.fn() };
+  const view = render(<AgentConversation {...props} workspaceInspectionRevision={0} />);
+  expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
+  durableUnavailable = true;
+  view.rerender(<AgentConversation {...props} workspaceInspectionRevision={1} />);
+  expect(await screen.findByText('This workspace cannot run until its state is resolved. Inspect the workspace before continuing.')).toBeTruthy();
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
+});
+
+test('keeps execution available when a ready workspace only lacks optional Git evidence', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'thread', title: 'History', runtime_type: 'opencode' }]);
+    if (input.endsWith('/sessions/thread/workspace')) return Response.json({ workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'ready', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false, reason: 'Workspace safety could not be verified.' }, discard: { available: false, reason: 'Workspace safety could not be verified.' }, replace: { available: false, reason: 'Remove first.' } } });
+    return Response.json([]);
+  }));
+  render(<AgentConversation organization="one" agent={agent} csrfToken="csrf" hidden={false} refreshKey={0} sessionId="thread" threadListTarget={null} newThreadRequest={undefined} onNewThreadStarted={vi.fn()} threadPageSize={6} onThreadSelect={vi.fn()} onSessionChange={vi.fn()} onError={vi.fn()} onOpen={vi.fn()} />);
+
+  expect(await screen.findByLabelText('Composer draft')).toBeTruthy();
+  expect(screen.queryByText('This workspace cannot run until its state is resolved. Inspect the workspace before continuing.')).toBeNull();
+});
+
+test('remembers a removed workspace after visiting another thread when inspection goes offline', async () => {
+  const agent: Agent = { id: 'agent-one', organization_id: 'one', name: 'Researcher', title: 'Research', host_id: 'host', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', runtime_type: 'opencode', provider: 'openai', model: 'gpt', profile_id: null, workspace: 'default', instructions: '', skills: [] } };
+  let offline = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.endsWith('/sessions')) return Response.json(['removed-thread', 'other-thread'].map((session_id) => ({ session_id, title: session_id, runtime_type: 'opencode' })));
+    if (input.endsWith('/workspace')) {
+      if (offline) return Response.json({ detail: 'Host offline' }, { status: 503 });
+      const removed = input.includes('/removed-thread/');
+      return Response.json({ workspace_id: removed ? 'first' : 'second', generation: 2, safety_digest: 'a'.repeat(64), state: removed ? 'removed' : 'ready', kind: 'ordinary', directory: '/managed/thread', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false }, discard: { available: false }, replace: { available: removed } } });
+    }
+    return Response.json([]);
+  }));
+  const thread = (sessionId: string) => <AgentConversation organization="one" agent={agent} csrfToken="csrf" hidden={false} refreshKey={0} sessionId={sessionId} threadListTarget={null} newThreadRequest={undefined} onNewThreadStarted={vi.fn()} threadPageSize={6} onThreadSelect={vi.fn()} onSessionChange={vi.fn()} onError={vi.fn()} onOpen={vi.fn()} />;
+  const view = render(thread('removed-thread'));
+  expect(await screen.findByText(/^Removed · Ordinary directory$/)).toBeTruthy();
+  view.rerender(thread('other-thread'));
+  expect(await screen.findByText(/^Ready · Ordinary directory$/)).toBeTruthy();
+  expect(screen.getByLabelText('Composer draft')).toBeTruthy();
+  offline = true;
+  view.rerender(thread('removed-thread'));
+  expect(await screen.findByText(/Workspace evidence is unavailable/)).toBeTruthy();
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
+  expect(screen.getByText('Native conversation removed-thread')).toBeTruthy();
+});
+
+test.each(['available', 'failed-refresh', 'lost-response'])('keeps the conversation gated after overview removal (%s)', async (receiptMode) => {
+  const session = { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' };
+  let workspaceRemoved = false;
+  let recoveredInspection = false;
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input === '/api/auth/session') return Response.json(session);
+    if (input === '/api/organizations') return Response.json([{ id: 'one', name: 'Organization' }]);
+    if (input.endsWith('/members')) return Response.json([{ user_id: 'human', role: 'member' }]);
+    if (input.endsWith('/agents') && !input.endsWith('/sessions')) return Response.json([{ id: 'agent-one', name: 'Researcher', title: 'Research', configuration: { workspace: 'default' } }]);
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'thread-one', title: 'Research task', runtime_type: 'opencode' }]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [{ session_id: 'thread-one', project_id: null }] });
+    if (input.includes('/projects')) return Response.json([]);
+    if (input.endsWith('/sessions/thread-one/workspace/remove')) { workspaceRemoved = true; if (receiptMode === 'lost-response') throw new Error('Lost response'); return Response.json({ workspace_id: 'workspace-one', generation: 2, safety_digest: 'b'.repeat(64), state: 'removed', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread-one', repository: { state: 'absent' }, git: { kind: 'ordinary', state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false, reason: 'Already removed.' }, discard: { available: false, reason: 'Already removed.' }, replace: { available: true } } }); }
+    if (input.endsWith('/sessions/thread-one/workspace') && workspaceRemoved) {
+      if (receiptMode === 'failed-refresh' || (receiptMode === 'lost-response' && recoveredInspection)) return Response.json({ detail: 'Host offline' }, { status: 503 });
+      recoveredInspection = true;
+    }
+    if (input.endsWith('/sessions/thread-one/workspace')) return Response.json(workspaceRemoved ? { workspace_id: 'workspace-one', generation: 2, safety_digest: 'b'.repeat(64), state: 'removed', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread-one', repository: { state: 'absent' }, git: { state: 'unavailable' }, history: { state: 'verified' }, cleanup: { remove: { available: false, reason: 'Already removed.' }, discard: { available: false, reason: 'Already removed.' }, replace: { available: true } } } : { workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'ready', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread-one', repository: { state: 'absent' }, git: { kind: 'ordinary', state: 'safe', branch: null, dirty: 0, untracked: 0, ignored: 0, ahead: 0, upstream: null }, history: { state: 'verified' }, cleanup: { remove: { available: true }, discard: { available: true }, replace: { available: false, reason: 'Remove first.' } } });
+    return Response.json([]);
+  }));
+  window.history.replaceState(null, '', '/#organization=one&agent=agent-one&thread=thread-one');
+  render(<App />);
+  expect(await screen.findByText('Native conversation thread-one')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Workspaces' }));
+  expect(await screen.findByRole('heading', { name: 'Workspaces', level: 2 })).toBeTruthy();
+  const employeeWorkspaces = await screen.findByRole('region', { name: 'Employee Workspaces' });
+  expect(within(employeeWorkspaces).getByText('/workspaces/one/agent-one/thread-one')).toBeTruthy();
+  expect(screen.getByText('Native conversation thread-one')).toBeTruthy();
+  fireEvent.click(within(employeeWorkspaces).getByRole('button', { name: 'Remove workspace' }));
+  expect(await within(employeeWorkspaces).findByText(/^Removed · Ordinary directory$/)).toBeTruthy();
+  fireEvent.click(within(employeeWorkspaces).getByRole('button', { name: /Research task/ }));
+  expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
+  expect(screen.queryByLabelText('Composer draft')).toBeNull();
 });
 
 test('lets an existing member create another organization without losing the original membership', async () => {

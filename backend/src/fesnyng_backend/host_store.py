@@ -9,7 +9,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.settings import ServiceSettings
@@ -104,6 +104,25 @@ class HostStore:
                     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                     FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
                 );
+                CREATE TABLE IF NOT EXISTS host_workspace_bindings (
+                    workspace_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL UNIQUE REFERENCES host_sessions(session_id),
+                    directory TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('repository','ordinary','fork')),
+                    creation_id TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('ready','removing','removed','replacing','unavailable')),
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    safety_digest TEXT,
+                    working_branch TEXT,
+                    working_revision TEXT,
+                    history_snapshot TEXT,
+                    history_digest TEXT,
+                    last_actor TEXT,
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
+                );
             """)
             columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_sessions)")
@@ -133,6 +152,18 @@ class HostStore:
             if "requested_checkout_branch" not in workspace_columns:
                 connection.execute(
                     "ALTER TABLE host_workspace_creations ADD COLUMN requested_checkout_branch TEXT"
+                )
+            binding_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(host_workspace_bindings)")
+            }
+            if "working_branch" not in binding_columns:
+                connection.execute(
+                    "ALTER TABLE host_workspace_bindings ADD COLUMN working_branch TEXT"
+                )
+            if "working_revision" not in binding_columns:
+                connection.execute(
+                    "ALTER TABLE host_workspace_bindings ADD COLUMN working_revision TEXT"
                 )
             agent_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_agents)")
@@ -556,15 +587,278 @@ class HostStore:
         receipt: dict[str, Any],
     ) -> None:
         encoded = json.dumps(receipt, separators=(",", ":"))
+        session_id = receipt.get("id")
+        directory = receipt.get("directory")
+        if not isinstance(session_id, str) or not isinstance(directory, str):
+            raise TypeError("Workspace creation receipt cannot be recorded")
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 """UPDATE host_workspace_creations SET state='completed',native_receipt=?,updated_at=unixepoch()
                 WHERE creation_id=? AND organization_id=? AND agent_id=?
                   AND state IN ('native_attempted','uncertain')""",
                 (encoded, creation_id, organization_id, agent_id),
             ).rowcount
+            if changed != 1:
+                raise ValueError("Workspace creation receipt cannot be recorded")
+            creation = connection.execute(
+                """SELECT repository_url,directory FROM host_workspace_creations
+                WHERE creation_id=? AND organization_id=? AND agent_id=?""",
+                (creation_id, organization_id, agent_id),
+            ).fetchone()
+            if creation is None or creation["directory"] != directory:
+                raise ValueError("Workspace creation receipt cannot be recorded")
+            session = connection.execute(
+                """SELECT 1 FROM host_sessions
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND directory=?""",
+                (organization_id, agent_id, session_id, directory),
+            ).fetchone()
+            if session is not None:
+                connection.execute(
+                    """INSERT INTO host_workspace_bindings(
+                        workspace_id,organization_id,agent_id,session_id,directory,kind,creation_id,state
+                    ) VALUES(?,?,?,?,?,?,?,'ready')
+                    ON CONFLICT(session_id) DO NOTHING""",
+                    (
+                        creation_id,
+                        organization_id,
+                        agent_id,
+                        session_id,
+                        directory,
+                        "repository" if creation["repository_url"] is not None else "ordinary",
+                        creation_id,
+                    ),
+                )
+
+    def workspace_binding(
+        self, organization_id: str, agent_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """Return one host-owned workspace, lazily binding completed #119 receipts."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT * FROM host_workspace_bindings
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            session = connection.execute(
+                """SELECT directory FROM host_sessions
+                WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+            if session is None:
+                raise LookupError("Thread not found")
+            creations = connection.execute(
+                """SELECT * FROM host_workspace_creations
+                WHERE organization_id=? AND agent_id=? AND directory=? AND state='completed'""",
+                (organization_id, agent_id, session["directory"]),
+            ).fetchall()
+            matching = []
+            for creation in creations:
+                try:
+                    native = json.loads(creation["native_receipt"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(native, dict) and native.get("id") == session_id:
+                    matching.append(creation)
+            if len(matching) != 1:
+                return None
+            creation = matching[0]
+            connection.execute(
+                """INSERT INTO host_workspace_bindings(
+                    workspace_id,organization_id,agent_id,session_id,directory,kind,creation_id,state
+                ) VALUES(?,?,?,?,?,?,?,'ready')""",
+                (
+                    creation["creation_id"],
+                    organization_id,
+                    agent_id,
+                    session_id,
+                    session["directory"],
+                    "repository" if creation["repository_url"] is not None else "ordinary",
+                    creation["creation_id"],
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM host_workspace_bindings WHERE workspace_id=?",
+                (creation["creation_id"],),
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+    def register_workspace_fork(
+        self,
+        organization_id: str,
+        agent_id: str,
+        source_session_id: str,
+        session_id: str,
+        directory: str,
+    ) -> None:
+        """Bind only a fork descended from a currently host-owned workspace."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            source = connection.execute(
+                """SELECT directory,state,creation_id FROM host_workspace_bindings
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (organization_id, agent_id, source_session_id),
+            ).fetchone()
+            if source is None or source["state"] != "ready":
+                return
+            if not directory.startswith(source["directory"].rstrip("/") + "-fork-"):
+                raise ValueError(
+                    "Fork workspace directory is not derived from its host-owned source"
+                )
+            connection.execute(
+                """INSERT INTO host_workspace_bindings(
+                    workspace_id,organization_id,agent_id,session_id,directory,kind,creation_id,state
+                ) VALUES(?,?,?,?,?,'fork',?,'ready') ON CONFLICT(session_id) DO NOTHING""",
+                (
+                    str(uuid4()),
+                    organization_id,
+                    agent_id,
+                    session_id,
+                    directory,
+                    source["creation_id"],
+                ),
+            )
+
+    def begin_workspace_removal(
+        self,
+        organization_id: str,
+        agent_id: str,
+        workspace_id: str,
+        generation: int,
+        actor: str,
+        snapshot: dict[str, Any],
+        history_digest: str,
+        safety_digest: str,
+        working_branch: str | None = None,
+        working_revision: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            # Admission and the durable snapshot share the same SQLite transaction.
+            # DispatchStore.enqueue takes this lock before admitting a message, so a
+            # later enqueue observes `removing` and is refused rather than racing a
+            # destructive filesystem operation.
+            binding = connection.execute(
+                """SELECT session_id FROM host_workspace_bindings
+                WHERE workspace_id=? AND organization_id=? AND agent_id=?""",
+                (workspace_id, organization_id, agent_id),
+            ).fetchone()
+            if binding is None:
+                raise ValueError("Workspace lifecycle request is stale or not ready")
+            unsettled = connection.execute(
+                """SELECT 1 FROM host_dispatches
+                WHERE organization_id=? AND agent_id=? AND session_id=?
+                  AND state NOT IN ('completed','failed','contributed','cancelled') LIMIT 1""",
+                (organization_id, agent_id, binding["session_id"]),
+            ).fetchone()
+            if unsettled is not None:
+                raise ValueError(
+                    "Native session action is waiting for durable delivery reconciliation"
+                )
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings
+                SET state='removing',last_actor=?,history_snapshot=?,history_digest=?,safety_digest=?,
+                    working_branch=?,working_revision=?,
+                    updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND generation=? AND state='ready'""",
+                (
+                    actor,
+                    json.dumps(snapshot, separators=(",", ":")),
+                    history_digest,
+                    safety_digest,
+                    working_branch,
+                    working_revision,
+                    workspace_id,
+                    organization_id,
+                    agent_id,
+                    generation,
+                ),
+            ).rowcount
         if changed != 1:
-            raise ValueError("Workspace creation receipt cannot be recorded")
+            raise ValueError("Workspace lifecycle request is stale or not ready")
+
+    def complete_workspace_removal(
+        self,
+        organization_id: str,
+        agent_id: str,
+        workspace_id: str,
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings
+                SET state='removed',generation=generation+1,updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND state='removing'""",
+                (workspace_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace removal receipt cannot be recorded")
+
+    def begin_workspace_replacement(
+        self, organization_id: str, agent_id: str, workspace_id: str, generation: int, actor: str
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings SET state='replacing',last_actor=?,updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND generation=? AND state='removed'""",
+                (actor, workspace_id, organization_id, agent_id, generation),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace replacement request is stale or unavailable")
+
+    def complete_workspace_replacement(
+        self, organization_id: str, agent_id: str, workspace_id: str
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings SET state='ready',generation=generation+1,
+                safety_digest=NULL,updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND state='replacing'""",
+                (workspace_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace replacement receipt cannot be recorded")
+
+    def mark_workspace_unavailable(
+        self, organization_id: str, agent_id: str, workspace_id: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE host_workspace_bindings SET state='unavailable',updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND state IN ('removing','replacing')""",
+                (workspace_id, organization_id, agent_id),
+            )
+
+    def restore_workspace_ready(
+        self, organization_id: str, agent_id: str, workspace_id: str
+    ) -> None:
+        """Reopen only a pre-delete failure whose directory was reverified present."""
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings
+                SET state='ready',safety_digest=NULL,working_branch=NULL,working_revision=NULL,
+                    history_snapshot=NULL,history_digest=NULL,updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND state='removing'""",
+                (workspace_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace removal reconciliation is unavailable")
+
+    def restore_workspace_removed(
+        self, organization_id: str, agent_id: str, workspace_id: str
+    ) -> None:
+        """Reopen only a pre-replacement failure whose removed path still verifies absent."""
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_bindings SET state='removed',updated_at=unixepoch()
+                WHERE workspace_id=? AND organization_id=? AND agent_id=? AND state='replacing'""",
+                (workspace_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace replacement reconciliation is unavailable")
 
     def mark_workspace_creation_uncertain(
         self, organization_id: str, agent_id: str, creation_id: str

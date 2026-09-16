@@ -88,6 +88,26 @@ It requires no provider credentials or external Git account. Successful fixtures
 are removed; failed compute is stopped and its diagnostic state retained through
 the existing Docker proof lifecycle owner.
 
+### Workspace lifecycle proof
+
+With the pinned image built, run the credential-free lifecycle proof for both
+native harnesses:
+
+```bash
+FESNYNG_WORKSPACE_LIFECYCLE_DOCKER_TESTS=true \
+FESNYNG_WORKSPACE_LIFECYCLE_PROOF_ROOT=/absolute/docker-shared/proof-directory \
+  uv run --locked --project backend pytest \
+  backend/tests/test_workspace_lifecycle_docker.py -q -s
+```
+
+Create the Docker-shared parent directory first. The proof exercises inspection,
+stale and unsafe cleanup refusals, explicit discard, removal, retained native
+history and same-thread replacement through the control-plane and host APIs.
+It also checks archive, restart and permanently frozen history behavior. It uses
+the existing isolated Docker proof lifecycle: stop failed compute and retain
+diagnostics; remove successful fixtures. This is native protocol evidence, not
+authenticated model execution.
+
 ## Run locally
 
 Run the independent backend commands documented in [backend/README.md](../backend/README.md). The control plane normally listens on `127.0.0.1:8000`; each host uses a separate port and state directory. The host is independently runnable and does not require control-plane reachability for startup. Local SQLite state, credentials and runtime files stay outside Git.

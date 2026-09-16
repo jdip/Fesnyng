@@ -24,6 +24,7 @@ from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
 from fesnyng_backend.host_routes import host_errors, require_binding
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_workspace import SessionUpdate, Workspace, session_create_kwargs
+from fesnyng_backend.host_workspace_lifecycle import workspace_history_snapshot
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["codex workspace"])
 
@@ -379,6 +380,13 @@ async def history(request: Request, organization_id: UUID, agent_id: UUID, sessi
             if session["runtime_type"] != "codex":
                 raise RuntimeUnavailable("Thread is bound to the OpenCode harness")
             return workspace._snapshot(org, agent, session)["history"]
+        binding = request.app.state.host_store.workspace_binding(org, agent, session_id)
+        if binding is not None and binding["state"] != "ready":
+            captured = workspace_history_snapshot(binding, session)
+            history = captured.get("history") if isinstance(captured, Mapping) else None
+            if not isinstance(history, Mapping):
+                raise RuntimeUnavailable("Workspace lifecycle history receipt is unavailable")
+            return dict(history)
         adapter, _session = _codex(request, org, agent, session_id)
         try:
             reply = await adapter.call(

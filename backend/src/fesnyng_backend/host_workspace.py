@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from fesnyng_backend.agent_models import Contract, Name, PermissionRule
 from fesnyng_backend.host_dispatch import DispatchStore, HostSubmission
+from fesnyng_backend.host_history import capture_session_history
 from fesnyng_backend.host_interactions import Interactions
-from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
-from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
+from fesnyng_backend.host_models import Actor, NativeID, SessionCreate, WorkspaceExpectation
+from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable, WorkspaceSafetyChanged
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.host_workspace_lifecycle import WorkspaceLifecycle, workspace_history_snapshot
 
 _native_id = TypeAdapter(NativeID)
 
@@ -149,6 +153,55 @@ class NativeRuntime(Protocol):
     ) -> Any: ...
 
 
+@runtime_checkable
+class WorkspaceLifecycleRuntime(Protocol):
+    """Filesystem and native-admission capabilities used only by lifecycle actions."""
+
+    async def workspace_safety(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> dict[str, Any]: ...
+
+    async def remove_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        discard: bool,
+        expected_safety_digest: str,
+    ) -> None: ...
+
+    async def replace_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        repository_url: str | None = None,
+        creation_id: str | None = None,
+        working_branch: str | None = None,
+        working_revision: str | None = None,
+    ) -> None: ...
+
+    async def workspace_repository_matches(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        repository_url: str,
+        creation_id: str,
+    ) -> bool: ...
+
+    async def workspace_exists(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> bool: ...
+
+    async def assert_codex_thread_quiet(
+        self, organization_id: str, agent_id: str, thread_id: str
+    ) -> None: ...
+
+
 class Workspace:
     def __init__(
         self,
@@ -171,6 +224,11 @@ class Workspace:
         return (
             self.runtime if session.get("runtime_type") == "codex" else self._runtime_for(session)
         )
+
+    def _lifecycle_runtime(self) -> WorkspaceLifecycleRuntime:
+        if not isinstance(self.runtime, WorkspaceLifecycleRuntime):
+            raise RuntimeUnavailable("Workspace lifecycle runtime capabilities are unavailable")
+        return self.runtime
 
     def sessions(self, org: str, agent: str, *, archived: bool = False) -> list[dict[str, Any]]:
         sessions = self.host.sessions(org, agent, archived=None if archived else False)
@@ -254,12 +312,248 @@ class Workspace:
             "backgroundProcesses": {"state": "unavailable"},
         }
 
+    async def workspace_inspection(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
+        runtime = self._lifecycle_runtime()
+        inspection = await WorkspaceLifecycle(self.host, runtime).inspect(org, agent, session_id)
+        if inspection.get("state") != "ready":
+            return inspection
+        if inspection.get("git", {}).get("state") == "unavailable":
+            # The filesystem scan did not produce the evidence needed for a
+            # cleanup decision. Do not turn that observation-only failure into
+            # an additional native activity probe or a lifecycle-state change.
+            return inspection
+        session = self.host.session(org, agent, session_id)
+        if session.get("frozen_at") is not None:
+            return inspection
+        try:
+            await self._require_workspace_provenance(org, agent, session_id, inspection)
+            self._require_no_unsettled_dispatch(org, agent, session_id)
+            if session["runtime_type"] == "codex":
+                await runtime.assert_codex_thread_quiet(org, agent, session_id)
+            else:
+                family = [
+                    candidate
+                    for candidate in await self._scoped_sessions(org, agent)
+                    if candidate["root_session_id"] == session_id
+                ]
+                for candidate in family:
+                    status = await self.runtime.request(
+                        org,
+                        agent,
+                        "/session/status",
+                        directory=candidate["directory"],
+                    )
+                    state = (
+                        status.get(candidate["session_id"]) if isinstance(status, Mapping) else None
+                    )
+                    # OpenCode's status receipt is sparse: absent means no active
+                    # native work for that session. A present non-idle record is
+                    # the only positive evidence that cleanup must wait.
+                    if not isinstance(status, Mapping) or (
+                        state is not None
+                        and (not isinstance(state, Mapping) or state.get("type") != "idle")
+                    ):
+                        raise RuntimeUnavailable("Native thread family is active or unavailable")
+        except (RuntimeUnavailable, ValueError) as error:
+            cleanup = inspection.get("cleanup")
+            if isinstance(cleanup, dict):
+                reason = str(error) or "Native thread activity could not be verified"
+                cleanup["remove"] = {"available": False, "reason": reason}
+                cleanup["discard"] = {"available": False, "reason": reason}
+        return inspection
+
+    async def remove_workspace(
+        self,
+        org: str,
+        agent: str,
+        session_id: str,
+        expected: WorkspaceExpectation,
+        *,
+        discard: bool,
+        author: Actor,
+    ) -> dict[str, Any]:
+        runtime = self._lifecycle_runtime()
+        lifecycle = WorkspaceLifecycle(self.host, runtime)
+        async with self.runtime.lock(agent):
+            session = self.host.session(org, agent, session_id)
+            binding, safety = await lifecycle.require_current(org, agent, session_id, expected)
+            await self._require_workspace_provenance(org, agent, session_id, {"git": safety})
+            self._require_unshared_directory(org, agent, session_id, binding["directory"])
+            if session.get("frozen_at") is None:
+                self.host.require_writable(org, agent, session_id)
+                self._require_no_unsettled_dispatch(org, agent, session_id)
+                if session["runtime_type"] == "codex":
+                    await runtime.assert_codex_thread_quiet(org, agent, session_id)
+                else:
+                    self._require_idle(
+                        await self.runtime.request(
+                            org, agent, "/session/status", directory=session["directory"]
+                        ),
+                        session_id,
+                    )
+            if not discard and safety.get("state") != "safe":
+                raise ValueError("Workspace is not clean enough for removal; use explicit discard")
+            snapshot = (
+                self._snapshot(org, agent, session)
+                if session.get("frozen_at") is not None
+                else await capture_session_history(self.host, self.runtime, org, agent, session)
+            )
+            if session.get("frozen_at") is None and session["runtime_type"] == "opencode":
+                for child in self._snapshot_sessions(snapshot):
+                    self._require_idle(
+                        await self.runtime.request(
+                            org,
+                            agent,
+                            "/session/status",
+                            directory=child["directory"],
+                        ),
+                        child["id"],
+                    )
+            history_digest = hashlib.sha256(
+                json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            self.host.begin_workspace_removal(
+                org,
+                agent,
+                binding["workspace_id"],
+                binding["generation"],
+                author.model_dump_json(),
+                snapshot,
+                history_digest,
+                safety["digest"],
+                working_branch=safety.get("branch")
+                if isinstance(safety.get("branch"), str)
+                else None,
+                working_revision=safety.get("revision")
+                if isinstance(safety.get("revision"), str)
+                else None,
+            )
+            try:
+                await runtime.remove_workspace(
+                    org,
+                    agent,
+                    binding["directory"],
+                    discard=discard,
+                    expected_safety_digest=safety["digest"],
+                )
+            except WorkspaceSafetyChanged:
+                # DockerRuntime raises this before starting its destructive shell
+                # command, so the directory is known intact and can be retried.
+                self.host.restore_workspace_ready(org, agent, binding["workspace_id"])
+                raise
+            except Exception:
+                try:
+                    current = await runtime.workspace_safety(org, agent, binding["directory"])
+                    if current.get("digest") == safety["digest"]:
+                        self.host.restore_workspace_ready(org, agent, binding["workspace_id"])
+                    else:
+                        self.host.mark_workspace_unavailable(org, agent, binding["workspace_id"])
+                except (RuntimeUnavailable, ValueError):
+                    self.host.mark_workspace_unavailable(org, agent, binding["workspace_id"])
+                raise
+            self.host.complete_workspace_removal(org, agent, binding["workspace_id"])
+            return await self.workspace_inspection(org, agent, session_id)
+
+    async def replace_workspace(
+        self,
+        org: str,
+        agent: str,
+        session_id: str,
+        expected: WorkspaceExpectation,
+        *,
+        author: Actor,
+    ) -> dict[str, Any]:
+        runtime = self._lifecycle_runtime()
+        async with self.runtime.lock(agent):
+            session = self.host.session(org, agent, session_id)
+            if session.get("frozen_at") is not None:
+                raise ValueError("Permanently frozen threads cannot replace a workspace")
+            binding = self.host.workspace_binding(org, agent, session_id)
+            if (
+                binding is None
+                or binding["workspace_id"] != expected.workspace_id
+                or binding["generation"] != expected.generation
+                or binding["state"] != "removed"
+                or binding.get("safety_digest") != expected.safety_digest
+            ):
+                raise ValueError("Workspace replacement request is stale or unavailable")
+            retained = workspace_history_snapshot(binding, session)
+            if retained is None:
+                raise RuntimeUnavailable("Retained workspace history receipt is unavailable")
+            self.host.begin_workspace_replacement(
+                org,
+                agent,
+                binding["workspace_id"],
+                binding["generation"],
+                author.model_dump_json(),
+            )
+            creation: Mapping[str, Any] | None = None
+            try:
+                creation = (
+                    self.host.workspace_creation(org, agent, binding["creation_id"])
+                    if binding.get("creation_id")
+                    else None
+                )
+                await runtime.replace_workspace(
+                    org,
+                    agent,
+                    binding["directory"],
+                    repository_url=creation["repository_url"] if creation else None,
+                    creation_id=binding.get("creation_id"),
+                    working_branch=binding.get("working_branch"),
+                    working_revision=binding.get("working_revision"),
+                )
+                restored = await capture_session_history(
+                    self.host, self.runtime, org, agent, session
+                )
+                if _history_semantics(restored) != _history_semantics(retained):
+                    raise RuntimeUnavailable(
+                        "Native thread history changed during workspace replacement"
+                    )
+            except Exception:
+                try:
+                    exists = await runtime.workspace_exists(org, agent, binding["directory"])
+                    if not exists:
+                        self.host.restore_workspace_removed(org, agent, binding["workspace_id"])
+                    elif await self._replacement_workspace_matches(org, agent, binding, creation):
+                        restored = await capture_session_history(
+                            self.host, self.runtime, org, agent, session
+                        )
+                        if _history_semantics(restored) != _history_semantics(retained):
+                            raise RuntimeUnavailable(
+                                "Native thread history changed during workspace replacement"
+                            )
+                        self.host.complete_workspace_replacement(
+                            org, agent, binding["workspace_id"]
+                        )
+                        return await self.workspace_inspection(org, agent, session_id)
+                    else:
+                        self.host.mark_workspace_unavailable(org, agent, binding["workspace_id"])
+                except (RuntimeUnavailable, ValueError):
+                    self.host.mark_workspace_unavailable(org, agent, binding["workspace_id"])
+                raise
+            self.host.complete_workspace_replacement(org, agent, binding["workspace_id"])
+            return await self.workspace_inspection(org, agent, session_id)
+
     async def messages(self, org: str, agent: str, session_id: str) -> list[dict[str, Any]]:
         session = await self._scoped_session(org, agent, session_id)
         if session.get("frozen_at") is not None:
             if session["runtime_type"] != "opencode":
                 raise RuntimeUnavailable("Thread is bound to the Codex harness")
             return self._snapshot(org, agent, session)["history"]
+        root_session_id = session["root_session_id"]
+        try:
+            root_session = self.host.session(org, agent, root_session_id)
+            binding = self.host.workspace_binding(org, agent, root_session_id)
+        except LookupError:
+            root_session = session
+            binding = None
+        if binding is not None and binding["state"] != "ready":
+            captured = workspace_history_snapshot(binding, root_session)
+            history = _captured_history(captured, session_id)
+            if not isinstance(history, list):
+                raise RuntimeUnavailable("Workspace lifecycle history receipt is unavailable")
+            return history
         result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}/message", directory=session["directory"]
         )
@@ -467,6 +761,7 @@ class Workspace:
             if source_after != source_history or child_history != child_history_before:
                 raise RuntimeUnavailable("Native session fork history provenance is invalid")
             self.host.save_session(org, agent, child_id, destination, title)
+            self.host.register_workspace_fork(org, agent, session_id, child_id, destination)
         # Forks copy history but not the native permission suffix.  Materialize
         # the source override on the new session before exposing it.
         source_policy = self.interactions.get_policy(org, agent, session_id)
@@ -483,6 +778,108 @@ class Workspace:
         status = result.get(session_id)
         if status is not None and (not isinstance(status, Mapping) or status.get("type") != "idle"):
             raise RuntimeUnavailable("Native source session is active; fork was not started")
+
+    def _require_unshared_directory(
+        self, org: str, agent: str, session_id: str, directory: str
+    ) -> None:
+        """A managed path may never remove another mapped root or its ancestor."""
+        prefix = directory.rstrip("/") + "/"
+        for other in self.host.sessions(org, agent, archived=None):
+            if other["session_id"] == session_id:
+                continue
+            candidate = other["directory"].rstrip("/")
+            if (
+                candidate == directory
+                or candidate.startswith(prefix)
+                or directory.startswith(candidate + "/")
+            ):
+                raise RuntimeUnavailable("Workspace directory is shared with another mapped thread")
+
+    async def _require_workspace_provenance(
+        self, org: str, agent: str, session_id: str, inspection: Mapping[str, Any]
+    ) -> None:
+        """Reject a changed Git pointer before lifecycle evidence permits deletion."""
+        binding = self.host.workspace_binding(org, agent, session_id)
+        if binding is None:
+            return
+        git = inspection.get("git")
+        if not isinstance(git, Mapping) or git.get("kind") != "repository":
+            return
+        if binding["kind"] == "ordinary":
+            raise RuntimeUnavailable(
+                "Workspace became a standalone Git repository; retained branches need inspection"
+            )
+        creation_id = binding.get("creation_id")
+        if not isinstance(creation_id, str):
+            raise RuntimeUnavailable("Workspace Git repository provenance is unavailable")
+        creation = self.host.workspace_creation(org, agent, creation_id)
+        repository_url = creation.get("repository_url") if creation else None
+        if not isinstance(
+            repository_url, str
+        ) or not await self._lifecycle_runtime().workspace_repository_matches(
+            org,
+            agent,
+            binding["directory"],
+            repository_url=repository_url,
+            creation_id=creation_id,
+        ):
+            raise RuntimeUnavailable(
+                "Workspace Git repository provenance changed; cleanup is unavailable"
+            )
+
+    async def _replacement_workspace_matches(
+        self, org: str, agent: str, binding: Mapping[str, Any], creation: Mapping[str, Any] | None
+    ) -> bool:
+        """Adopt a replacement only when its exact owned path/ref is independently proven."""
+        runtime = self._lifecycle_runtime()
+        safety = await runtime.workspace_safety(org, agent, binding["directory"])
+        repository_url = creation.get("repository_url") if creation else None
+        if isinstance(repository_url, str):
+            branch, revision = binding.get("working_branch"), binding.get("working_revision")
+            creation_id = binding.get("creation_id")
+            return (
+                safety.get("kind") == "repository"
+                and safety.get("branch") == branch
+                and safety.get("revision") == revision
+                and isinstance(creation_id, str)
+                and await runtime.workspace_repository_matches(
+                    org,
+                    agent,
+                    binding["directory"],
+                    repository_url=repository_url,
+                    creation_id=creation_id,
+                )
+            )
+        # An ordinary replacement is intentionally an empty managed directory.
+        return (
+            safety.get("kind") == "ordinary"
+            and safety.get("state") == "safe"
+            and safety.get("entries") == 0
+        )
+
+    @staticmethod
+    def _snapshot_sessions(snapshot: Mapping[str, Any]) -> list[dict[str, str]]:
+        """Return the exact OpenCode family captured for one destructive operation."""
+        found: list[dict[str, str]] = []
+
+        def visit(item: object) -> None:
+            if not isinstance(item, Mapping):
+                raise RuntimeUnavailable("Native history child receipt is invalid")
+            session = item.get("session")
+            if not isinstance(session, Mapping):
+                raise RuntimeUnavailable("Native history child receipt is invalid")
+            session_id, directory = session.get("id"), session.get("directory")
+            if not isinstance(session_id, str) or not isinstance(directory, str):
+                raise RuntimeUnavailable("Native history child receipt is invalid")
+            found.append({"id": session_id, "directory": directory})
+            children = item.get("children", {})
+            if not isinstance(children, Mapping):
+                raise RuntimeUnavailable("Native history child receipt is invalid")
+            for child in children.values():
+                visit(child)
+
+        visit(snapshot)
+        return found
 
     @staticmethod
     def _history_receipt(result: object, session_id: str) -> list[dict[str, Any]]:
@@ -949,6 +1346,34 @@ class Workspace:
                     "title": child["session"].get("title") or root["title"],
                     "root_session_id": root["session_id"],
                 }
+        # A removed or unavailable workspace may have stopped the native
+        # harness. Its verified lifecycle receipt is sufficient to resolve a
+        # retained child history without trying the live OpenCode child tree.
+        for root in self.host.sessions(org, agent, archived=None):
+            try:
+                binding = self.host.workspace_binding(org, agent, root["session_id"])
+            except LookupError:
+                continue
+            if binding is None or binding["state"] == "ready":
+                continue
+            snapshot = workspace_history_snapshot(binding, root)
+            child = _captured_child_snapshot(snapshot, session_id)
+            if child is None:
+                continue
+            native = child.get("session")
+            if not isinstance(native, Mapping):
+                continue
+            directory_key = "cwd" if root["runtime_type"] == "codex" else "directory"
+            directory = native.get(directory_key)
+            if not isinstance(directory, str):
+                continue
+            return {
+                **root,
+                "session_id": session_id,
+                "directory": directory,
+                "title": native.get("title") or root["title"],
+                "root_session_id": root["session_id"],
+            }
         roots = [
             row
             for row in roots
@@ -1076,3 +1501,76 @@ def _event_session_id(data: object) -> str | None:
             if field == "info":
                 candidates.append(value.get("id"))
     return next((value for value in candidates if isinstance(value, str)), None)
+
+
+def _captured_history(snapshot: object, session_id: str) -> object:
+    """Find an exact root or child history in a retained lifecycle receipt."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    session = snapshot.get("session")
+    if isinstance(session, Mapping) and session.get("id") == session_id:
+        return snapshot.get("history")
+    children = snapshot.get("children")
+    if not isinstance(children, Mapping):
+        return None
+    for child in children.values():
+        found = _captured_history(child, session_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _captured_child_snapshot(snapshot: object, session_id: str) -> Mapping[str, Any] | None:
+    if not isinstance(snapshot, Mapping):
+        return None
+    children = snapshot.get("children")
+    if not isinstance(children, Mapping):
+        return None
+    for child in children.values():
+        if not isinstance(child, Mapping):
+            continue
+        native = child.get("session")
+        if isinstance(native, Mapping) and native.get("id") == session_id:
+            return child
+        descendant = _captured_child_snapshot(child, session_id)
+        if descendant is not None:
+            return descendant
+    return None
+
+
+def _history_semantics(
+    snapshot: Mapping[str, Any], inherited_runtime_type: str | None = None
+) -> dict[str, Any]:
+    """Compare retained native history without volatile thread metadata."""
+    session = snapshot.get("session")
+    if not isinstance(session, Mapping) or not isinstance(session.get("id"), str):
+        raise RuntimeUnavailable("Native thread history receipt is invalid")
+    runtime_type = snapshot.get("runtime_type", inherited_runtime_type)
+    if runtime_type not in {"opencode", "codex"}:
+        raise RuntimeUnavailable("Native thread history receipt is invalid")
+    directory_key = "cwd" if runtime_type == "codex" else "directory"
+    directory = session.get(directory_key)
+    if not isinstance(directory, str):
+        raise RuntimeUnavailable("Native thread history receipt is invalid")
+    history = snapshot.get("history")
+    if runtime_type == "codex":
+        if not isinstance(history, Mapping) or not isinstance(history.get("turns"), list):
+            raise RuntimeUnavailable("Native thread history receipt is invalid")
+        content: object = history["turns"]
+    elif not isinstance(history, list):
+        raise RuntimeUnavailable("Native thread history receipt is invalid")
+    else:
+        content = history
+    children = snapshot.get("children", {})
+    if not isinstance(children, Mapping):
+        raise RuntimeUnavailable("Native thread history receipt is invalid")
+    return {
+        "runtime_type": runtime_type,
+        "id": session["id"],
+        "directory": directory,
+        "history": content,
+        "children": [
+            _history_semantics(child, runtime_type)
+            for _child_id, child in sorted(children.items(), key=lambda item: item[0])
+        ],
+    }
