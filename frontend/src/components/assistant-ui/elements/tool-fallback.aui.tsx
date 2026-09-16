@@ -27,6 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useToolGroupDetails } from "./tool-group.aui";
 
 const ANIMATION_DURATION = 200;
 
@@ -686,8 +687,9 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const isRequiresAction = status?.type === "requires-action";
   const shouldRenderApproval =
     isRequiresAction && offersInterruptAction(status, approval, interrupt);
+  const discloseWithGroup = useToolGroupDetails();
 
-  const [open, setOpen] = useState(isRequiresAction);
+  const [open, setOpen] = useState(isRequiresAction || discloseWithGroup);
   const [prevRequiresAction, setPrevRequiresAction] =
     useState(isRequiresAction);
   if (isRequiresAction !== prevRequiresAction) {

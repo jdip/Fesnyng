@@ -34,6 +34,7 @@ test('rotates a standalone tool chevron with its collapsible state', () => {
   const trigger = screen.getByRole('button', { name: /Used tool: read/ });
   const chevron = container.querySelector('[data-slot="tool-fallback-trigger-chevron"]');
   expect(chevron).toBeTruthy();
+  expect(trigger.getAttribute('aria-expanded')).toBe('false');
   expect(chevron!.getAttribute('class')?.split(' ')).toContain('group-data-[state=open]/trigger:rotate-0');
   fireEvent.click(chevron!);
   expect(trigger.getAttribute('data-state')).toBe('open');

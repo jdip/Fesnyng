@@ -1,4 +1,4 @@
-.fesnyng-conversation:has(> .thread-artifact-drawer) { grid-template-columns: minmax(0, 1fr) auto; }
+.fesnyng-conversation:has(> .thread-artifact-drawer) { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); }
 .fesnyng-conversation:has(> aside):has(> .thread-artifact-drawer) { grid-template-columns: minmax(12rem, 17rem) minmax(0, 1fr) auto; }
 .thread-artifact-drawer { min-width: 0; max-width: 100%; display: flex; border-left: 1px solid #dbe2dc; background: #fff; }
 .thread-artifact-resize { width: 8px; flex: 0 0 8px; cursor: col-resize; touch-action: none; outline: none; }

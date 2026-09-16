@@ -171,7 +171,7 @@ test('clears a transient pending-request reload error after the host recovers', 
   expect(screen.queryByText('Agent host is unreachable')).toBeNull();
 });
 
-test('compacts completed Codex reasoning and tool activity while retaining the final reply spacing', async () => {
+test('compacts terminal Codex reasoning and tool activity while retaining the final reply spacing', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
   vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
@@ -182,6 +182,7 @@ test('compacts completed Codex reasoning and tool activity while retaining the f
       thread: { id: 'thread-one' }, historyState: 'complete', turns: [{ id: 'turn-one', status: 'completed', items: [
         { id: 'reasoning-one', type: 'reasoning', summary: ['Inspect the workspace.'] },
         { id: 'command-one', type: 'commandExecution', command: 'git status', status: 'completed', aggregatedOutput: 'clean', exitCode: 0 },
+        { id: 'command-failed', type: 'commandExecution', command: 'git diff', status: 'failed', aggregatedOutput: 'permission denied', exitCode: 1 },
         { id: 'answer-one', type: 'agentMessage', text: 'The workspace is clean.' },
       ] }],
     }));
@@ -193,7 +194,7 @@ test('compacts completed Codex reasoning and tool activity while retaining the f
 
   expect(await screen.findByText('The workspace is clean.')).toBeTruthy();
   const activity = container.querySelectorAll('[data-activity-only="true"]');
-  expect(activity).toHaveLength(2);
+  expect(activity).toHaveLength(3);
   for (const item of activity) {
     const footer = item.querySelector('[data-slot="aui_assistant-message-footer"]');
     expect(footer?.getAttribute('class')).toContain('absolute');
@@ -218,6 +219,8 @@ test('renders frozen Codex snapshot history without native write controls', asyn
       thread: { id: 'old-codex-thread', title: 'Frozen Codex thread' },
       turns: [{ id: 'turn-one', status: 'completed', items: [
         { id: 'assistant-one', type: 'agentMessage', text: 'Frozen Codex analysis.' },
+        { id: 'command-success', type: 'commandExecution', command: 'git status', status: 'completed', aggregatedOutput: 'Working tree clean', exitCode: 0 },
+        { id: 'command-failed', type: 'commandExecution', command: 'git push', status: 'failed', aggregatedOutput: 'Permission denied', exitCode: 1 },
         { id: 'change-one', type: 'fileChange', changes: [{ path: 'src/frozen.ts', kind: { type: 'delete' }, diff: '@@ -1 +0,0 @@\n-export const frozen = true;' }], result: { output: 'Done!' } },
       ] }], historyState: 'complete',
     }));
@@ -231,8 +234,14 @@ test('renders frozen Codex snapshot history without native write controls', asyn
   render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="old-codex-thread" showThreadList={false} readOnly />);
 
   expect(await screen.findByText('Frozen Codex analysis.')).toBeTruthy();
+  const commandGroups = await screen.findAllByRole('button', { name: '1 tool call: command_execution' });
+  for (const commandGroup of commandGroups) fireEvent.click(commandGroup);
+  expect(screen.getByText('Working tree clean')).toBeTruthy();
+  expect(screen.getByText('Permission denied')).toBeTruthy();
+  expect(screen.getAllByRole('button', { name: 'Used tool: command_execution' }).every((tool) => tool.getAttribute('aria-expanded') === 'true')).toBe(true);
   fireEvent.click(await screen.findByRole('button', { name: '1 tool call: apply_patch' }));
-  expect(await screen.findByLabelText('deleted src/frozen.ts')).toBeTruthy();
+  const change = await screen.findByLabelText('deleted src/frozen.ts');
+  expect(change.closest('details')?.open).toBe(true);
   expect(screen.getByText('This thread is permanently frozen and read-only.')).toBeTruthy();
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();

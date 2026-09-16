@@ -152,12 +152,16 @@ const DefaultReasoningGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> =
     const part = latestIndex === undefined ? undefined : state.message.parts[latestIndex];
     return part?.type === "reasoning" ? groupPreviewText(part.text) : "";
   });
+  const hasDetails = useAuiState((state) => group.indices.some((index) => {
+    const part = state.message.parts[index];
+    return part?.type === "reasoning" && groupPreviewText(part.text).length > 0;
+  }));
 
   return (
     <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
       <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
-        <ReasoningText>{children}</ReasoningText>
+        {hasDetails ? <ReasoningText>{children}</ReasoningText> : <p className="text-muted-foreground py-1 text-sm">No native reasoning details were provided.</p>}
       </ReasoningContent>
     </ReasoningRoot>
   );
@@ -490,7 +494,6 @@ const AssistantMessage: FC = () => {
         ? part.status.type === "complete"
         : part.type === "tool-call"
           && part.status.type === "complete"
-          && !part.isError
           && !part.approval
           && !part.interrupt
     ))
@@ -524,7 +527,7 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             switch (part.type) {
               case "group-chainOfThought":
-                return <div data-slot="aui_chain-of-thought">{children}</div>;
+                return <div data-slot="aui_chain-of-thought" className="flex flex-col gap-1">{children}</div>;
               case "group-tool":
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;

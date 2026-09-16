@@ -23,14 +23,24 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   const open = vi.fn();
   const create = vi.fn();
   const detailsTarget = document.body.appendChild(document.createElement('div'));
-  render(<ProjectNavigation organization="org" agents={agents} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} onOpenThread={open} onNewThread={create} />);
+  render(<ProjectNavigation organization="org" agents={agents} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} currentThread={{ agent: 'junior', session: 'build' }} onOpenThread={open} onNewThread={create} />);
 
   const website = await screen.findByRole('button', { name: 'Website' });
   fireEvent.click(website);
   const details = await screen.findByRole('region', { name: 'Website project' });
   expect(within(details).getByRole('button', { name: 'Edit Project' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Build landing page Junior developer' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Review copy Reviewer' })).toBeTruthy();
+  const build = within(details).getByRole('button', { name: 'Build landing page Junior developer' });
+  const review = within(details).getByRole('button', { name: 'Review copy Reviewer' });
+  expect(build.closest('[data-thread-card]')).toBeTruthy();
+  expect(review.closest('[data-thread-card]')).toBeTruthy();
+  expect(build.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
+  expect(review.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
+  expect(build.className).toContain('pe-44');
+  expect(build.className).not.toContain('group-hover:pe-9');
+  expect(build.getAttribute('aria-current')).toBe('page');
+  expect(build.closest('[data-thread-card]')?.getAttribute('data-active')).toBe('true');
+  expect(review.hasAttribute('aria-current')).toBe(false);
+  expect(review.closest('[data-thread-card]')?.hasAttribute('data-active')).toBe(false);
   fireEvent.change(within(details).getByRole('searchbox', { name: 'Search Website threads' }), { target: { value: 'copy' } });
   expect(within(details).queryByText('Build landing page')).toBeNull();
   expect(within(details).getByText('Review copy')).toBeTruthy();
@@ -111,7 +121,7 @@ test('leaves the optional branch override out of employee-first Project creation
   expect(start).toHaveBeenCalledWith({ project: 'website' });
 });
 
-test('keeps Project search visible and saves an empty optional description as null', async () => {
+test('opens Project creation in a modal from an icon-only trigger and saves an empty optional description as null', async () => {
   const request = vi.fn(async (input: string, init: RequestInit = {}) => {
     if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]);
     if (input.endsWith('/thread-projects')) return Response.json({ threads: [] });
@@ -125,10 +135,48 @@ test('keeps Project search visible and saves an empty optional description as nu
   fireEvent.click(await screen.findByRole('button', { name: 'Website' }));
   const search = await screen.findByRole('searchbox', { name: 'Search Website threads' });
   expect(search.closest('label')?.classList.contains('sr-only')).toBe(false);
-  fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
-  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New Project' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save Project' }));
+  const create = screen.getByRole('button', { name: 'Create Project' });
+  expect(create.textContent).toBe('');
+  create.focus();
+  fireEvent.click(create);
+  const dialog = await screen.findByRole('dialog', { name: 'Create Project' });
+  const name = within(dialog).getByLabelText('Name');
+  await waitFor(() => expect(document.activeElement).toBe(name));
+  fireEvent.change(name, { target: { value: 'New Project' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save Project' }));
   await waitFor(() => expect(request).toHaveBeenCalledWith('/api/organizations/org/projects', expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'New Project', description: null, target_repository_url: null, default_checkout_branch: null }) })));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create Project' })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(create));
+});
+
+test('keeps a failed Project creation open with its draft and supports Escape and Cancel focus return', async () => {
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [] });
+    if (input.endsWith('/sessions')) return Response.json([]);
+    if (input === '/api/organizations/org/projects' && init.method === 'POST') return Response.json({ detail: 'A Project with this name already exists.' }, { status: 409 });
+    throw new Error(`Unexpected ${input}`);
+  });
+  vi.stubGlobal('fetch', request);
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager onOpenThread={vi.fn()} onNewThread={vi.fn()} />);
+
+  const create = await screen.findByRole('button', { name: 'Create Project' });
+  create.focus();
+  fireEvent.click(create);
+  const dialog = await screen.findByRole('dialog', { name: 'Create Project' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Website' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save Project' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toContain('A Project with this name already exists.');
+  expect((within(dialog).getByLabelText('Name') as HTMLInputElement).value).toBe('Website');
+
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create Project' })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(create));
+
+  fireEvent.click(create);
+  fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create Project' })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(create));
 });
 
 test('shows a recoverable Project lookup failure before employee-first thread creation', async () => {
@@ -176,8 +224,10 @@ test('identifies the current sidebar thread and opens a separately labelled thre
   render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager={false} currentThread={{ agent: 'junior', session: 'current' }} onOpenThread={open} onNewThread={vi.fn()} />);
   const current = await screen.findByRole('button', { name: 'Inspect current workspace Junior developer' });
   expect(current.getAttribute('aria-current')).toBe('page');
+  expect(current.closest('[data-thread-card]')?.getAttribute('data-active')).toBe('true');
   const next = screen.getByRole('button', { name: 'Review changes Junior developer' });
   expect(next.hasAttribute('aria-current')).toBe(false);
+  expect(next.closest('[data-thread-card]')?.hasAttribute('data-active')).toBe(false);
   fireEvent.click(next);
   expect(open).toHaveBeenCalledWith('junior', 'next');
 });
