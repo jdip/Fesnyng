@@ -52,9 +52,24 @@ class MaintenanceGuard:
             self._require_no_pending_work()
             try:
                 for agent in agents:
+                    state = self.store.agent(agent["organization_id"], agent["agent_id"])
+                    if state["desired_state"] != "running":
+                        container = await self.runtime.inspect(
+                            agent["organization_id"], agent["agent_id"]
+                        )
+                        if container is None:
+                            continue
+                        try:
+                            if not container["state"]["Running"]:
+                                continue
+                        except (KeyError, TypeError):
+                            raise RuntimeUnavailable("Native container status is invalid") from None
                     await self.runtime.assert_quiet(agent["organization_id"], agent["agent_id"])
-                    if self.interactions is not None and await self.interactions.maintenance_pending(
-                        agent["organization_id"], agent["agent_id"]
+                    if (
+                        self.interactions is not None
+                        and await self.interactions.maintenance_pending(
+                            agent["organization_id"], agent["agent_id"]
+                        )
                     ):
                         raise MaintenanceBusy("pending interaction")
             except MaintenanceBusy:

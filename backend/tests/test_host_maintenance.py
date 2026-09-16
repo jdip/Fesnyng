@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from fesnyng_backend.agent_host import create_app
+from fesnyng_backend.agent_lifecycle import AgentLifecycle, HostLifecycleRequest
 from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_dispatch import DispatchStore, Submission
 from fesnyng_backend.host_maintenance import MaintenanceGuard
@@ -41,9 +42,7 @@ def test_local_maintenance_guard_requires_its_private_token_and_survives_restart
             assert acquired.json() == {"state": "closed"}
 
         restarted = create_app(settings)
-        restarted_transport = httpx.ASGITransport(
-            app=restarted, client=("127.0.0.1", 8000)
-        )
+        restarted_transport = httpx.ASGITransport(app=restarted, client=("127.0.0.1", 8000))
         async with httpx.AsyncClient(
             transport=restarted_transport,
             base_url="http://host",
@@ -69,7 +68,11 @@ def test_acquire_closes_admission_before_waiting_for_a_runtime_lock(tmp_path: Pa
     org, agent = str(uuid4()), str(uuid4())
     store.bind_organization(org, secrets.token_urlsafe(32))
     envelope = HostAgentConfiguration(
-        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Locked agent"
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Locked agent",
     )
     store.stage_agent(envelope)
     store.mark_applied(envelope)
@@ -117,7 +120,11 @@ def test_maintenance_acquire_defers_a_native_pending_interaction(tmp_path: Path)
     org, agent = str(uuid4()), str(uuid4())
     store.bind_organization(org, secrets.token_urlsafe(32))
     envelope = HostAgentConfiguration(
-        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Interactive"
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Interactive",
     )
     store.stage_agent(envelope)
     store.mark_applied(envelope)
@@ -197,7 +204,11 @@ def test_interrupted_maintenance_acquire_keeps_admission_closed(tmp_path: Path):
     org, agent = str(uuid4()), str(uuid4())
     store.bind_organization(org, secrets.token_urlsafe(32))
     envelope = HostAgentConfiguration(
-        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Interrupted"
+        host_id=store.instance_id,
+        organization_id=org,
+        agent_id=agent,
+        version=1,
+        name="Interrupted",
     )
     store.stage_agent(envelope)
     store.mark_applied(envelope)
@@ -244,13 +255,107 @@ def test_runtime_quiet_check_rejects_malformed_opencode_status_as_unknown(tmp_pa
         return {"state": {"Running": True}}
 
     async def request(*_args, **_kwargs):
-        return {"ses_malformed": ["not a native status"]}
+        return {"ses_malformed": {"type": []}}
 
     runtime.inspect = inspect  # type: ignore[method-assign]
     runtime.request = request  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeUnavailable, match="status response is invalid"):
         asyncio.run(runtime.assert_quiet(org, agent))
+
+
+def test_lifecycle_waiting_on_runtime_inspection_cannot_transition_after_acquire(tmp_path: Path):
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    app = create_app(settings)
+    store = app.state.host_store
+    org, agent = str(uuid4()), str(uuid4())
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Raced"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    inspection_started = asyncio.Event()
+    release_inspection = asyncio.Event()
+
+    class Runtime:
+        def __init__(self):
+            self.locks: dict[str, asyncio.Lock] = {}
+            self.inspections = 0
+
+        def lock(self, target: str):
+            return self.locks.setdefault(target, asyncio.Lock())
+
+        async def inspect(self, _org: str, _agent: str):
+            self.inspections += 1
+            if self.inspections == 1:
+                inspection_started.set()
+                await release_inspection.wait()
+
+        async def assert_quiet(self, _org: str, _agent: str) -> None:
+            return None
+
+    class Dispatcher:
+        async def agent_activity(self, *_args) -> str:
+            return ""
+
+        async def quiesce_agent(self, *_args) -> None:
+            raise AssertionError("no active work")
+
+        async def reconcile_agent_effects(self, *_args) -> None:
+            raise AssertionError("lifecycle must not start")
+
+        def agent_effects_settled(self, *_args) -> bool:
+            return True
+
+    class Configuration:
+        async def apply_agent(self, *_args) -> str:
+            raise AssertionError("lifecycle must not start")
+
+    runtime = Runtime()
+    lifecycle = AgentLifecycle(store, runtime, Dispatcher(), Configuration())
+    guard = MaintenanceGuard(store, runtime)
+
+    async def check():
+        request = HostLifecycleRequest(
+            action="start", author=Actor(kind="human", id=uuid4(), name="Owner")
+        )
+        operation = asyncio.create_task(lifecycle.perform(org, agent, request))
+        await inspection_started.wait()
+        assert await guard.acquire() == {"state": "closed"}
+        release_inspection.set()
+        with pytest.raises(ValueError, match="maintenance"):
+            await operation
+        assert store.agent_status(org, agent)["lifecycle_state"] == "running"
+
+    asyncio.run(check())
+
+
+def test_maintenance_closure_blocks_harness_switch_transition(tmp_path: Path):
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    app = create_app(settings)
+    store = app.state.host_store
+    org, agent = str(uuid4()), str(uuid4())
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Switch"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    assert store.close_maintenance_admission()
+
+    with pytest.raises(ValueError, match="maintenance"):
+        store.begin_harness_switch(org, agent, 1, "codex")
+
+    assert store.agent(org, agent)["switch_state"] is None
 
 
 @pytest.mark.parametrize("runtime_type", ["opencode", "codex"])
@@ -297,6 +402,9 @@ def test_maintenance_acquire_defers_busy_or_unknown_native_work_for_each_harness
         ) as client:
             response = await client.post("/maintenance/acquire")
             assert response.status_code == 409
-            assert response.json() == {"state": "open", "reason": "native activity is busy or unavailable"}
+            assert response.json() == {
+                "state": "open",
+                "reason": "native activity is busy or unavailable",
+            }
 
     asyncio.run(check())

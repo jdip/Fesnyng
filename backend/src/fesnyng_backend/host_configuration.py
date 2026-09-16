@@ -90,6 +90,7 @@ class HostConfiguration:
         self, organization_id: str, agent_id: str, expected_version: int, target_runtime: str
     ) -> dict[str, object]:
         """Capture old native provenance, then atomically freeze every mapped root."""
+        self.host.require_maintenance_open()
         source = self.host.agent(organization_id, agent_id)
         if not isinstance(source.get("applied_envelope"), str):
             raise RuntimeUnavailable("Harness switch source configuration is not applied")
@@ -106,6 +107,7 @@ class HostConfiguration:
         self.host.begin_harness_switch(organization_id, agent_id, expected_version, target_runtime)
         try:
             async with self.runtime.lock(agent_id):
+                self.host.require_maintenance_open()
                 state = self.host.agent(organization_id, agent_id)
                 if state["switch_state"] == "frozen":
                     return self.host.agent_status(organization_id, agent_id)

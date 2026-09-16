@@ -170,7 +170,9 @@ class AgentLifecycle:
             if request.action == "rebuild"
             else ("stopped" if request.action == "stop" else "running")
         )
-        self.store.set_lifecycle_state(organization_id, agent_id, state="transitioning")
+        self.store.begin_lifecycle_transition(
+            organization_id, agent_id, previous_desired, previous_lifecycle
+        )
         try:
             # Wait out any configuration owner that acquired the shared runtime lock
             # before the durable transition gate was installed.

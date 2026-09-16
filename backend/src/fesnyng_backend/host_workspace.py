@@ -375,6 +375,7 @@ class Workspace:
         runtime = self._lifecycle_runtime()
         lifecycle = WorkspaceLifecycle(self.host, runtime)
         async with self.runtime.lock(agent):
+            self.host.require_maintenance_open()
             session = self.host.session(org, agent, session_id)
             binding, safety = await lifecycle.require_current(org, agent, session_id, expected)
             await self._require_workspace_provenance(org, agent, session_id, {"git": safety})
@@ -465,6 +466,7 @@ class Workspace:
     ) -> dict[str, Any]:
         runtime = self._lifecycle_runtime()
         async with self.runtime.lock(agent):
+            self.host.require_maintenance_open()
             session = self.host.session(org, agent, session_id)
             if session.get("frozen_at") is not None:
                 raise ValueError("Permanently frozen threads cannot replace a workspace")

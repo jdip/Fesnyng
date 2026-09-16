@@ -306,29 +306,44 @@ class HostStore:
                    )) LIMIT 1"""
             ).fetchone():
                 return "configuration or lifecycle transition"
-            if "host_dispatches" in tables and connection.execute(
-                """SELECT 1 FROM host_dispatches
+            if (
+                "host_dispatches" in tables
+                and connection.execute(
+                    """SELECT 1 FROM host_dispatches
                 WHERE state NOT IN ('completed','failed','contributed','cancelled') LIMIT 1"""
-            ).fetchone():
+                ).fetchone()
+            ):
                 return "pending delivery"
-            if "host_interaction_operations" in tables and connection.execute(
-                "SELECT 1 FROM host_interaction_operations WHERE state != 'completed' LIMIT 1"
-            ).fetchone():
+            if (
+                "host_interaction_operations" in tables
+                and connection.execute(
+                    "SELECT 1 FROM host_interaction_operations WHERE state != 'completed' LIMIT 1"
+                ).fetchone()
+            ):
                 return "pending interaction"
-            if "host_thread_policy" in tables and connection.execute(
-                """SELECT 1 FROM host_thread_policy
+            if (
+                "host_thread_policy" in tables
+                and connection.execute(
+                    """SELECT 1 FROM host_thread_policy
                 WHERE desired_revision != applied_revision LIMIT 1"""
-            ).fetchone():
+                ).fetchone()
+            ):
                 return "pending interaction"
-            if "peer_outbox" in tables and connection.execute(
-                """SELECT 1 FROM peer_outbox
+            if (
+                "peer_outbox" in tables
+                and connection.execute(
+                    """SELECT 1 FROM peer_outbox
                 WHERE state NOT IN ('accepted','rejected') LIMIT 1"""
-            ).fetchone():
+                ).fetchone()
+            ):
                 return "pending peer work"
-            if "peer_inbox" in tables and connection.execute(
-                """SELECT 1 FROM peer_inbox
+            if (
+                "peer_inbox" in tables
+                and connection.execute(
+                    """SELECT 1 FROM peer_inbox
                 WHERE state NOT IN ('accepted','rejected') LIMIT 1"""
-            ).fetchone():
+                ).fetchone()
+            ):
                 return "pending peer work"
             if connection.execute(
                 """SELECT 1 FROM host_workspace_creations
@@ -340,10 +355,13 @@ class HostStore:
                 WHERE state NOT IN ('ready','removed') LIMIT 1"""
             ).fetchone():
                 return "workspace transition"
-            if "credential_profiles" in tables and connection.execute(
-                """SELECT 1 FROM credential_profiles
+            if (
+                "credential_profiles" in tables
+                and connection.execute(
+                    """SELECT 1 FROM credential_profiles
                 WHERE state IN ('login_pending','refreshing') LIMIT 1"""
-            ).fetchone():
+                ).fetchone()
+            ):
                 return "credential operation"
         return None
 
@@ -524,6 +542,26 @@ class HostStore:
                 if row is None:
                     raise LookupError("Agent not found")
                 raise ValueError("Harness switch is in progress")
+
+    def begin_lifecycle_transition(
+        self,
+        organization_id: str,
+        agent_id: str,
+        expected_desired: str,
+        expected_state: str,
+    ) -> None:
+        """Atomically close the lifecycle's ordinary admission before runtime work."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.require_maintenance_open(connection=connection)
+            changed = connection.execute(
+                """UPDATE host_agents SET lifecycle_state='transitioning',error=NULL
+                WHERE organization_id=? AND agent_id=? AND desired_state=? AND lifecycle_state=?
+                  AND switch_state IS NULL""",
+                (organization_id, agent_id, expected_desired, expected_state),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Agent lifecycle state changed before transition")
 
     def save_lifecycle_confirmation(
         self,
@@ -864,6 +902,7 @@ class HostStore:
     ) -> None:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.require_maintenance_open(connection=connection)
             # Admission and the durable snapshot share the same SQLite transaction.
             # DispatchStore.enqueue takes this lock before admitting a message, so a
             # later enqueue observes `removing` and is refused rather than racing a
@@ -914,6 +953,7 @@ class HostStore:
         workspace_id: str,
     ) -> None:
         with self.connect() as connection:
+            self.require_maintenance_open(connection=connection)
             changed = connection.execute(
                 """UPDATE host_workspace_bindings
                 SET state='removed',generation=generation+1,updated_at=unixepoch()
@@ -1005,6 +1045,7 @@ class HostStore:
             raise ValueError("Unknown target harness")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.require_maintenance_open(connection=connection)
             agent = connection.execute(
                 "SELECT * FROM host_agents WHERE organization_id=? AND agent_id=?",
                 (organization_id, agent_id),
