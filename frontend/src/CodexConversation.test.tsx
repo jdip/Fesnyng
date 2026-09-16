@@ -186,8 +186,11 @@ test('compacts completed Codex reasoning and tool activity while retaining the f
   expect(await screen.findByText('The workspace is clean.')).toBeTruthy();
   const activity = container.querySelectorAll('[data-activity-only="true"]');
   expect(activity).toHaveLength(2);
-  expect(activity[0]?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeNull();
-  expect(activity[1]?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeNull();
+  for (const item of activity) {
+    const footer = item.querySelector('[data-slot="aui_assistant-message-footer"]');
+    expect(footer?.getAttribute('class')).toContain('absolute');
+    expect(footer?.getAttribute('class')).toContain('opacity-0');
+  }
   const reply = screen.getByText('The workspace is clean.').closest('[data-slot="aui_assistant-message-root"]');
   expect(reply?.getAttribute('data-activity-only')).toBeNull();
   expect(reply?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeTruthy();

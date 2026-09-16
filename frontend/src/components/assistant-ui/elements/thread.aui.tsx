@@ -506,7 +506,7 @@ const AssistantMessage: FC = () => {
       data-role="assistant"
       data-activity-only={isActivityOnly || undefined}
       className={cn(
-        "fade-in slide-in-from-bottom-1 animate-in relative duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        "group/assistant-message fade-in slide-in-from-bottom-1 animate-in relative duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
         isActivityOnly ? "aui-activity-only-message" : "-mb-7.5 pb-7.5",
       )}
     >
@@ -577,15 +577,18 @@ const AssistantMessage: FC = () => {
         {MessageFooter && <MessageFooter />}
       </div>
 
-      {!isActivityOnly && (
-        <div
-          data-slot="aui_assistant-message-footer"
-          className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
-        >
-          <BranchPicker />
-          <AssistantActionBar MessageAction={MessageAction} />
-        </div>
-      )}
+      <div
+        data-slot="aui_assistant-message-footer"
+        className={cn(
+          "ms-2 flex items-center",
+          isActivityOnly
+            ? "pointer-events-none absolute end-2 top-full z-10 -mt-1 opacity-0 transition-opacity group-hover/assistant-message:pointer-events-auto group-hover/assistant-message:opacity-100 group-focus-within/assistant-message:pointer-events-auto group-focus-within/assistant-message:opacity-100"
+            : ACTION_BAR_HEIGHT,
+        )}
+      >
+        <BranchPicker />
+        <AssistantActionBar MessageAction={MessageAction} />
+      </div>
     </MessagePrimitive.Root>
   );
 };

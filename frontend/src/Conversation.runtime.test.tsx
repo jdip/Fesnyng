@@ -140,7 +140,10 @@ test('forks an assistant message through native extras and selects the returned 
       cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       time: { created: 1 }, finish: 'stop',
     },
-    parts: [{ id: 'text-one', sessionID: 'session-one', messageID: 'assistant-one', type: 'text', text: 'Ready.' }],
+    parts: [{
+      id: 'tool-one', callID: 'tool-one', sessionID: 'session-one', messageID: 'assistant-one',
+      type: 'tool', tool: 'read', state: { status: 'completed', input: { description: 'Read the workspace' }, output: {} },
+    }],
   }];
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
@@ -174,7 +177,17 @@ test('forks an assistant message through native extras and selects the returned 
     />,
   );
 
-  fireEvent.click(await screen.findByRole('button', { name: 'Fork conversation' }));
+  const fork = await screen.findByRole('button', { name: 'Fork conversation' });
+  const activity = fork.closest('[data-slot="aui_assistant-message-root"]');
+  const footer = activity?.querySelector('[data-slot="aui_assistant-message-footer"]');
+  expect(activity?.getAttribute('data-activity-only')).toBe('true');
+  expect(footer).not.toBeNull();
+  expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('opacity-0');
+
+  fork.focus();
+  expect(document.activeElement).toBe(fork);
+  fireEvent.click(fork);
 
   await waitFor(() => {
     expect(fetchMock.mock.calls.some(([input]) => {
@@ -292,7 +305,9 @@ test('uses the latest ordered thought and tool description in collapsed group pr
   expect(reasoning.getAttribute('aria-expanded')).toBe('false');
   expect(tools.getAttribute('aria-expanded')).toBe('false');
   expect(activity?.getAttribute('data-activity-only')).toBe('true');
-  expect(activity?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeNull();
+  const footer = activity?.querySelector('[data-slot="aui_assistant-message-footer"]');
+  expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('opacity-0');
   fireEvent.click(reasoning);
   fireEvent.click(tools);
   expect(screen.getByText('First thought.')).toBeTruthy();
