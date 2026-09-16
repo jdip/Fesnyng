@@ -186,6 +186,7 @@ class HostStore:
                 connection.execute("ALTER TABLE host_agents ADD COLUMN switch_target_runtime TEXT")
             if "frozen_at" not in columns:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN frozen_at INTEGER")
+            self._require_docker_capability_binding(connection)
             if connection.execute("SELECT version FROM host_schema").fetchone()[0] != 1:
                 raise RuntimeError("Unsupported host schema version")
 
@@ -194,10 +195,29 @@ class HostStore:
         if len(token) < 32:
             raise ValueError("Organization binding token must contain at least 32 characters")
         with self.connect() as connection:
+            self._require_docker_capability_binding(connection, organization_id)
             connection.execute(
                 "INSERT INTO host_bindings VALUES(?,?) ON CONFLICT(organization_id) "
                 "DO UPDATE SET token_digest=excluded.token_digest",
                 (organization_id, hashlib.sha256(token.encode()).hexdigest()),
+            )
+
+    def _require_docker_capability_binding(
+        self, connection: sqlite3.Connection, organization_id: str | None = None
+    ) -> None:
+        configured = self.settings.docker_capability
+        if configured is None:
+            return
+        dedicated_organization = str(configured.organization_id)
+        if organization_id is not None and organization_id != dedicated_organization:
+            raise ValueError("Host dedicated Docker capability belongs to another organization")
+        foreign = connection.execute(
+            "SELECT organization_id FROM host_bindings WHERE organization_id != ? LIMIT 1",
+            (dedicated_organization,),
+        ).fetchone()
+        if foreign is not None:
+            raise ValueError(
+                "Host Docker capability cannot start with another organization binding"
             )
 
     def authenticate(self, token: str) -> str | None:

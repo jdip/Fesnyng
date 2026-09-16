@@ -16,12 +16,16 @@ from fesnyng_backend.host_credentials import CredentialService, CredentialStore
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore
 from fesnyng_backend.host_dispatch_resolution import DispatchResolutionService
 from fesnyng_backend.host_dispatch_routes import router as dispatch_router
+from fesnyng_backend.host_docker_capability import DockerCapability
+from fesnyng_backend.host_docker_resources import DockerResources
+from fesnyng_backend.host_docker_routes import router as docker_router
 from fesnyng_backend.host_interaction_routes import router as interaction_router
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_lifecycle import exclusive_host
 from fesnyng_backend.host_mcp import (
     create_memory_mcp,
     register_collaboration_tools,
+    register_docker_tools,
     register_workspace_tools,
 )
 from fesnyng_backend.host_memory import MemoryStore
@@ -59,6 +63,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         os.environ.get("FESNYNG_AGENT_HOST_IMAGE", "fesnyng-agent:local"),
     )
     app.state.dispatch_store = DispatchStore(store)
+    app.state.docker_capability = DockerCapability(store, app.state.host_runtime)
+    app.state.docker_resources = DockerResources(store, app.state.docker_capability)
+    app.state.docker_resources.initialize()
     app.state.dispatch_store.initialize()
     app.state.interactions = Interactions(store, app.state.host_runtime)
     app.state.interactions.initialize()
@@ -96,6 +103,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         Workspace(store, app.state.host_runtime, app.state.dispatch_store, app.state.interactions),
     )
     app.state.mcp_server = mcp_server
+    register_docker_tools(
+        mcp_server, store, app.state.docker_capability, app.state.docker_resources
+    )
     app.mount("/mcp", mcp_app)
     credentials = CredentialStore(resolved.database_path)
     credentials.initialize()
@@ -149,6 +159,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
 
     app.router.lifespan_context = lifespan
     app.include_router(router)
+    app.include_router(docker_router)
     app.include_router(credential_router)
     app.include_router(memory_router)
     app.include_router(dispatch_router)

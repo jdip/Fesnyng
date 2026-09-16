@@ -2,7 +2,11 @@
 
 This directory builds the agent image with OpenCode and Codex App Server versions pinned in `package.json` and `package-lock.json`. The host selects one harness per employee and owns container lifecycle and credentials. The selected native harness owns sessions, model requests, tools, and skills. The image does not establish a general preinstalled command-tool baseline for agents.
 
-The image includes Git solely for the host's scoped, read-only thread-context lookup. It is not exposed as a control-plane mutation or a general host filesystem capability.
+The image includes Git for native work and host-managed repository workspaces.
+It includes digest-pinned Docker/Compose/Buildx clients; engine access is disabled
+unless an administrator grants the employee the dedicated organization capability
+described in [Docker resources](../docs/docker-resources.md). No Docker daemon runs
+inside the employee container.
 
 Build it from the repository root:
 

@@ -15,6 +15,12 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from fesnyng_backend.agent_models import Slug
+from fesnyng_backend.host_docker_capability import DockerCapability
+from fesnyng_backend.host_docker_resources import (
+    DockerResources,
+    ResourceRegistration,
+    ResourceUpdate,
+)
 from fesnyng_backend.host_memory import MemoryStore
 from fesnyng_backend.host_models import Actor, NativeID, WorkspaceExpectation
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -312,3 +318,92 @@ def _workspace_tool_errors() -> Iterator[None]:
         raise ToolError("Workspace operation not permitted") from None
     except (ValueError, RuntimeUnavailable) as error:
         raise ToolError(str(error)) from None
+
+
+def register_docker_tools(
+    server: MCPServer, host: HostStore, capability: DockerCapability, resources: DockerResources
+) -> None:
+    async def caller(source_session_id: str) -> tuple[str, str, dict[str, Any]]:
+        identity = _authenticated_agent(host)
+        org, agent = identity["organization_id"], identity["agent_id"]
+        session = host.session(org, agent, source_session_id)
+        await capability.require(org, agent)
+        return org, agent, session
+
+    @server.tool(
+        description="List registered organization Docker resources and shared thread associations. Requires your configured Docker capability and an owned source thread."
+    )
+    async def docker_resources(source_session_id: NativeID) -> list[dict[str, Any]]:
+        with _workspace_tool_errors():
+            org, _, _ = await caller(source_session_id)
+            return await resources.inventory(org)
+
+    @server.tool(
+        description="Discover external containers on the dedicated organization engine. Employee containers use their own lifecycle. Labels are discovery metadata, not isolation."
+    )
+    async def docker_discover(source_session_id: NativeID) -> list[dict[str, Any]]:
+        with _workspace_tool_errors():
+            org, _, _ = await caller(source_session_id)
+            return await resources.discover(org)
+
+    @server.tool(
+        description="Register an existing full container ID and associate it with your source thread. Does not create or start containers; use ordinary Docker/Compose under your workflow."
+    )
+    async def docker_register(
+        source_session_id: NativeID, container_id: str, name: str
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            org, agent, _ = await caller(source_session_id)
+            return await resources.register(
+                org,
+                ResourceRegistration(
+                    container_id=container_id,
+                    name=name,
+                    threads=[{"agent_id": agent, "session_id": source_session_id}],
+                ),
+            )
+
+    @server.tool(
+        description="Add or remove your owned source thread's association with a shared resource, preserving all other associations and its lifetime. Use its current revision."
+    )
+    async def docker_associate(
+        source_session_id: NativeID,
+        resource_id: UUID,
+        expected_revision: int,
+        associated: bool = True,
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            org, agent, _ = await caller(source_session_id)
+            item = await resources.inspect(org, str(resource_id))
+            threads = [
+                thread
+                for thread in item["threads"]
+                if (thread["agent_id"], thread["session_id"]) != (agent, source_session_id)
+            ]
+            if associated:
+                threads.append({"agent_id": agent, "session_id": source_session_id})
+            return await resources.update(
+                org,
+                str(resource_id),
+                ResourceUpdate(
+                    name=item["name"],
+                    threads=threads,
+                    project_ids=item["project_ids"],
+                    expected_revision=expected_revision,
+                ),
+            )
+
+    @server.tool(
+        description="Explicitly start, stop, remove a stopped external container, or unregister metadata. Inspect sharing first; your workflow decides timing. Remove preserves volumes; unregister leaves the container running. No automatic stack teardown."
+    )
+    async def docker_operate(
+        source_session_id: NativeID,
+        resource_id: UUID,
+        expected_revision: int,
+        action: Literal["start", "stop", "remove", "unregister"],
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            org, _, _ = await caller(source_session_id)
+            if expected_revision < 1:
+                raise ValueError("A current resource revision is required")
+            return await resources.operate(org, str(resource_id), expected_revision, action)
