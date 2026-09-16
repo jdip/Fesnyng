@@ -20,13 +20,23 @@ class ServiceSettings(BaseModel):
     service: ServiceName
     database_path: Path
     state_directory: Path
+    workspace_root: Path | None = None
     requested_instance_id: UUID | None = Field(default=None, alias="instance_id")
 
     @model_validator(mode="after")
     def reject_state_directory_as_database_path(self) -> ServiceSettings:
         if self.database_path == self.state_directory:
             raise ValueError("database path must not equal the state directory")
+        if self.workspace_root is not None and not self.workspace_root.is_absolute():
+            raise ValueError("workspace root must be an absolute path")
         return self
+
+    @property
+    def agent_workspace_root(self) -> Path:
+        """Return the durable host-owned root for newly prepared workspaces."""
+        if self.service != "agent-host":
+            raise ValueError("Only an agent host has a workspace root")
+        return (self.workspace_root or (self.state_directory.resolve() / "workspaces")).resolve()
 
 
 class ControlPlaneSessionSettings(BaseModel):
@@ -49,11 +59,13 @@ def settings_from_environment(service: ServiceName) -> ServiceSettings:
         os.environ.get(f"{prefix}_DATABASE_PATH", str(state_directory / "fesnyng.sqlite3"))
     )
     instance_id = os.environ.get(f"{prefix}_INSTANCE_ID")
+    workspace_root = os.environ.get(f"{prefix}_WORKSPACE_ROOT")
     return ServiceSettings(
         service=service,
         database_path=database_path,
         state_directory=state_directory,
         instance_id=instance_id,
+        workspace_root=Path(workspace_root) if workspace_root else None,
     )
 
 

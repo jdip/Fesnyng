@@ -60,6 +60,34 @@ its exact resources and uses the existing proof teardown owner: stop compute on
 failure and retain diagnostics; remove successful isolated fixtures. Inspect the
 reported disposition before claiming cleanup.
 
+### Repository-backed workspace proof
+
+See [thread workspace storage and Git authentication](workspaces.md) before
+configuring a host. With the pinned image built, run the opt-in proof using a
+temporary parent directory shared with the Docker daemon:
+
+```bash
+FESNYNG_WORKSPACE_DOCKER_TESTS=true \
+FESNYNG_WORKSPACE_PROOF_ROOT=/absolute/docker-shared/proof-directory \
+  uv run --locked --project backend pytest \
+  backend/tests/test_repository_workspace_docker.py -q -s
+```
+
+The parent directory must already exist. Each case creates its own isolated
+state beneath it and reports its container identity before launch. The proof uses
+two fictional Git repositories served only on loopback inside the employee,
+both native harnesses, real Git worktrees and control-plane/host API calls. It
+checks selected checkouts, concurrent isolation, ordinary directories, failure
+without fallback, receipt reuse, applicable native forks and container restart.
+It also injects a lost response after real native creation and a temporary
+discovery outage, then checks that recovery returns the same native identity
+without another creation call. Codex also loses an initialization acknowledgement;
+recovery must preserve the existing context item and leave the user conversation
+empty. Restart checks run before any user turn or model execution.
+It requires no provider credentials or external Git account. Successful fixtures
+are removed; failed compute is stopped and its diagnostic state retained through
+the existing Docker proof lifecycle owner.
+
 ## Run locally
 
 Run the independent backend commands documented in [backend/README.md](../backend/README.md). The control plane normally listens on `127.0.0.1:8000`; each host uses a separate port and state directory. The host is independently runnable and does not require control-plane reachability for startup. Local SQLite state, credentials and runtime files stay outside Git.

@@ -13,7 +13,12 @@ from fesnyng_backend.host_models import (
     SessionCreate,
     SessionProjectProvenance,
 )
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import (
+    RuntimeUnavailable,
+    WorkspaceCreationUncertain,
+    WorkspacePreparationFailed,
+)
+from fesnyng_backend.host_workspace import session_create_kwargs
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["host"])
 
@@ -39,6 +44,10 @@ def host_errors() -> Iterator[None]:
         raise HTTPException(403, "Host operation not permitted") from None
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
+    except WorkspacePreparationFailed as error:
+        raise HTTPException(503, error.as_response()) from None
+    except WorkspaceCreationUncertain as error:
+        raise HTTPException(503, error.as_response()) from None
     except RuntimeUnavailable as error:
         raise HTTPException(503, str(error)) from None
 
@@ -108,7 +117,7 @@ async def create_session(
     require_binding(request, org)
     with host_errors():
         return await request.app.state.host_runtime.create_session(
-            org, aid, body.title, body.workspace
+            org, aid, body.title, body.workspace, **session_create_kwargs(body)
         )
 
 
@@ -118,6 +127,28 @@ def sessions(request: Request, organization_id: UUID, agent_id: UUID):
     require_binding(request, org)
     with host_errors():
         return request.app.state.host_store.sessions(org, aid)
+
+
+@router.get("/agents/{agent_id}/workspace-creations/{creation_id}")
+def workspace_creation(request: Request, organization_id: UUID, agent_id: UUID, creation_id: UUID):
+    """Return the immutable retry intent to the authenticated control plane only."""
+
+    org, aid = str(organization_id), str(agent_id)
+    require_binding(request, org)
+    with host_errors():
+        creation = request.app.state.host_store.workspace_creation(org, aid, str(creation_id))
+    return {
+        field: creation[field]
+        for field in (
+            "creation_id",
+            "project_id",
+            "requested_checkout_branch",
+            "repository_url",
+            "checkout_branch",
+            "state",
+            "native_receipt",
+        )
+    }
 
 
 @router.put("/agents/{agent_id}/sessions/{session_id}/project-provenance")

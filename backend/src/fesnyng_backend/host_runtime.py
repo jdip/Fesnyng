@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -14,10 +16,56 @@ import httpx
 
 from fesnyng_backend.host_models import HostAgentConfiguration, permission_rules
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.workspace_preparation import (
+    FORK_KIND_SCRIPT,
+    GIT_FORK_SCRIPT,
+    GIT_PREPARE_SCRIPT,
+    GIT_PREPARED_RECONCILE_SCRIPT,
+    ORDINARY_FORK_SCRIPT,
+    STANDALONE_GIT_FORK_SCRIPT,
+    WorkspacePaths,
+    employee_workspace_root,
+    validate_branch,
+    workspace_paths,
+)
 
 
 class RuntimeUnavailable(RuntimeError):
     pass
+
+
+class WorkspaceCreationUncertain(RuntimeUnavailable):
+    """A native create may have succeeded, but the host has no durable receipt."""
+
+    def __init__(
+        self, creation_id: str, detail: str = "Native workspace creation outcome is uncertain"
+    ):
+        self.creation_id = creation_id
+        self.detail = detail
+        super().__init__(detail)
+
+    def as_response(self) -> dict[str, str]:
+        return {
+            "code": "workspace_creation_uncertain",
+            "creation_id": self.creation_id,
+            "detail": self.detail,
+        }
+
+
+class WorkspacePreparationFailed(RuntimeUnavailable):
+    """A workspace was rejected before any native session creation attempt."""
+
+    def __init__(self, creation_id: str, detail: str):
+        self.creation_id = creation_id
+        self.detail = detail
+        super().__init__(detail)
+
+    def as_response(self) -> dict[str, str]:
+        return {
+            "code": "workspace_preparation_failed",
+            "creation_id": self.creation_id,
+            "detail": self.detail,
+        }
 
 
 def codex_thread_family(
@@ -190,6 +238,7 @@ class DockerRuntime:
         self.image = image
         self.locks: dict[str, asyncio.Lock] = {}
         self.native_ports: dict[tuple[str, str], int] = {}
+        self.workspace_root = store.settings.agent_workspace_root
         from fesnyng_backend.codex_runtime import CodexRuntime
 
         self.codex = CodexRuntime(self)
@@ -233,7 +282,7 @@ class DockerRuntime:
         )
         if name not in listed:
             return None
-        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}}}'
+        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}}}'
         info = json.loads(await self.docker("inspect", "--format", template, name))
         expected = {
             "fesnyng.host": str(self.store.instance_id),
@@ -372,6 +421,12 @@ class DockerRuntime:
         desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
         runtime_type = desired.configuration.runtime_type
         name = self.name(agent_id)
+        employee_workspace = self.employee_workspace_root(organization_id, agent_id)
+        employee_workspace.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if employee_workspace.resolve() != employee_workspace:
+            raise RuntimeUnavailable(
+                "Configured workspace storage is not safe for an employee mount"
+            )
         for suffix in ("home", "workspace"):
             volume = f"{name}-{suffix}"
             present = (
@@ -435,6 +490,8 @@ class DockerRuntime:
             f"{name}-home:/home/agent",
             "-v",
             f"{name}-workspace:/workspace",
+            "-v",
+            f"{employee_workspace}:{employee_workspace}",
             "-e",
             f"OPENCODE_SERVER_PASSWORD={agent['runtime_password']}",
             "-e",
@@ -451,6 +508,29 @@ class DockerRuntime:
             'OPENCODE_AUTH_CONTENT={"openai":{"type":"oauth","access":"","refresh":"","expires":0}}',
             image,
         )
+
+    def employee_workspace_root(self, organization_id: str, agent_id: str) -> Path:
+        return employee_workspace_root(self.workspace_root, organization_id, agent_id)
+
+    def _require_workspace_mount(
+        self, info: Mapping[str, Any], organization_id: str, agent_id: str
+    ) -> None:
+        expected = str(self.employee_workspace_root(organization_id, agent_id))
+        mounts = info.get("mounts")
+        # Docker inspect always includes Mounts. Keep intentionally narrow
+        # in-memory runtime doubles compatible with this lifecycle check.
+        if mounts is None:
+            return
+        if not isinstance(mounts, list) or not any(
+            isinstance(mount, Mapping)
+            and mount.get("Type") == "bind"
+            and mount.get("Source") == expected
+            and mount.get("Destination") == expected
+            for mount in mounts
+        ):
+            raise RuntimeUnavailable(
+                "Agent container lacks the configured workspace mount; use the explicit replacement flow"
+            )
 
     @staticmethod
     def _port(info: Mapping[str, Any]) -> int:
@@ -629,8 +709,26 @@ git_dir="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse 
 common_dir="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || exit 1
 git_dir="$(realpath -- "$git_dir")" || exit 1
 common_dir="$(realpath -- "$common_dir")" || exit 1
-case "$git_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
-case "$common_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+case "$base" in
+    "$2"/threads/*)
+        employee="$(realpath -- "$2")" || exit 1
+        test "$employee" = "$2" && test -d "$employee" || exit 1
+        case "$common_dir" in
+            "$employee"/repositories/*)
+                case "$git_dir" in "$common_dir"/worktrees/*) ;; *) exit 1;; esac
+                ;;
+            "$base"/.git|"$base"/.git/*)
+                case "$git_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+                ;;
+            *) exit 1;;
+        esac
+        ;;
+    /workspace/*)
+        case "$git_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+        case "$common_dir" in "$base"/.git|"$base"/.git/*) ;; *) exit 1;; esac
+        ;;
+    *) exit 1;;
+esac
 name="${root##*/}"
 if origin="$(git --no-optional-locks -c core.fsmonitor=false -C "$base" config --get remote.origin.url 2>/dev/null)"; then
     case "$origin" in
@@ -706,6 +804,7 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
             script,
             "workspace-context",
             directory,
+            str(self.employee_workspace_root(organization_id, agent_id)),
         )
         return _workspace_context(result)
 
@@ -847,10 +946,63 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         self, organization_id: str, agent_id: str, source_directory: str
     ) -> str:
         """Copy one mapped checkout into an isolated writable native fork directory."""
-        if not source_directory.startswith("/workspace/"):
+        employee = str(self.employee_workspace_root(organization_id, agent_id))
+        managed = source_directory.startswith(employee + "/threads/")
+        if not managed and not source_directory.startswith("/workspace/"):
             raise ValueError("Native session workspace is not managed by this agent")
         destination = f"{source_directory}-fork-{uuid4().hex}"
         await self.inspect(organization_id, agent_id)
+        if managed:
+            kind = await self.docker(
+                "exec",
+                self.name(agent_id),
+                "sh",
+                "-c",
+                FORK_KIND_SCRIPT,
+                "fork-workspace-kind",
+                source_directory,
+                employee,
+            )
+            if kind == b"ordinary":
+                await self.docker(
+                    "exec",
+                    self.name(agent_id),
+                    "sh",
+                    "-c",
+                    ORDINARY_FORK_SCRIPT,
+                    "fork-workspace",
+                    source_directory,
+                    destination,
+                )
+                return destination
+            if kind == b"standalone_git":
+                await self.docker(
+                    "exec",
+                    self.name(agent_id),
+                    "sh",
+                    "-c",
+                    STANDALONE_GIT_FORK_SCRIPT,
+                    "fork-workspace",
+                    source_directory,
+                    destination,
+                    f"fesnyng/fork-{uuid4().hex}",
+                )
+                return destination
+            if kind != b"linked_git":
+                raise RuntimeUnavailable("Workspace fork kind is unavailable")
+            await self.docker(
+                "exec",
+                self.name(agent_id),
+                "sh",
+                "-c",
+                GIT_FORK_SCRIPT,
+                "fork-workspace",
+                source_directory,
+                destination,
+                employee,
+                f"fesnyng/fork-{uuid4().hex}",
+            )
+            return destination
         await self.docker(
             "exec",
             self.name(agent_id),
@@ -1111,6 +1263,11 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
         *,
         directory: str | None = None,
         metadata: dict[str, str] | None = None,
+        creation_id: str | None = None,
+        repository_url: str | None = None,
+        checkout_branch: str | None = None,
+        project_id: str | None = None,
+        requested_checkout_branch: str | None = None,
     ) -> dict[str, Any]:
         async with self.lock(agent_id):
             self.store.require_writable(organization_id, agent_id)
@@ -1118,30 +1275,465 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
             if not agent["applied_envelope"]:
                 raise RuntimeUnavailable("Agent configuration is not applied")
             envelope = HostAgentConfiguration.model_validate_json(agent["applied_envelope"])
-            if envelope.configuration.runtime_type == "codex":
-                return await self.codex.create_session(
-                    organization_id,
-                    agent_id,
-                    title,
-                    workspace,
-                    directory=directory,
-                    metadata=metadata,
+            creation_id = creation_id or str(uuid4())
+            try:
+                if (repository_url is None) != (checkout_branch is None):
+                    raise ValueError(
+                        "Repository workspace requires both repository and checkout branch"
+                    )
+                if repository_url is not None:
+                    assert checkout_branch is not None
+                    validate_branch(checkout_branch)
+                if directory is not None and repository_url is not None:
+                    raise ValueError("Workspace directory is chosen by the host")
+                locations = workspace_paths(
+                    self.workspace_root, organization_id, agent_id, creation_id, repository_url
                 )
-            if workspace != envelope.configuration.workspace:
-                raise ValueError("Workspace is not assigned to this agent")
-            directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"
-            await self.docker("exec", self.name(agent_id), "mkdir", "-p", directory)
-            session = await self.request(
+            except ValueError as error:
+                raise WorkspacePreparationFailed(creation_id, str(error)) from None
+            selected_directory = directory or str(locations.directory)
+            fingerprint = self._creation_fingerprint(
+                title,
+                workspace,
+                selected_directory,
+                repository_url,
+                checkout_branch,
+                project_id,
+                requested_checkout_branch,
+                metadata,
+            )
+            reservation = self.store.reserve_workspace_creation(
                 organization_id,
                 agent_id,
-                "/session",
-                method="POST",
-                body={
-                    "title": title,
-                    "permission": permission_rules(envelope),
-                    **({"metadata": metadata} if metadata else {}),
-                },
-                directory=directory,
+                creation_id,
+                fingerprint,
+                selected_directory,
+                repository_url,
+                checkout_branch,
+                project_id=project_id,
+                requested_checkout_branch=requested_checkout_branch,
             )
-            self.store.save_session(organization_id, agent_id, session["id"], directory, title)
+            if reservation["state"] == "completed":
+                receipt = reservation["native_receipt"]
+                try:
+                    saved = json.loads(receipt) if isinstance(receipt, str) else None
+                except json.JSONDecodeError:
+                    saved = None
+                if isinstance(saved, dict):
+                    return saved
+                raise WorkspaceCreationUncertain(creation_id)
+            if reservation["state"] in {"native_attempted", "uncertain"}:
+                if envelope.configuration.runtime_type == "opencode":
+                    recovered = await self._recover_opencode_creation(
+                        organization_id, agent_id, creation_id, selected_directory, title
+                    )
+                    if recovered is not None:
+                        return recovered
+                elif envelope.configuration.runtime_type == "codex":
+                    recovered = await self._recover_codex_creation(
+                        organization_id, agent_id, creation_id, selected_directory, title
+                    )
+                    if recovered is not None:
+                        return recovered
+                self.store.mark_workspace_creation_uncertain(organization_id, agent_id, creation_id)
+                raise WorkspaceCreationUncertain(creation_id)
+            info = await self.inspect(organization_id, agent_id)
+            if info is None or not info["state"].get("Running"):
+                raise RuntimeUnavailable("Agent container is not running")
+            if selected_directory == str(locations.directory):
+                self._require_workspace_mount(info, organization_id, agent_id)
+            prepared = False
+            if repository_url is not None:
+                prepared = await self._recover_prepared_workspace(
+                    organization_id,
+                    agent_id,
+                    locations,
+                    selected_directory,
+                    repository_url,
+                    checkout_branch,
+                    creation_id,
+                    reservation.get("starting_revision"),
+                )
+            if envelope.configuration.runtime_type == "codex":
+                if not prepared:
+                    await self._prepare_workspace(
+                        organization_id,
+                        agent_id,
+                        locations,
+                        selected_directory,
+                        repository_url,
+                        checkout_branch,
+                        creation_id,
+                    )
+                self.store.mark_workspace_native_attempted(organization_id, agent_id, creation_id)
+                try:
+                    session = await self.codex.create_session(
+                        organization_id,
+                        agent_id,
+                        title,
+                        workspace,
+                        directory=selected_directory,
+                        metadata=metadata,
+                        creation_id=creation_id,
+                        repository_url=repository_url,
+                        checkout_branch=checkout_branch,
+                    )
+                except RuntimeUnavailable:
+                    self.store.mark_workspace_creation_uncertain(
+                        organization_id, agent_id, creation_id
+                    )
+                    raise WorkspaceCreationUncertain(creation_id) from None
+                self.store.complete_workspace_creation(
+                    organization_id, agent_id, creation_id, session
+                )
+                return session
+            if workspace != envelope.configuration.workspace:
+                raise ValueError("Workspace is not assigned to this agent")
+            if not prepared:
+                await self._prepare_workspace(
+                    organization_id,
+                    agent_id,
+                    locations,
+                    selected_directory,
+                    repository_url,
+                    checkout_branch,
+                    creation_id,
+                )
+            self.store.mark_workspace_native_attempted(organization_id, agent_id, creation_id)
+            try:
+                session = await self.request(
+                    organization_id,
+                    agent_id,
+                    "/session",
+                    method="POST",
+                    body={
+                        "title": title,
+                        "permission": permission_rules(envelope),
+                        "metadata": {**(metadata or {}), "fesnyng_creation_id": creation_id},
+                    },
+                    directory=selected_directory,
+                )
+                session_id = session.get("id") if isinstance(session, Mapping) else None
+                if not isinstance(session_id, str) or not session_id:
+                    raise RuntimeUnavailable("Native session creation receipt is invalid")
+                self.store.save_session(
+                    organization_id, agent_id, session_id, selected_directory, title
+                )
+            except RuntimeUnavailable:
+                recovered = await self._recover_opencode_creation(
+                    organization_id, agent_id, creation_id, selected_directory, title
+                )
+                if recovered is not None:
+                    return recovered
+                self.store.mark_workspace_creation_uncertain(organization_id, agent_id, creation_id)
+                raise WorkspaceCreationUncertain(creation_id) from None
+            self.store.complete_workspace_creation(organization_id, agent_id, creation_id, session)
             return session
+
+    @staticmethod
+    def _creation_fingerprint(
+        title: str,
+        workspace: str,
+        directory: str,
+        repository_url: str | None,
+        checkout_branch: str | None,
+        project_id: str | None,
+        requested_checkout_branch: str | None,
+        metadata: Mapping[str, str] | None,
+    ) -> str:
+        request = {
+            "title": title,
+            "workspace": workspace,
+            "directory": directory,
+            "repository_url": repository_url,
+            "checkout_branch": checkout_branch,
+            "project_id": project_id,
+            "requested_checkout_branch": requested_checkout_branch,
+            "metadata": dict(metadata or {}),
+        }
+        return hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    async def _recover_prepared_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        locations: WorkspacePaths,
+        directory: str,
+        repository_url: str,
+        checkout_branch: str | None,
+        creation_id: str,
+        expected_revision: object,
+    ) -> bool:
+        """Reuse only a repository checkout whose host-owned identity still verifies."""
+        if checkout_branch is None or locations.bare_repository is None:
+            return False
+        output = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "20",
+            "sh",
+            "-c",
+            GIT_PREPARED_RECONCILE_SCRIPT,
+            "workspace-reconcile-prepared",
+            str(locations.employee_root),
+            str(locations.bare_repository),
+            directory,
+            repository_url,
+            checkout_branch,
+            creation_id,
+            expected_revision if isinstance(expected_revision, str) else "",
+        )
+        fields = output.decode(errors="replace").split("\0")
+        if fields == ["missing", ""]:
+            return False
+        if len(fields) == 3 and fields[0] == "prepared" and fields[2] == "":
+            revision = fields[1]
+            if revision:
+                self.store.mark_workspace_prepared(organization_id, agent_id, creation_id, revision)
+                return True
+        raise WorkspacePreparationFailed(
+            creation_id, "Workspace preparation conflicts with retained storage"
+        )
+
+    async def _prepare_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        locations: WorkspacePaths,
+        directory: str,
+        repository_url: str | None,
+        checkout_branch: str | None,
+        creation_id: str,
+    ) -> None:
+        if repository_url is None:
+            if not (directory.startswith("/workspace/") or directory == str(locations.directory)):
+                raise ValueError("Workspace directory is not assigned to this agent")
+            await self.docker("exec", self.name(agent_id), "mkdir", "-p", directory)
+            self.store.mark_workspace_prepared(organization_id, agent_id, creation_id, None)
+            return
+        assert checkout_branch is not None and locations.bare_repository is not None
+        output = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "90",
+            "sh",
+            "-c",
+            GIT_PREPARE_SCRIPT,
+            "workspace-prepare",
+            str(locations.employee_root),
+            str(locations.bare_repository),
+            directory,
+            repository_url,
+            checkout_branch,
+            creation_id,
+        )
+        fields = output.decode(errors="replace").split("\0")
+        if len(fields) == 4 and fields[0] == "prepared" and fields[3] == "":
+            revision, directory = fields[1], fields[2]
+            if revision and directory == str(locations.directory):
+                self.store.mark_workspace_prepared(organization_id, agent_id, creation_id, revision)
+                return
+        reason = fields[1] if len(fields) >= 2 and fields[0] == "error" else "storage"
+        messages = {
+            "authentication": "Repository authentication or access failed",
+            "branch": "Requested checkout branch is unavailable",
+            "workspace_conflict": "Workspace preparation conflicts with retained storage",
+            "storage": "Workspace storage is unavailable",
+        }
+        raise WorkspacePreparationFailed(
+            creation_id, messages.get(reason, "Workspace preparation is unavailable")
+        )
+
+    async def _recover_opencode_creation(
+        self,
+        organization_id: str,
+        agent_id: str,
+        creation_id: str,
+        directory: str,
+        title: str,
+    ) -> dict[str, Any] | None:
+        try:
+            sessions = await self.request(
+                organization_id, agent_id, "/session", directory=directory
+            )
+        except RuntimeUnavailable:
+            return None
+        entries = (
+            sessions.values()
+            if isinstance(sessions, Mapping)
+            else sessions
+            if isinstance(sessions, list)
+            else []
+        )
+        matches: list[Mapping[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            metadata = entry.get("metadata")
+            session_id = entry.get("id")
+            if (
+                isinstance(metadata, Mapping)
+                and metadata.get("fesnyng_creation_id") == creation_id
+                and isinstance(session_id, str)
+                and session_id
+                and entry.get("directory") == directory
+                and entry.get("parentID") is None
+            ):
+                matches.append(entry)
+        if len(matches) != 1:
+            return None
+        entry = matches[0]
+        session_id = entry["id"]
+        assert isinstance(session_id, str)
+        receipt = {
+            "id": session_id,
+            "title": entry.get("title") or title,
+            "directory": directory,
+        }
+        self.store.save_session(
+            organization_id, agent_id, session_id, directory, str(receipt["title"])
+        )
+        self.store.complete_workspace_creation(organization_id, agent_id, creation_id, receipt)
+        return receipt
+
+    async def _recover_codex_creation(
+        self,
+        organization_id: str,
+        agent_id: str,
+        creation_id: str,
+        directory: str,
+        title: str,
+    ) -> dict[str, Any] | None:
+        """Adopt one provable lost Codex creation without starting another thread."""
+        expected = str(
+            workspace_paths(
+                self.workspace_root, organization_id, agent_id, creation_id, None
+            ).directory
+        )
+        if directory != expected:
+            return None
+        try:
+            listed = await self._codex_creation_inventory(
+                organization_id,
+                agent_id,
+                "thread/list",
+                {
+                    "limit": 100,
+                    "sourceKinds": [
+                        "cli",
+                        "vscode",
+                        "exec",
+                        "appServer",
+                        "subAgent",
+                        "subAgentReview",
+                        "subAgentCompact",
+                        "subAgentThreadSpawn",
+                        "subAgentOther",
+                        "unknown",
+                    ],
+                },
+            )
+            loaded = await self._codex_creation_inventory(
+                organization_id, agent_id, "thread/loaded/list", {"limit": 100}
+            )
+            threads: dict[str, Mapping[str, Any]] = {}
+            for thread_id in sorted({*listed, *loaded}):
+                reply = await self.codex.transport.call(
+                    organization_id, agent_id, "thread/read", {"threadId": thread_id}
+                )
+                thread = reply.get("thread")
+                if not isinstance(thread, Mapping) or thread.get("id") != thread_id:
+                    return None
+                threads[thread_id] = thread
+        except RuntimeUnavailable:
+            return None
+        roots = [
+            thread_id
+            for thread_id, thread in threads.items()
+            if thread.get("cwd") == directory
+            and thread.get("parentThreadId") is None
+            and thread.get("forkedFromId") is None
+            and thread.get("sessionId") in {None, thread_id}
+        ]
+        if len(roots) != 1:
+            return None
+        thread_id = roots[0]
+        thread = threads[thread_id]
+        native_title = thread.get("title")
+        resolved_title = native_title if isinstance(native_title, str) and native_title else title
+        try:
+            existing = self.store.session(organization_id, agent_id, thread_id)
+        except LookupError:
+            self.store.save_session(
+                organization_id,
+                agent_id,
+                thread_id,
+                directory,
+                resolved_title,
+                runtime_type="codex",
+            )
+        else:
+            if (
+                existing["directory"] != directory
+                or existing["runtime_type"] != "codex"
+                or existing["organization_id"] != organization_id
+                or existing["agent_id"] != agent_id
+            ):
+                return None
+            resolved_title = existing["title"]
+        agent = self.store.agent(organization_id, agent_id)
+        applied = agent.get("applied_envelope")
+        if not isinstance(applied, str):
+            return None
+        envelope = HostAgentConfiguration.model_validate_json(applied)
+        try:
+            await self.codex.recover_workspace_context(
+                organization_id, agent_id, thread_id, directory, envelope
+            )
+        except RuntimeUnavailable:
+            return None
+        receipt = {"id": thread_id, "title": resolved_title, "directory": directory}
+        self.store.complete_workspace_creation(organization_id, agent_id, creation_id, receipt)
+        return receipt
+
+    async def _codex_creation_inventory(
+        self,
+        organization_id: str,
+        agent_id: str,
+        method: str,
+        params: Mapping[str, object],
+    ) -> list[str]:
+        """Read every native page directly; recovery must not resume a thread."""
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        entries: list[str] = []
+        while True:
+            request = dict(params)
+            if cursor is not None:
+                request["cursor"] = cursor
+            reply = await self.codex.transport.call(organization_id, agent_id, method, request)
+            data = reply.get("data")
+            if not isinstance(data, list):
+                raise RuntimeUnavailable("Codex creation recovery inventory is invalid")
+            for item in data:
+                thread_id = (
+                    item
+                    if isinstance(item, str)
+                    else item.get("id")
+                    if isinstance(item, Mapping)
+                    else None
+                )
+                if not isinstance(thread_id, str) or not thread_id:
+                    raise RuntimeUnavailable("Codex creation recovery inventory is invalid")
+                entries.append(thread_id)
+            next_cursor = reply.get("nextCursor")
+            if next_cursor is None:
+                return entries
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeUnavailable("Codex creation recovery pagination is invalid")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor

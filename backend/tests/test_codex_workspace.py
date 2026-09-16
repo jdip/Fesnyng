@@ -131,6 +131,7 @@ class Runtime:
         self.runtime_router = RuntimeRouter(codex)
         self.locks = {}
         self.create_calls = 0
+        self.create_kwargs: list[dict[str, str]] = []
 
     def lock(self, agent_id):
         return self.locks.setdefault(agent_id, asyncio.Lock())
@@ -140,8 +141,9 @@ class Runtime:
     ):
         raise AssertionError("OpenCode request on Codex runtime")
 
-    async def create_session(self, org, agent, title, workspace):
+    async def create_session(self, org, agent, title, workspace, **kwargs):
         self.create_calls += 1
+        self.create_kwargs.append(kwargs)
         self.store.save_session(
             org,
             agent,
@@ -270,6 +272,38 @@ def test_codex_create_rejects_an_opencode_employee_before_native_creation(tmp_pa
     response = asyncio.run(create())
     assert response.status_code == 409
     assert app.state.host_runtime.create_calls == 0
+
+
+def test_codex_create_forwards_host_resolved_workspace_preparation_inputs(tmp_path):
+    app, org, agent, token, _codex = _app(tmp_path)
+    actor = {"kind": "human", "id": str(uuid4()), "name": "Owner"}
+    creation_id = str(uuid4())
+
+    async def create():
+        async with AsyncClient(
+            transport=ASGITransport(app),
+            base_url="http://host",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            return await client.post(
+                f"/organizations/{org}/agents/{agent}/codex/session",
+                headers={"X-Fesnyng-Actor": json.dumps(actor)},
+                json={
+                    "creation_id": creation_id,
+                    "repository_url": "https://example.test/repository.git",
+                    "checkout_branch": "test",
+                },
+            )
+
+    response = asyncio.run(create())
+    assert response.status_code == 201
+    assert app.state.host_runtime.create_kwargs == [
+        {
+            "creation_id": creation_id,
+            "repository_url": "https://example.test/repository.git",
+            "checkout_branch": "test",
+        }
+    ]
 
 
 def test_dispatcher_starts_a_codex_turn_and_records_its_native_turn_receipt(tmp_path):
@@ -617,3 +651,48 @@ def test_frozen_codex_history_and_native_write_rejection_survive_host_reload(tmp
 
     asyncio.run(exercise())
     assert len(native.calls) == before
+
+
+def test_workspace_creation_lookup_requires_the_bound_organization(tmp_path):
+    app, org, agent, token, _codex = _app(tmp_path)
+    from fesnyng_backend.host_routes import router as host_router
+
+    app.include_router(host_router)
+    creation_id = str(uuid4())
+    project_id = str(uuid4())
+    app.state.host_store.reserve_workspace_creation(
+        org,
+        agent,
+        creation_id,
+        "a" * 64,
+        f"/workspace/default/threads/{creation_id}",
+        "https://example.test/repository.git",
+        "test",
+        project_id=project_id,
+        requested_checkout_branch=None,
+    )
+
+    async def lookup():
+        path = f"/organizations/{org}/agents/{agent}/workspace-creations/{creation_id}"
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://host") as client:
+            missing = await client.get(path)
+            wrong = await client.get(path, headers={"Authorization": "Bearer wrong"})
+            matched = await client.get(path, headers={"Authorization": f"Bearer {token}"})
+            foreign = await client.get(
+                f"/organizations/{uuid4()}/agents/{agent}/workspace-creations/{creation_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return missing, wrong, matched, foreign
+
+    missing, wrong, matched, foreign = asyncio.run(lookup())
+    assert missing.status_code == wrong.status_code == 401
+    assert foreign.status_code == 403
+    assert matched.json() == {
+        "creation_id": creation_id,
+        "project_id": project_id,
+        "requested_checkout_branch": None,
+        "repository_url": "https://example.test/repository.git",
+        "checkout_branch": "test",
+        "state": "reserved",
+        "native_receipt": None,
+    }

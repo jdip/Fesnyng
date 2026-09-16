@@ -98,11 +98,24 @@ async def create_session(
     org, aid = str(organization_id), str(agent_id)
     auth.require_unsafe_request(request)
     auth.require_member(request, org)
+    if (
+        body.project_id is not None
+        or body.requested_checkout_branch is not None
+        or body.repository_url is not None
+        or body.checkout_branch is not None
+    ):
+        raise HTTPException(
+            422, "Workspace repository selection requires a Project native session request"
+        )
     client = host_client(request)
     with host_errors():
         agent = client.agents.get_agent(org, aid)
         return await client.request(
-            org, agent["host_id"], f"/agents/{aid}/sessions", method="POST", body=body.model_dump()
+            org,
+            agent["host_id"],
+            f"/agents/{aid}/sessions",
+            method="POST",
+            body=body.model_dump(mode="json"),
         )
 
 

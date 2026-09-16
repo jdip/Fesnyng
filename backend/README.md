@@ -59,6 +59,12 @@ The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/
 
 Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
+New thread directories are prepared under the host's organization/employee-scoped
+workspace root. Projects can select a repository and explicit checkout branch;
+browser callers cannot select an arbitrary directory or inject a repository into
+the host handoff. See [thread workspaces](../docs/workspaces.md) for shared-path
+storage, administrator Git authentication, legacy volumes and creation recovery.
+
 Agent configuration also identifies the harness with `runtime_type`, defaulting to
 `opencode` when omitted. Existing configurations and thread IDs remain valid.
 Each host thread retains its original runtime binding; saving thread metadata must

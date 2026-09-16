@@ -4,6 +4,8 @@ import { agentPath, api, errorMessage, type Agent, type Project } from './worksp
 
 type Thread = { agent: string; session_id: string; title: string; project_id: string | null };
 type ProjectDraft = Pick<Project, 'name' | 'description' | 'target_repository_url' | 'default_checkout_branch'>;
+export type ProjectThreadSelection = { project: string | null; checkoutBranch?: string };
+export type ProjectThreadStart = ProjectThreadSelection & { agent: string };
 
 const emptyDraft = (): ProjectDraft => ({ name: '', description: '', target_repository_url: null, default_checkout_branch: null });
 
@@ -33,7 +35,7 @@ export function ProjectNavigation({ organization, agents, csrf, manager, onOpenT
   csrf: string;
   manager: boolean;
   onOpenThread: (agent: string, session: string) => void;
-  onNewThread: (selection: { agent: string; project: string | null }) => void;
+  onNewThread: (selection: ProjectThreadStart) => void;
   detailsTarget?: HTMLElement | null;
   onOpenProject?: () => void;
   currentThread?: { agent: string; session: string };
@@ -120,9 +122,10 @@ export function ProjectNavigation({ organization, agents, csrf, manager, onOpenT
 }
 
 /** Employee-first creation keeps its established direct path when no Project exists. */
-export function EmployeeNewThreadChooser({ organization, agent, onStart, onCancel }: { organization: string; agent: Agent; onStart: (project: string | null) => void; onCancel: () => void }) {
+export function EmployeeNewThreadChooser({ organization, agent, onStart, onCancel }: { organization: string; agent: Agent; onStart: (selection: ProjectThreadSelection) => void; onCancel: () => void }) {
   const [projects, setProjects] = useState<Project[]>();
   const [project, setProject] = useState('');
+  const [checkoutBranch, setCheckoutBranch] = useState('');
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   useEffect(() => {
@@ -132,12 +135,13 @@ export function EmployeeNewThreadChooser({ organization, agent, onStart, onCance
     }).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
     return () => controller.abort();
   }, [organization, revision]);
-  useEffect(() => { if (projects?.length === 0) onStart(null); }, [onStart, projects]);
+  useEffect(() => { if (projects?.length === 0) onStart({ project: null }); }, [onStart, projects]);
   if (error) return <section className="app-panel project-thread-creator" aria-label="New thread"><p className="app-error" role="alert">{error}</p><div className="app-actions"><button className="app-button" onClick={onCancel}>Cancel</button><button className="app-button" onClick={() => { setError(''); setRevision((current) => current + 1); }}>Retry</button></div></section>;
   if (!projects) return <section className="app-panel project-thread-creator" aria-label="New thread"><p role="status">Loading Projects…</p><button className="app-button" onClick={onCancel}>Cancel</button></section>;
   if (projects.length === 0) return null;
   const selected = projects.find((item) => item.id === project);
-  return <section className="app-panel project-thread-creator" aria-label={`New thread for ${agent.name}`}><h3>New thread for {agent.name}</h3><label>Project<select className="app-select" aria-label="Project" value={project} onChange={(event) => setProject(event.target.value)}><option value="">Ungrouped</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{selected?.target_repository_url && <p className="app-notice">Repository-backed threads become available after workspace preparation is delivered. Choose Ungrouped or another Project.</p>}{error && <p className="app-error" role="alert">{error}</p>}<div className="app-actions"><button className="app-button" onClick={onCancel}>Cancel</button><button className="app-button primary" disabled={Boolean(selected?.target_repository_url)} onClick={() => onStart(project || null)}>Start thread</button></div></section>;
+  const repositoryInvalid = Boolean(selected?.target_repository_url && !selected.default_checkout_branch);
+  return <section className="app-panel project-thread-creator" aria-label={`New thread for ${agent.name}`}><h3>New thread for {agent.name}</h3><label>Project<select className="app-select" aria-label="Project" value={project} onChange={(event) => { setProject(event.target.value); setCheckoutBranch(''); }}><option value="">Ungrouped</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{selected?.target_repository_url && <><p className="app-notice">This thread will prepare an independent workspace from {selected.default_checkout_branch ? `the Project default checkout ${selected.default_checkout_branch}.` : 'the Project checkout after it is configured.'}</p><label>Starting branch <span className="muted">Optional override</span><input className="app-input" aria-label="Starting branch" value={checkoutBranch} onChange={(event) => setCheckoutBranch(event.target.value)} /></label></>}{repositoryInvalid && <p className="app-error" role="alert">This Project needs an explicit default checkout before a thread can start.</p>}{error && <p className="app-error" role="alert">{error}</p>}<div className="app-actions"><button className="app-button" onClick={onCancel}>Cancel</button><button className="app-button primary" disabled={repositoryInvalid} onClick={() => onStart({ project: project || null, ...(checkoutBranch.trim() ? { checkoutBranch: checkoutBranch.trim() } : {}) })}>Start thread</button></div></section>;
 }
 
 function ProjectDetails({ project, threads, allProjects, agents, manager, error, selectedName, onOpenThread, onMoveThread, onNewThread, onSaveProject, onLifecycleProject }: {
@@ -150,7 +154,7 @@ function ProjectDetails({ project, threads, allProjects, agents, manager, error,
   selectedName: string;
   onOpenThread: (agent: string, session: string) => void;
   onMoveThread: (thread: Thread, project: string | null) => Promise<void>;
-  onNewThread: (selection: { agent: string; project: string | null }) => void;
+  onNewThread: (selection: ProjectThreadStart) => void;
   onSaveProject: (draft: ProjectDraft, project?: Project) => Promise<void>;
   onLifecycleProject: (project: Project, action: 'archive' | 'restore' | 'delete') => Promise<void>;
 }) {
@@ -158,23 +162,24 @@ function ProjectDetails({ project, threads, allProjects, agents, manager, error,
   const [employee, setEmployee] = useState('');
   const [creating, setCreating] = useState(false);
   const filtered = useMemo(() => threads.filter((thread) => thread.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) && (!employee || thread.agent === employee)), [employee, search, threads]);
-  const repositoryBlocked = Boolean(project?.target_repository_url);
+  const repositoryInvalid = Boolean(project?.target_repository_url && !project.default_checkout_branch);
   return <section className="project-details" aria-label={`${selectedName} project`}>
     <div className="project-details-heading"><div><h2>{selectedName}</h2>{project?.description && <p className="page-intro">{project.description}</p>}{project?.target_repository_url && <p className="muted">Repository: {project.target_repository_url} · default checkout {project.default_checkout_branch}</p>}</div>
       <div className="app-actions">{project && <ProjectEditor trigger="Edit Project" project={project} onSave={onSaveProject} />}{project && manager && (project.archived ? <button className="app-button" onClick={() => { void onLifecycleProject(project, 'restore'); }}>Restore Project</button> : <button className="app-button" onClick={() => { void onLifecycleProject(project, 'archive'); }}>Archive Project</button>)}</div></div>
     {project && manager && <button className="app-button danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its threads will remain Ungrouped.`)) void onLifecycleProject(project, 'delete'); }}>Delete Project</button>}
-    <div className="project-detail-toolbar"><label className="project-search-label">Search threads<input type="search" className="app-input" aria-label={`Search ${selectedName} threads`} value={search} onChange={(event) => setSearch(event.target.value)} /></label><label>Employee<select className="app-select" aria-label="Filter by employee" value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><button className="app-button primary" disabled={project?.archived} onClick={() => setCreating(true)}>New thread</button></div>
+    <div className="project-detail-toolbar"><label className="project-search-label">Search threads<input type="search" className="app-input" aria-label={`Search ${selectedName} threads`} value={search} onChange={(event) => setSearch(event.target.value)} /></label><label>Employee<select className="app-select" aria-label="Filter by employee" value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><button className="app-button primary" disabled={project?.archived || repositoryInvalid} onClick={() => setCreating(true)}>New thread</button></div>
     {project?.archived && <p className="app-notice">Restore this Project before starting a new thread.</p>}
-    {repositoryBlocked && <p className="app-notice">Repository-backed threads become available after workspace preparation is delivered. This Project does not create an empty workspace.</p>}
-    {creating && <NewProjectThread project={project} agents={agents} blocked={repositoryBlocked} onClose={() => setCreating(false)} onStart={(agent) => { setCreating(false); onNewThread({ agent, project: project?.id ?? null }); }} />}
+    {repositoryInvalid && <p className="app-error" role="alert">This Project needs an explicit default checkout before a thread can start.</p>}
+    {creating && <NewProjectThread project={project} agents={agents} onClose={() => setCreating(false)} onStart={(agent, checkoutBranch) => { setCreating(false); onNewThread({ agent, project: project?.id ?? null, ...(checkoutBranch ? { checkoutBranch } : {}) }); }} />}
     {error && <p className="app-error" role="alert">{error}</p>}
     <div className="project-thread-list">{filtered.map((thread) => <div className="project-thread-row" key={`${thread.agent}:${thread.session_id}`}><button className="project-thread-open" onClick={() => onOpenThread(thread.agent, thread.session_id)}>{thread.title}<small>{agents.find((agent) => agent.id === thread.agent)?.name ?? thread.agent}</small></button><select aria-label={`Project for ${thread.title}`} value={thread.project_id ?? ''} onChange={(event) => { void onMoveThread(thread, event.target.value || null); }}><option value="">Ungrouped</option>{(project?.archived ? [project, ...allProjects] : allProjects).map((item) => <option key={item.id} value={item.id} disabled={item.archived}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></div>)}{!filtered.length && <p className="muted">No matching threads.</p>}</div>
   </section>;
 }
 
-function NewProjectThread({ project, agents, blocked, onClose, onStart }: { project?: Project; agents: Agent[]; blocked: boolean; onClose: () => void; onStart: (agent: string) => void }) {
+function NewProjectThread({ project, agents, onClose, onStart }: { project?: Project; agents: Agent[]; onClose: () => void; onStart: (agent: string, checkoutBranch?: string) => void }) {
   const [agent, setAgent] = useState(agents[0]?.id ?? '');
-  return <section className="app-panel project-thread-creator" aria-label="New thread"><h3>New thread</h3><label>Employee<select className="app-select" aria-label="Employee" value={agent} onChange={(event) => setAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><p className="muted">{project ? `This thread will be grouped under ${project.name}.` : 'This thread will remain Ungrouped.'}</p><div className="app-actions"><button className="app-button" onClick={onClose}>Cancel</button><button className="app-button primary" disabled={blocked || !agent} onClick={() => onStart(agent)}>Start thread</button></div></section>;
+  const [checkoutBranch, setCheckoutBranch] = useState('');
+  return <section className="app-panel project-thread-creator" aria-label="New thread"><h3>New thread</h3><label>Employee<select className="app-select" aria-label="Employee" value={agent} onChange={(event) => setAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><p className="muted">{project ? `This thread will be grouped under ${project.name}.` : 'This thread will remain Ungrouped.'}</p>{project?.target_repository_url && <><p className="app-notice">This thread will prepare an independent workspace from the Project default checkout {project.default_checkout_branch}.</p><label>Starting branch <span className="muted">Optional override</span><input className="app-input" aria-label="Starting branch" value={checkoutBranch} onChange={(event) => setCheckoutBranch(event.target.value)} /></label></>}<div className="app-actions"><button className="app-button" onClick={onClose}>Cancel</button><button className="app-button primary" disabled={!agent} onClick={() => onStart(agent, checkoutBranch.trim() || undefined)}>Start thread</button></div></section>;
 }
 
 function ProjectEditor({ trigger, project, onSave }: { trigger: string; project?: Project; onSave: (draft: ProjectDraft, project?: Project) => Promise<void> }) {

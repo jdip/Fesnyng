@@ -1,5 +1,6 @@
-import { expect, test } from 'vitest';
-import { applyCodexEvent, projectCodexHistory } from './codex-client';
+import { expect, test, vi } from 'vitest';
+import { applyCodexEvent, createFesnyngCodexFetch, createFesnyngCodexThread, projectCodexHistory } from './codex-client';
+import { WorkspaceCreationUncertain } from '../workspace-api';
 
 test('projects native Codex turns into maintained text and diff tool messages', () => {
   const messages = projectCodexHistory({
@@ -58,4 +59,31 @@ test('renders native reasoning summaries and failed command output accurately', 
   ] }] });
   expect(messages[0]).toMatchObject({ content: [{ type: 'reasoning', text: 'Checked the logs.' }], status: { type: 'incomplete', reason: 'error' } });
   expect(messages[1]).toMatchObject({ content: [{ type: 'tool-call', isError: true, result: 'failed' }], status: { type: 'incomplete', reason: 'error' } });
+});
+
+test('keeps a structured uncertain Codex workspace outcome recoverable', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: { code: 'workspace_creation_uncertain', creation_id: 'f6940d82-c96d-4e36-8dd5-ebd63a4999c4', detail: 'Check the existing preparation request.' } }), { status: 503 }));
+  const fetchWithFesnyngAuth = createFesnyngCodexFetch('csrf-example', fetchMock);
+
+  await expect(fetchWithFesnyngAuth('/session', { method: 'POST' })).rejects.toBeInstanceOf(WorkspaceCreationUncertain);
+});
+
+test('reposts an unchanged Codex workspace intent when preparation is retried', async () => {
+  const request = vi.fn().mockImplementation(() => Promise.resolve(Response.json({ id: 'prepared-thread', title: 'Prepared thread' })));
+  vi.stubGlobal('fetch', request);
+  const creation = { project_id: 'website', checkout_branch: 'release', creation_id: 'f6940d82-c96d-4e36-8dd5-ebd63a4999c4' };
+
+  await createFesnyngCodexThread('http://workspace.test/api/organizations/org/agents/agent/codex', 'csrf-example', creation);
+  await createFesnyngCodexThread('http://workspace.test/api/organizations/org/agents/agent/codex', 'csrf-example', creation);
+
+  expect(request.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string))).toEqual([creation, creation]);
+});
+
+test('keeps a malformed Codex creation receipt recoverable with its original identity', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ title: 'Receipt without a native id' })));
+  const creation = { creation_id: 'f6940d82-c96d-4e36-8dd5-ebd63a4999c4' };
+
+  await expect(createFesnyngCodexThread('http://workspace.test/api/organizations/org/agents/agent/codex', 'csrf-example', creation)).rejects.toMatchObject({
+    creationId: creation.creation_id,
+  });
 });

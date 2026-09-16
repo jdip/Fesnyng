@@ -36,6 +36,9 @@ def native_policy(
     }
 
 
+_WORKSPACE_CONTEXT = "The host prepared this thread workspace. No user task has been submitted."
+
+
 class CodexRuntime:
     """Expose only App Server operations; Docker remains lifecycle owner."""
 
@@ -151,8 +154,13 @@ class CodexRuntime:
         *,
         directory: str | None = None,
         metadata: dict[str, str] | None = None,
+        creation_id: str | None = None,
+        repository_url: str | None = None,
+        checkout_branch: str | None = None,
     ) -> dict[str, Any]:
-        del metadata  # App Server has no durable caller metadata field.
+        del metadata, creation_id, repository_url, checkout_branch
+        # App Server has no durable caller metadata field. The Docker runtime
+        # prepared and reserved this exact directory before reaching this seam.
         agent = self.runtime.store.agent(organization_id, agent_id)
         if not agent["applied_envelope"]:
             raise RuntimeUnavailable("Agent configuration is not applied")
@@ -162,7 +170,8 @@ class CodexRuntime:
         if workspace != envelope.configuration.workspace:
             raise ValueError("Workspace is not assigned to this agent")
         directory = directory or f"/workspace/{workspace}/threads/{uuid4().hex}"
-        if not directory.startswith(f"/workspace/{workspace}/"):
+        employee_root = str(self.runtime.employee_workspace_root(organization_id, agent_id))
+        if not directory.startswith((f"/workspace/{workspace}/", employee_root + "/threads/")):
             raise ValueError("Workspace directory is not assigned to this agent")
         await self.runtime.docker("exec", self.runtime.name(agent_id), "mkdir", "-p", directory)
         receipt = await self.call(
@@ -179,13 +188,8 @@ class CodexRuntime:
         thread_id = thread.get("id") if isinstance(thread, Mapping) else None
         if not isinstance(thread, Mapping) or not isinstance(thread_id, str) or not thread_id:
             raise RuntimeUnavailable("Codex thread creation receipt is invalid")
-        _verify_policy(receipt, native_policy(envelope, []))
-        if receipt.get("cwd") != directory or thread.get("cwd") != directory:
-            raise RuntimeUnavailable("Codex thread workspace receipt is invalid")
-        self.started_policies[(organization_id, agent_id, thread_id)] = (
-            await self.transport.connection_id(organization_id, agent_id),
-            native_policy(envelope, []),
-        )
+        policy = native_policy(envelope, [])
+        _verify_workspace_receipt(receipt, thread_id, directory, policy, "creation")
         native_title = thread.get("title") if isinstance(thread, Mapping) else None
         if not isinstance(native_title, str) or not native_title:
             native_title = title
@@ -197,7 +201,88 @@ class CodexRuntime:
             native_title,
             runtime_type="codex",
         )
+        # `thread/start` establishes a native identity but no durable rollout.
+        # Persist that identity before initialization so a lost inject response can
+        # be safely recovered without ever starting another thread.
+        await self.initialize_workspace_context(
+            organization_id, agent_id, thread_id, directory, envelope
+        )
         return {"id": thread_id, "title": native_title, "directory": directory}
+
+    async def initialize_workspace_context(
+        self,
+        organization_id: str,
+        agent_id: str,
+        thread_id: str,
+        directory: str,
+        envelope: HostAgentConfiguration,
+    ) -> None:
+        """Persist the factual host workspace context for a newly started thread."""
+        policy = native_policy(envelope, [])
+        await self._inject_workspace_context(organization_id, agent_id, thread_id)
+        await self._resume_workspace_context(
+            organization_id, agent_id, thread_id, directory, policy
+        )
+
+    async def recover_workspace_context(
+        self,
+        organization_id: str,
+        agent_id: str,
+        thread_id: str,
+        directory: str,
+        envelope: HostAgentConfiguration,
+    ) -> None:
+        """Resume one discovered thread, adding context only when its rollout is absent."""
+        policy = native_policy(envelope, [])
+        try:
+            await self._resume_workspace_context(
+                organization_id, agent_id, thread_id, directory, policy
+            )
+            return
+        except RuntimeUnavailable as error:
+            if str(error) != f"no rollout found for thread id {thread_id}":
+                raise
+        await self._inject_workspace_context(organization_id, agent_id, thread_id)
+        await self._resume_workspace_context(
+            organization_id, agent_id, thread_id, directory, policy
+        )
+
+    async def _inject_workspace_context(
+        self, organization_id: str, agent_id: str, thread_id: str
+    ) -> None:
+        await self.transport.call(
+            organization_id,
+            agent_id,
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": _WORKSPACE_CONTEXT}],
+                    }
+                ],
+            },
+        )
+
+    async def _resume_workspace_context(
+        self,
+        organization_id: str,
+        agent_id: str,
+        thread_id: str,
+        directory: str,
+        policy: Mapping[str, Any],
+    ) -> None:
+        # Do not use call(): its implicit resume cache can make a lost native
+        # acknowledgement look verified. This receipt is the durability proof.
+        receipt = await self.transport.call(
+            organization_id, agent_id, "thread/resume", {"threadId": thread_id, **policy}
+        )
+        _verify_workspace_receipt(receipt, thread_id, directory, policy, "workspace context")
+        self.resumed_connections[
+            (organization_id, agent_id, thread_id)
+        ] = await self.transport.connection_id(organization_id, agent_id)
 
     async def apply_policy(
         self,
@@ -265,3 +350,21 @@ def _verify_policy(receipt: Mapping[str, Any], expected: Mapping[str, Any]) -> N
         or sandbox.get("type") != "dangerFullAccess"
     ):
         raise RuntimeUnavailable("Codex did not acknowledge the required native policy")
+
+
+def _verify_workspace_receipt(
+    receipt: Mapping[str, Any],
+    thread_id: str,
+    directory: str,
+    policy: Mapping[str, Any],
+    action: str,
+) -> None:
+    thread = receipt.get("thread")
+    if (
+        not isinstance(thread, Mapping)
+        or thread.get("id") != thread_id
+        or receipt.get("cwd") != directory
+        or thread.get("cwd") != directory
+    ):
+        raise RuntimeUnavailable(f"Codex thread {action} receipt is invalid")
+    _verify_policy(receipt, policy)

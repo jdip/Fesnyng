@@ -1,5 +1,7 @@
 import type { ThreadAssistantMessage, ThreadMessage, ThreadUserMessage } from '@assistant-ui/react';
 import type { ReadonlyJSONObject } from 'assistant-stream/utils';
+import { WorkspaceCreationUncertain, WorkspacePreparationFailed, workspaceCreationFailure, type NativeThreadCreation } from '../workspace-api';
+import { projectGroupingWarning, publishProjectGroupingWarning } from '../project-grouping-warning';
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const WRITE_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
@@ -7,7 +9,7 @@ const WRITE_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 async function nativeFailure(response: Response) {
   const body: unknown = await response.clone().json().catch(() => undefined);
   const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
-  return new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+  return workspaceCreationFailure(detail, `Request failed (${response.status}).`);
 }
 
 /** Browser transport for the host-owned Codex facade and its durable receipts. */
@@ -25,6 +27,22 @@ export function createFesnyngCodexFetch(csrfToken: string, fetchImpl: FetchLike 
       return response;
     });
   };
+}
+
+/** Prepare one Codex thread before the conversation runtime opens it. */
+export async function createFesnyngCodexThread(baseUrl: string, csrfToken: string, creation: NativeThreadCreation) {
+  try {
+    const response = await createFesnyngCodexFetch(csrfToken)(`${baseUrl.replace(/\/$/, '')}/session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(creation),
+    });
+    const receipt: unknown = await response.json();
+    if (!receipt || typeof receipt !== 'object' || typeof (receipt as Record<string, unknown>).id !== 'string') throw new Error('Codex thread receipt is invalid.');
+    publishProjectGroupingWarning(receipt);
+    return { id: (receipt as Record<string, string>).id, groupingWarning: projectGroupingWarning(receipt) };
+  } catch (cause) {
+    if (cause instanceof WorkspaceCreationUncertain || cause instanceof WorkspacePreparationFailed) throw cause;
+    throw new WorkspaceCreationUncertain('Thread preparation may have started. Check this preparation again to recover its result.', creation.creation_id);
+  }
 }
 
 export type CodexHistory = {

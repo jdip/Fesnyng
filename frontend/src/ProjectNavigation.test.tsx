@@ -81,6 +81,36 @@ test('moves an existing Ungrouped thread into a Project without changing its nat
   await waitFor(() => expect(request).toHaveBeenCalledWith('/api/organizations/org/agents/junior/sessions/loose/project', expect.objectContaining({ method: 'PUT', headers: expect.objectContaining({ 'X-CSRF-Token': 'csrf-example' }), body: JSON.stringify({ project_id: 'website' }) })));
 });
 
+test('uses an optional branch override while retaining the Project checkout as the default', async () => {
+  const request = vi.fn(async (input: string) => {
+    if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: 'https://example.test/website.git', default_checkout_branch: 'test', archived: false }]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [] });
+    if (input.endsWith('/sessions')) return Response.json([]);
+    throw new Error(`Unexpected ${input}`);
+  });
+  vi.stubGlobal('fetch', request);
+  const create = vi.fn();
+  const detailsTarget = document.body.appendChild(document.createElement('div'));
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} onOpenThread={vi.fn()} onNewThread={create} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Website' }));
+  const details = await screen.findByRole('region', { name: 'Website project' });
+  fireEvent.click(within(details).getByRole('button', { name: 'New thread' }));
+  expect(await screen.findByText('This thread will prepare an independent workspace from the Project default checkout test.')).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Starting branch'), { target: { value: 'release' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(create).toHaveBeenCalledWith({ agent: 'junior', project: 'website', checkoutBranch: 'release' });
+});
+
+test('leaves the optional branch override out of employee-first Project creation', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: 'https://example.test/website.git', default_checkout_branch: 'test', archived: false }])));
+  const start = vi.fn();
+  render(<EmployeeNewThreadChooser organization="org" agent={agents[0]} onStart={start} onCancel={vi.fn()} />);
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'website' } });
+  expect(await screen.findByText('This thread will prepare an independent workspace from the Project default checkout test.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(start).toHaveBeenCalledWith({ project: 'website' });
+});
+
 test('keeps Project search visible and saves an empty optional description as null', async () => {
   const request = vi.fn(async (input: string, init: RequestInit = {}) => {
     if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]);

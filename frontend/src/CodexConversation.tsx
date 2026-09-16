@@ -5,6 +5,7 @@ import { Thread } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
 import { applyCodexEvent, createFesnyngCodexFetch, projectCodexHistory, type CodexEvent, type CodexHistory } from './lib/codex-client';
 import { errorMessage } from './workspace-api';
+import { type NativeThreadCreation } from './workspace-api';
 import { publishProjectGroupingWarning } from './project-grouping-warning';
 import { InlineComposer } from './InlineComposer';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
@@ -22,9 +23,10 @@ export type CodexConversationProps = {
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
   newThreadRequest?: number;
-  projectId?: string | null;
+  creation?: NativeThreadCreation;
   projectLabels?: Readonly<Record<string, string>>;
   onNewThreadStarted?: (request: number) => void;
+  onNewThreadFailed?: (request: number, error: unknown) => void;
   threadPageSize?: number;
   onThreadSelect?: () => void;
   /** A host snapshot of an original Codex thread. No native interaction may be rendered. */
@@ -65,7 +67,7 @@ const writableCodexSessions = (value: unknown[]) => value.filter((entry) => {
 });
 
 /** The maintained remote-thread-list boundary over host-owned Codex threads. */
-export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string, projectId?: string | null): RemoteThreadListAdapter {
+export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string, creation?: NativeThreadCreation): RemoteThreadListAdapter {
   const request = createFesnyngCodexFetch(csrfToken);
   const read = async (path: string) => request(`${base(baseUrl)}${path}`).then((response) => response.json());
   return {
@@ -76,7 +78,7 @@ export function createCodexThreadListAdapter(baseUrl: string, csrfToken: string,
     },
     async fetch(threadId) { return metadata(sessionRecord(await read(`/session/${encodeURIComponent(threadId)}`))); },
     async initialize() {
-      const response = await request(`${base(baseUrl)}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(projectId ? { project_id: projectId } : {}) });
+      const response = await request(`${base(baseUrl)}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(creation ?? {}) });
       const receipt: unknown = await response.json();
       publishProjectGroupingWarning(receipt);
       const created = sessionRecord(receipt);
@@ -255,17 +257,20 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 }
 
 function CodexConversationView(props: CodexConversationProps) {
-  const { newThreadRequest, onError, onNewThreadStarted } = props;
+  const { newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted } = props;
   const [historyNotice, setHistoryNotice] = useState('');
-  const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.projectId), [props.baseUrl, props.csrfToken, props.projectId]);
+  const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
   const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: props.readOnly, onHistoryNotice: setHistoryNotice }); }, [props.baseUrl, props.csrfToken, props.onError, props.readOnly, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (props.readOnly || newThreadRequest === undefined || completed.current === newThreadRequest) return;
     const request = newThreadRequest;
-    void runtime.threads.switchToNewThread().then(() => { completed.current = request; onNewThreadStarted?.(request); }).catch((cause: unknown) => onError?.(cause));
-  }, [newThreadRequest, onError, onNewThreadStarted, props.readOnly, runtime]);
+    void runtime.threads.switchToNewThread().then(() => { completed.current = request; onNewThreadStarted?.(request); }).catch((cause: unknown) => {
+      if (onNewThreadFailed) onNewThreadFailed(request, cause);
+      else onError?.(cause);
+    });
+  }, [newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, props.readOnly, runtime]);
   const list = <ThreadList showNew={false} allowDelete={false} readOnly={props.readOnly} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
   const components = {
     ...(props.readOnly ? { Composer: FrozenThreadNotice } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),

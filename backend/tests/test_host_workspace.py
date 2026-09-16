@@ -15,7 +15,11 @@ from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
-from fesnyng_backend.host_runtime import RuntimeUnavailable
+from fesnyng_backend.host_runtime import (
+    RuntimeUnavailable,
+    WorkspaceCreationUncertain,
+    WorkspacePreparationFailed,
+)
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.host_workspace import Fork, QuestionReply, SessionUpdate, Workspace
 from fesnyng_backend.host_workspace_routes import _event_session, events, router
@@ -31,6 +35,8 @@ class Native:
         self.questions = [{"id": "q_main", "sessionID": "ses_main", "questions": []}]
         self.moves: list[dict[str, object]] = []
         self.download_content = b"artifact"
+        self.creation_kwargs: list[dict[str, str]] = []
+        self.creation_error: RuntimeUnavailable | None = None
 
     def lock(self, agent_id):
         return asyncio.Lock()
@@ -71,7 +77,10 @@ class Native:
             stream(),
         )
 
-    async def create_session(self, organization_id, agent_id, title, workspace):
+    async def create_session(self, organization_id, agent_id, title, workspace, **kwargs):
+        if self.creation_error is not None:
+            raise self.creation_error
+        self.creation_kwargs.append(kwargs)
         return {"id": "ses_created", "title": title, "directory": f"/workspace/{workspace}/created"}
 
     async def fork_workspace(self, organization_id, agent_id, source_directory):
@@ -456,6 +465,49 @@ def test_workspace_facade_scopes_native_history_and_persists_text_prompt(tmp_pat
             created = await client.post(base, json={})
             assert created.status_code == 201 and created.json()["title"] == "New thread"
             assert created.json()["directory"] == "/workspace/assigned/created"
+            creation_id = str(uuid4())
+            prepared = await client.post(
+                base,
+                json={
+                    "creation_id": creation_id,
+                    "repository_url": "https://example.test/repository.git",
+                    "checkout_branch": "test",
+                },
+            )
+            assert prepared.status_code == 201
+            assert native.creation_kwargs[-1] == {
+                "creation_id": creation_id,
+                "repository_url": "https://example.test/repository.git",
+                "checkout_branch": "test",
+            }
+            uncertain_id = str(uuid4())
+            native.creation_error = WorkspaceCreationUncertain(uncertain_id, "reconcile")
+            uncertain = await client.post(base, json={"creation_id": uncertain_id})
+            assert uncertain.status_code == 503
+            assert uncertain.json() == {
+                "detail": {
+                    "code": "workspace_creation_uncertain",
+                    "creation_id": uncertain_id,
+                    "detail": "reconcile",
+                }
+            }
+            preparation_id = str(uuid4())
+            native.creation_error = WorkspacePreparationFailed(
+                preparation_id, "Checkout branch 'missing' is unavailable"
+            )
+            rejected = await client.post(base, json={"creation_id": preparation_id})
+            assert rejected.status_code == 503
+            assert rejected.json() == {
+                "detail": {
+                    "code": "workspace_preparation_failed",
+                    "creation_id": preparation_id,
+                    "detail": "Checkout branch 'missing' is unavailable",
+                }
+            }
+            native.creation_error = RuntimeUnavailable("Checkout branch 'missing' is unavailable")
+            unavailable = await client.post(base, json={"creation_id": str(uuid4())})
+            assert unavailable.status_code == 503
+            assert unavailable.json() == {"detail": "Checkout branch 'missing' is unavailable"}
             listed = await client.get(base)
             assert listed.status_code == 200 and listed.json()[0]["id"] == "ses_main"
             status = await client.get(f"{base}/status")

@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -58,10 +59,6 @@ class ThreadProjectsResponse(Contract):
     threads: list[dict[str, str]]
 
 
-class RepositoryWorkspaceUnavailable(ValueError):
-    """Repository-backed native creation belongs to the workspace preparation slice."""
-
-
 @contextmanager
 def _domain_errors() -> Iterator[None]:
     try:
@@ -94,17 +91,6 @@ def require_active_project(request: Request, organization_id: str, project_id: s
     project = auth.get_store(request).project_for(organization_id, project_id)
     if project.archived:
         raise ValueError("Project is not available for new thread grouping.")
-    return project
-
-
-def require_project_for_native_session_create(
-    request: Request, organization_id: str, project_id: str
-) -> Project:
-    project = require_active_project(request, organization_id, project_id)
-    if project.target_repository_url is not None:
-        raise RepositoryWorkspaceUnavailable(
-            "Repository-backed Project threads require workspace preparation support."
-        )
     return project
 
 
@@ -198,6 +184,145 @@ def project_id_for_native_session_create(body: object) -> str | None:
         return str(UUID(str(value)))
     except ValueError:
         raise HTTPException(422, "Project id must be a UUID") from None
+
+
+async def prepare_native_session_create(
+    request: Request, organization_id: str, agent_id: str, body: object
+) -> str | None:
+    """Resolve a Project-owned checkout without exposing host workspace controls to browsers."""
+
+    if not isinstance(body, dict):
+        return None
+    creation_id = body.get("creation_id")
+    if creation_id is not None:
+        try:
+            creation_id = str(UUID(str(creation_id)))
+        except ValueError:
+            raise HTTPException(422, "Creation id must be a UUID") from None
+        body["creation_id"] = creation_id
+    if "repository_url" in body or "directory" in body or "requested_checkout_branch" in body:
+        _preparation_failure(
+            creation_id, "Native session creation does not accept a repository or directory"
+        )
+    try:
+        project_id = project_id_for_native_session_create(body)
+    except HTTPException as error:
+        _preparation_failure(creation_id, str(error.detail))
+    checkout_requested = "checkout_branch" in body
+    checkout_branch = body.pop("checkout_branch", None)
+    if checkout_requested and not isinstance(checkout_branch, str):
+        _preparation_failure(creation_id, "Checkout branch must be a string")
+    if checkout_requested:
+        checkout_branch = checkout_branch.strip()
+        if not checkout_branch:
+            _preparation_failure(creation_id, "Checkout branch must not be empty")
+
+    existing = (
+        await workspace_creation(request, organization_id, agent_id, body["creation_id"])
+        if creation_id is not None
+        else None
+    )
+    if existing is not None:
+        _apply_workspace_creation_snapshot(body, existing, project_id, checkout_branch)
+        return project_id
+
+    body["project_id"] = project_id
+    body["requested_checkout_branch"] = checkout_branch
+    if project_id is None:
+        if checkout_requested:
+            _preparation_failure(
+                creation_id, "Checkout branch requires a repository-backed Project"
+            )
+        return None
+
+    try:
+        project = require_active_project(request, organization_id, project_id)
+    except (LookupError, ValueError) as error:
+        _preparation_failure(creation_id, str(error))
+    if project.target_repository_url is None:
+        if checkout_requested:
+            _preparation_failure(
+                creation_id, "Checkout branch requires a repository-backed Project"
+            )
+        return project_id
+
+    if creation_id is None:
+        raise HTTPException(422, "Repository-backed Project threads require a creation id")
+    selected_branch = checkout_branch or project.default_checkout_branch
+    if not isinstance(selected_branch, str) or not selected_branch.strip():
+        _preparation_failure(creation_id, "Repository-backed Project requires a checkout branch")
+    body["repository_url"] = project.target_repository_url
+    body["checkout_branch"] = selected_branch.strip()
+    return project_id
+
+
+def _preparation_failure(creation_id: str | None, detail: str) -> NoReturn:
+    """Only a known, retryable creation id can safely be replaced by the browser."""
+
+    if creation_id is None:
+        raise HTTPException(422, detail)
+    raise HTTPException(
+        503,
+        {
+            "code": "workspace_preparation_failed",
+            "creation_id": creation_id,
+            "detail": detail,
+        },
+    )
+
+
+async def workspace_creation(
+    request: Request, organization_id: str, agent_id: str, creation_id: str
+) -> dict[str, object] | None:
+    """Read the host-owned create receipt before current Project settings are consulted."""
+
+    from fesnyng_backend.control_host_routes import host_client, host_errors
+
+    client = host_client(request)
+    try:
+        with host_errors():
+            assigned = client.agents.get_agent(organization_id, agent_id)
+            creation = await client.request(
+                organization_id,
+                assigned["host_id"],
+                f"/agents/{agent_id}/workspace-creations/{creation_id}",
+            )
+    except HTTPException as error:
+        if error.status_code == 404:
+            return None
+        raise
+    if not isinstance(creation, dict):
+        raise HTTPException(503, "Agent host returned an invalid workspace creation receipt")
+    return creation
+
+
+def _apply_workspace_creation_snapshot(
+    body: dict[object, object],
+    creation: dict[str, object],
+    project_id: str | None,
+    checkout_branch: str | None,
+) -> None:
+    """Use an immutable host reservation only when the browser retried the same intent."""
+
+    stored_project = creation.get("project_id")
+    stored_override = creation.get("requested_checkout_branch")
+    if stored_project != project_id or stored_override != checkout_branch:
+        raise HTTPException(
+            409, "Workspace creation retry does not match its original Project request"
+        )
+    repository_url = creation.get("repository_url")
+    resolved_branch = creation.get("checkout_branch")
+    if (repository_url is None) != (resolved_branch is None):
+        raise HTTPException(503, "Agent host returned an invalid workspace creation receipt")
+    if repository_url is not None and (
+        not isinstance(repository_url, str) or not isinstance(resolved_branch, str)
+    ):
+        raise HTTPException(503, "Agent host returned an invalid workspace creation receipt")
+    body["project_id"] = project_id
+    body["requested_checkout_branch"] = checkout_branch
+    if repository_url is not None:
+        body["repository_url"] = repository_url
+        body["checkout_branch"] = resolved_branch
 
 
 async def attach_created_native_session_project(
