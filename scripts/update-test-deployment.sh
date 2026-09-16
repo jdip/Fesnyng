@@ -72,7 +72,13 @@ activate() {
     stage=acquire; write_curl_config
     if maintenance acquire; then :; else outcome=$?; [[ $outcome == 2 ]] && { log deferred "$target_revision" 'reason=host-busy'; return; }; return "$outcome"; fi
   fi
-  stage=activate; ln -s "$release" "$DEPLOY_BASE/current.next"; mv -Tf "$DEPLOY_BASE/current.next" "$DEPLOY_BASE/current"
+  stage=activate
+  if [[ -e $DEPLOY_BASE/current.next && ! -L $DEPLOY_BASE/current.next ]]; then
+    log failed "$target_revision" 'reason=unexpected-activation-path'
+    return 1
+  fi
+  ln -sfnT "$release" "$DEPLOY_BASE/current.next"
+  mv -Tf "$DEPLOY_BASE/current.next" "$DEPLOY_BASE/current"
   stage=restart; log start "$target_revision" 'stage=restart'; systemctl --user restart fesnyng-test-control.service fesnyng-test-host.service; log complete "$target_revision" 'stage=restart'
   stage=health; if ! health_has_revision "$CONTROL_PORT" || ! health_has_revision "$HOST_PORT"; then return 1; fi
   [[ $initial == true ]] || { stage=release; maintenance release; }
