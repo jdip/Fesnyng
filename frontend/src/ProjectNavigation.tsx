@@ -1,5 +1,7 @@
 import { createPortal } from 'react-dom';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PlusIcon } from 'lucide-react';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from './components/ui/dialog';
 import { agentPath, api, errorMessage, type Agent, type Project } from './workspace-api';
 import { WorkspaceInspectionList, type WorkspaceUpdate } from './WorkspaceInspection';
 
@@ -95,8 +97,12 @@ export function ProjectNavigation({ organization, agents, csrf, manager, onOpenT
       const saved = await api<Project>(`/organizations/${organization}/projects${project ? `/${project.id}` : ''}`, { method: project ? 'PATCH' : 'POST', csrf, body });
       setProjects((items) => [...items.filter((item) => item.id !== saved.id), saved]);
       setSelected(saved.id);
+      setError('');
       onChanged?.();
-    } catch (cause) { setError(errorMessage(cause)); }
+    } catch (cause) {
+      setError(errorMessage(cause));
+      throw cause;
+    }
   };
   const lifecycleProject = async (project: Project, action: 'archive' | 'restore' | 'delete') => {
     try {
@@ -198,7 +204,21 @@ function NewProjectThread({ project, agents, onClose, onStart }: { project?: Pro
 function ProjectEditor({ trigger, project, onSave }: { trigger: string; project?: Project; onSave: (draft: ProjectDraft, project?: Project) => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(() => projectDraft(project));
-  if (!open) return <button className="app-button" onClick={() => setOpen(true)}>{trigger}</button>;
+  const [saveError, setSaveError] = useState('');
+  const nameInput = useRef<HTMLInputElement>(null);
   const repositoryConfigured = Boolean(draft.target_repository_url?.trim());
-  return <section className="app-panel project-editor" aria-label={trigger}><h3>{trigger}</h3><form className="app-form" onSubmit={(event) => { event.preventDefault(); void onSave(draft, project).then(() => setOpen(false)); }}><label>Name<input className="app-input" required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label><label>Description<textarea className="app-textarea" value={draft.description ?? ''} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label><label>Target repository <span className="muted">Optional</span><input className="app-input" value={draft.target_repository_url ?? ''} onChange={(event) => setDraft({ ...draft, target_repository_url: event.target.value || null })} /></label><label>Default checkout <span className="muted">Required with a repository</span><input className="app-input" required={repositoryConfigured} value={draft.default_checkout_branch ?? ''} onChange={(event) => setDraft({ ...draft, default_checkout_branch: event.target.value || null })} /></label><p className="muted">Repository settings guide new workspaces only. Existing threads keep their current workspace.</p><div className="app-actions"><button type="button" className="app-button" onClick={() => setOpen(false)}>Cancel</button><button className="app-button primary">Save Project</button></div></form></section>;
+  const creating = !project;
+  return <Dialog open={open} onOpenChange={(next) => {
+    setOpen(next);
+    if (next) {
+      setDraft(projectDraft(project));
+      setSaveError('');
+    }
+  }}><DialogTrigger asChild><button className={creating ? 'app-button quiet project-create-trigger' : 'app-button'} aria-label={trigger} title={trigger}>{creating ? <PlusIcon aria-hidden="true" size={16} /> : trigger}</button></DialogTrigger>
+    <DialogContent aria-label={trigger} className="project-editor-modal" onOpenAutoFocus={(event) => { event.preventDefault(); nameInput.current?.focus(); }}><DialogHeader><DialogTitle>{trigger}</DialogTitle></DialogHeader><form className="app-form" onSubmit={(event) => {
+      event.preventDefault();
+      setSaveError('');
+      void onSave(draft, project).then(() => setOpen(false)).catch((cause: unknown) => setSaveError(errorMessage(cause)));
+    }}><label>Name<input ref={nameInput} className="app-input" required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label><label>Description<textarea className="app-textarea" value={draft.description ?? ''} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label><label>Target repository <span className="muted">Optional</span><input className="app-input" value={draft.target_repository_url ?? ''} onChange={(event) => setDraft({ ...draft, target_repository_url: event.target.value || null })} /></label><label>Default checkout <span className="muted">Required with a repository</span><input className="app-input" required={repositoryConfigured} value={draft.default_checkout_branch ?? ''} onChange={(event) => setDraft({ ...draft, default_checkout_branch: event.target.value || null })} /></label><p className="muted">Repository settings guide new workspaces only. Existing threads keep their current workspace.</p>{saveError && <p className="app-error" role="alert">{saveError}</p>}<div className="app-actions"><DialogClose asChild><button type="button" className="app-button">Cancel</button></DialogClose><button className="app-button primary">Save Project</button></div></form>
+    </DialogContent></Dialog>;
 }
