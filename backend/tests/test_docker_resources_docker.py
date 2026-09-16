@@ -394,13 +394,24 @@ def test_employee_compose_resource_is_registered_without_owning_its_thread_lifet
                     assert updated.json()["route_status"]["status"] == "configured"
                     assert updated.json()["route_status"]["network_reachability"] == "unverified"
                     async with httpx.AsyncClient(trust_env=False) as application:
-                        result = await application.get(endpoint, timeout=20)
-                        assert result.status_code == 200
-                        assert result.text == (
-                            "employee application"
-                            if kind == "employee"
-                            else "shared compose evidence"
-                        )
+                        # Serve configuration is not a listener-readiness receipt.
+                        # The initial live route can still be establishing its
+                        # connection path; require an actual response within a
+                        # bounded startup window, never weaken response checks.
+                        for attempt in range(12):
+                            try:
+                                result = await application.get(endpoint, timeout=5)
+                                assert result.status_code == 200
+                                assert result.text == (
+                                    "employee application"
+                                    if kind == "employee"
+                                    else "shared compose evidence"
+                                )
+                                break
+                            except httpx.TransportError:
+                                if attempt == 11:
+                                    raise
+                                await asyncio.sleep(0.25)
 
             # A native archive never owns the external service's lifecycle.
             archived = await client.patch(
