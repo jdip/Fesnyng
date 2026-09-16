@@ -117,7 +117,14 @@ button:disabled { cursor: default; opacity: .5; }
 .project-thread-list { border-top: 1px solid #e4e9e0; }
 .project-thread-row { display: flex; align-items: center; gap: 12px; padding: 11px 6px; border-bottom: 1px solid #e8ece4; }
 .project-thread-open { flex: 1; min-width: 0; border: 0; background: transparent; text-align: left; color: #2d422f; }
-.project-thread-open small { display: block; margin-top: 3px; color: #75816e; }
+.project-sidebar-threads { display: grid; gap: 3px; min-width: 0; }
+.project-sidebar-thread { display: grid; gap: 2px; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; text-align: left; color: #2d422f; }
+.project-sidebar-thread:hover { background: #e9ede5; }
+.project-sidebar-thread[aria-current=page] { background: #e1e9dc; border-color: #cedcc8; }
+.project-sidebar-thread:focus-visible,.project-thread-open:focus-visible { outline: 2px solid #537a5f; outline-offset: -2px; }
+.project-sidebar-thread > span,.project-thread-open > span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.project-sidebar-thread small,.project-thread-open small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #75816e; font-size: 11px; line-height: 16px; }
+.project-thread-open small { margin-top: 3px; }
 .project-thread-row select { max-width: 170px; padding: 6px; border: 1px solid #d8dfd5; border-radius: 6px; background: #fff; color: #394b38; }
 .project-thread-creator { margin: 12px 0; }
 .project-editor { margin-top: 12px; }

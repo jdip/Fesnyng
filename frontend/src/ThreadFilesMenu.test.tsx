@@ -42,3 +42,27 @@ test('opens files for a non-selected thread without replacing the conversation o
   await waitFor(() => expect(document.activeElement).toBe(menu));
   expect((composer as HTMLTextAreaElement).value).toBe('Unsent draft');
 });
+
+test('opens files for the active thread from the header without losing its draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session') ? [{ id: 'session-active', title: 'Active conversation', time: {} }]
+      : url.includes('/session/session-active/message') ? [{
+        info: { id: 'message-one', role: 'user', sessionID: 'session-active', time: { created: 1 } },
+        parts: [{ id: 'part-one', messageID: 'message-one', sessionID: 'session-active', type: 'text', text: 'Keep this conversation visible.' }],
+      }] : url.endsWith('/session/session-active') ? { id: 'session-active', title: 'Active conversation', time: {} } : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+  render(<Conversation baseUrl="http://localhost/api/organizations/org/agents/agent/opencode" csrfToken="csrf-example" sessionId="session-active" showThreadList={false} />);
+  await screen.findByText('Keep this conversation visible.');
+  const composer = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Unsent draft' } });
+  const files = await screen.findByRole('button', { name: 'Files' });
+  fireEvent.click(files);
+  expect(await screen.findByRole('complementary', { name: 'Workspace files' })).toBeTruthy();
+  expect(screen.getByText('session-active')).toBeTruthy();
+  expect((composer as HTMLTextAreaElement).value).toBe('Unsent draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Close files' }));
+  await waitFor(() => expect(document.activeElement).toBe(files));
+});

@@ -473,7 +473,8 @@ def test_workspace_facade_reaches_the_real_host_router_with_agent_scope(
         ):
             raise AssertionError((organization_id, agent_id, path, method, body, directory))
 
-        async def create_session(self, _org, _agent, title, _workspace):
+        async def create_session(self, _org, _agent, title, _workspace, *, automatic_title):
+            assert automatic_title is True
             return {"id": "ses_created", "title": title}
 
     host_app = FastAPI()

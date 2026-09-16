@@ -17,8 +17,9 @@ import { ConversationDeliveryRecovery, ConversationMessageFooter } from './Conve
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
+import { WorkspaceFileLinks } from './WorkspaceFileLinks';
 import { ThreadPolicyDialog } from './ThreadPolicyDialog';
-import { ThreadInformation } from './ThreadInformation';
+import { ThreadInformation, type ThreadWorkspace } from './ThreadInformation';
 import { ThreadWorkspaceContext, useThreadWorkspace } from './thread-context';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
@@ -32,6 +33,7 @@ import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-ic
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
 import { type NativeThreadCreation } from './workspace-api';
+import { useThreadFiles } from './thread-files';
 
 export type ConversationProps = {
   /** Absolute `/api/organizations/{org}/agents/{agent}/opencode` facade URL. */
@@ -44,6 +46,7 @@ export type ConversationProps = {
   onSessionChange?: (sessionId: string | undefined) => void;
   /** Receives adapter/runtime failures without inventing a conversation reply. */
   onError?: (error: unknown) => void | Promise<void>;
+  onTitleChanged?: () => void;
   /** Lets the shell place agent navigation beside or above the runtime thread list. */
   showThreadList?: boolean;
   /** Reloads the maintained thread inventory without remounting the composer. */
@@ -65,6 +68,7 @@ export type ConversationProps = {
   /** A managed workspace is absent or changing; readable history remains mounted. */
   executionBlocked?: boolean;
   executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
+  workspace?: ThreadWorkspace;
 };
 
 type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
@@ -86,6 +90,7 @@ export function Conversation({
   sessionId,
   onSessionChange,
   onError,
+  onTitleChanged,
   showThreadList = true,
   refreshKey = 0,
   threadListTarget,
@@ -99,24 +104,15 @@ export function Conversation({
   readOnly = false,
   executionBlocked = false,
   executionBlockedState,
+  workspace,
 }: ConversationProps) {
-  const [files, setFiles] = useState<ThreadMenuTarget>();
-  const [fileFocusRequest, setFileFocusRequest] = useState(0);
   const [permissions, setPermissions] = useState<ThreadMenuTarget>();
   const permissionTrigger = useRef<HTMLButtonElement | null>(null);
-  const fileTrigger = useRef<HTMLButtonElement | null>(null);
   const conversationElement = useRef<HTMLElement>(null);
-  const openFiles = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
-    fileTrigger.current = trigger;
-    setFiles(target);
-    setFileFocusRequest((current) => current + 1);
-    onThreadSelect?.();
-  };
-  const closeFiles = () => {
-    setFiles(undefined);
-    fileTrigger.current?.focus();
-    if (document.activeElement !== fileTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
-  };
+  const { files, fileFocusRequest, openFiles, closeFiles } = useThreadFiles({
+    onOpened: onThreadSelect,
+    restoreFocus: () => conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus(),
+  });
   const openPermissions = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
     permissionTrigger.current = trigger;
     setPermissions(target);
@@ -178,21 +174,35 @@ export function Conversation({
   }), [executionBlocked, executionBlockedState, executionDisabled, onError, readOnly, runtime]);
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
+    <AssistantRuntimeProvider runtime={runtime}><WorkspaceFileLinks baseUrl={baseUrl} disabled={Boolean(executionDisabled)} openFiles={openFiles}>
       <ThreadWorkspaceProvider baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey}>
+      <OpenCodeTitleNotifier runtime={runtime} onTitleChanged={onTitleChanged} onError={onError} />
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
           {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} /></aside>}
-          <div className="fesnyng-thread-pane">{!executionDisabled && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
-          {!executionDisabled && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
+          <div className="fesnyng-thread-pane"><ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} workspace={workspace} interactionDisabled={executionDisabled} onOpenFiles={executionDisabled ? undefined : openFiles} /><Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
+          {!executionDisabled && files && <ThreadArtifactPanel key={files.path === undefined ? files.id : `${files.id}:${fileFocusRequest}`} initialPath={files.path} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {!executionDisabled && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>
       </ThreadWorkspaceProvider>
-    </AssistantRuntimeProvider>
+    </WorkspaceFileLinks></AssistantRuntimeProvider>
   );
+}
+
+function OpenCodeTitleNotifier({ runtime, onTitleChanged, onError }: { runtime: ReturnType<typeof useOpenCodeRuntime>; onTitleChanged?: () => void; onError?: ConversationProps['onError'] }) {
+  const title = useOpenCodeThreadState((state) => state.session?.title);
+  const previous = useRef(title);
+  useEffect(() => {
+    if (previous.current !== undefined && title !== previous.current) {
+      void runtime.threads.reload().catch((cause: unknown) => onError?.(cause));
+      onTitleChanged?.();
+    }
+    previous.current = title;
+  }, [onError, onTitleChanged, runtime, title]);
+  return null;
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;
@@ -207,14 +217,15 @@ function ThreadWorkspaceProvider({ baseUrl, csrfToken, refreshKey, children }: P
   return <ThreadWorkspaceContext.Provider value={value}>{children}</ThreadWorkspaceContext.Provider>;
 }
 
-function ActiveThreadInformation({ runtime, baseUrl, csrfToken, refreshKey }: {
-  runtime: ReturnType<typeof useOpenCodeRuntime>; baseUrl: string; csrfToken: string; refreshKey: number;
+function ActiveThreadInformation({ runtime, baseUrl, csrfToken, refreshKey, workspace: workspaceDetails, interactionDisabled, onOpenFiles }: {
+  runtime: ReturnType<typeof useOpenCodeRuntime>; baseUrl: string; csrfToken: string; refreshKey: number; workspace?: ThreadWorkspace; interactionDisabled: boolean;
+  onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void;
 }) {
   const item = useAuiState((state) => state.threads.threadItems.find((item) => item.id === state.threads.mainThreadId));
-  const workspace = useThreadWorkspace();
+  const workspaceContext = useThreadWorkspace();
   const session = item?.externalId ?? item?.remoteId;
   if (!session || !item) return null;
-  return <ThreadInformation key={session} baseUrl={baseUrl} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={workspace?.refreshKey ?? refreshKey} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
+  return <ThreadInformation key={session} baseUrl={baseUrl} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={workspaceContext?.refreshKey ?? refreshKey} workspace={workspaceDetails} interactionDisabled={interactionDisabled} onOpenFiles={onOpenFiles ? (trigger) => onOpenFiles({ id: session, title: item.title ?? 'New thread' }, trigger) : undefined} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
 }
 
 const OpenCodeToolFallback: ToolCallMessagePartComponent = (props) => {

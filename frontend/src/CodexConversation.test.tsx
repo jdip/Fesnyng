@@ -63,6 +63,8 @@ test('mounts a Codex thread with native pending input and its streamed completio
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
   let completed = false;
+  let title = 'Investigate';
+  let sessionReads = 0;
   let historyReads = 0;
   class EventSourceStub {
     static instances: EventSourceStub[] = [];
@@ -76,7 +78,7 @@ test('mounts a Codex thread with native pending input and its streamed completio
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = input instanceof Request ? input.url : String(input);
     const request = input instanceof Request ? input : undefined;
-    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Investigate', time: {} }]));
+    if (url.endsWith('/session')) { sessionReads += 1; return new Response(JSON.stringify([{ id: 'thread-one', title, time: {} }])); }
     if (url.includes('/history')) { historyReads += 1; return new Response(JSON.stringify({ thread: { id: 'thread-one' }, turns: [{ id: 'turn-one', status: completed ? 'completed' : 'inProgress', items: completed ? [{ id: 'assistant-one', type: 'agentMessage', text: 'Done' }] : [{ id: 'user-one', type: 'userMessage', content: 'Start' }] }], historyState: 'complete' })); }
     if (url.includes('/pending?')) return new Response(JSON.stringify([
       { id: 'question-one', method: 'item/tool/requestUserInput', params: { question: 'Proceed?', questions: [{ id: 'choice', question: 'Choose', options: [{ label: 'Yes', description: 'Continue' }] }] } },
@@ -104,6 +106,12 @@ test('mounts a Codex thread with native pending input and its streamed completio
   EventSourceStub.instances[0]!.emit('open', {});
   EventSourceStub.instances[0]!.emit('open', {});
   await waitFor(() => expect(historyReads).toBeGreaterThan(1));
+  const draft = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(draft, { target: { value: 'Keep this draft.' } });
+  title = 'Workspace header';
+  EventSourceStub.instances[0]!.emit('message', { method: 'thread/name/updated', params: { threadId: 'thread-one' } });
+  await waitFor(() => expect(sessionReads).toBeGreaterThan(1));
+  expect((screen.getByRole('textbox', { name: 'Message input' }) as HTMLTextAreaElement).value).toBe('Keep this draft.');
   completed = true;
   EventSourceStub.instances[0]!.emit('message', { method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'completed', items: [{ id: 'assistant-one', type: 'agentMessage', text: 'Done' }] } } });
   expect(await screen.findByText('Done')).toBeTruthy();
@@ -163,6 +171,43 @@ test('clears a transient pending-request reload error after the host recovers', 
   expect(screen.queryByText('Agent host is unreachable')).toBeNull();
 });
 
+test('compacts completed Codex reasoning and tool activity while retaining the final reply spacing', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Inspect', time: {} }]));
+    if (url.includes('/history')) return new Response(JSON.stringify({
+      thread: { id: 'thread-one' }, historyState: 'complete', turns: [{ id: 'turn-one', status: 'completed', items: [
+        { id: 'reasoning-one', type: 'reasoning', summary: ['Inspect the workspace.'] },
+        { id: 'command-one', type: 'commandExecution', command: 'git status', status: 'completed', aggregatedOutput: 'clean', exitCode: 0 },
+        { id: 'answer-one', type: 'agentMessage', text: 'The workspace is clean.' },
+      ] }],
+    }));
+    if (url.includes('/pending?')) return new Response(JSON.stringify([]));
+    return new Response(JSON.stringify({ id: 'thread-one', title: 'Inspect', time: {} }));
+  }));
+
+  const { container } = render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="thread-one" showThreadList={false} />);
+
+  expect(await screen.findByText('The workspace is clean.')).toBeTruthy();
+  const activity = container.querySelectorAll('[data-activity-only="true"]');
+  expect(activity).toHaveLength(2);
+  for (const item of activity) {
+    const footer = item.querySelector('[data-slot="aui_assistant-message-footer"]');
+    expect(footer?.getAttribute('class')).toContain('absolute');
+    expect(footer?.getAttribute('class')).toContain('top-0');
+    expect(footer?.getAttribute('class')).toContain('end-10');
+    expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+    expect(footer?.getAttribute('class')).toContain('bg-background');
+    expect(footer?.getAttribute('class')).toContain('opacity-0');
+  }
+  const reply = screen.getByText('The workspace is clean.').closest('[data-slot="aui_assistant-message-root"]');
+  expect(reply?.getAttribute('data-activity-only')).toBeNull();
+  expect(reply?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeTruthy();
+});
+
 test('renders frozen Codex snapshot history without native write controls', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
@@ -193,6 +238,7 @@ test('renders frozen Codex snapshot history without native write controls', asyn
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
 });
 
@@ -213,5 +259,28 @@ test('keeps a removed managed Codex history mounted without native write control
   expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
+});
+
+test('opens the active Codex workspace files through the shared file facade', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/session')) return Response.json([{ id: 'thread-one', title: 'Codex release review', time: {} }]);
+    if (url.includes('/history')) return Response.json({ thread: { id: 'thread-one' }, turns: [], historyState: 'complete' });
+    if (url.includes('/pending?')) return Response.json([]);
+    if (url.includes('/codex/file/content')) return Response.json({ rootSessionID: 'thread-one', sessionID: 'thread-one', path: 'report.md', type: 'text', encoding: 'utf-8', content: 'Codex workspace evidence', size: 24, truncated: false, contentType: 'text/plain' });
+    if (url.includes('/codex/file')) return Response.json({ rootSessionID: 'thread-one', sessionID: 'thread-one', path: '', entries: [{ name: 'report.md', path: 'report.md', type: 'file', size: 24, modifiedAt: 1 }] });
+    return Response.json({ id: 'thread-one', title: 'Codex release review', time: {} });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="thread-one" showThreadList={false} />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Files' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'report.md' }));
+  expect(await screen.findByText('Codex workspace evidence')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download' }).getAttribute('href')).toBe('http://workspace.test/api/organizations/org/agents/agent/codex/file/download?sessionID=thread-one&path=report.md');
 });

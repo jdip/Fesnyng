@@ -5,7 +5,7 @@ import { resultIdentity, useThreadNotifications, type Delivery, type ThreadNotif
 import { ViewedContent } from './ViewedContent';
 import { agentPath, api, errorMessage } from './workspace-api';
 
-type DeliveryConfiguration = { organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; readOnly: boolean };
+type DeliveryConfiguration = { organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; viewerId: string; readOnly: boolean };
 type NativeMessage = { role?: string; session?: string; ids: Set<string>; clientIds: Set<string>; turnId?: string };
 
 const ConversationDeliveryContext = createContext<DeliveryConfiguration | undefined>(undefined);
@@ -31,8 +31,8 @@ export function nativeMessage(message: unknown): NativeMessage {
   return { role: typeof message.role === 'string' ? message.role : undefined, session: typeof original?.sessionID === 'string' ? original.sessionID : typeof codex?.sessionId === 'string' ? codex.sessionId : undefined, ids, clientIds, turnId: typeof codex?.turnId === 'string' ? codex.turnId : undefined };
 }
 
-export function ConversationDeliveryProvider({ organization, agent, session, csrf, onOpen, readOnly = false, children }: PropsWithChildren<{ organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; readOnly?: boolean }>) {
-  const value = useMemo<DeliveryConfiguration>(() => ({ organization, agent, session, csrf, onOpen, readOnly }), [agent, csrf, onOpen, organization, readOnly, session]);
+export function ConversationDeliveryProvider({ organization, agent, session, csrf, onOpen, viewerId, readOnly = false, children }: PropsWithChildren<{ organization: string; agent: string; session?: string; csrf: string; onOpen: (agent: string, session: string) => void; viewerId: string; readOnly?: boolean }>) {
+  const value = useMemo<DeliveryConfiguration>(() => ({ organization, agent, session, csrf, onOpen, viewerId, readOnly }), [agent, csrf, onOpen, organization, readOnly, session, viewerId]);
   return <ConversationDeliveryContext.Provider value={value}>{children}</ConversationDeliveryContext.Provider>;
 }
 
@@ -87,8 +87,9 @@ function DeliveryContext({ delivery, configuration, notifications, session, role
   const resolution = resolutionEvidence(delivery);
   const failure = delivery.state === 'failed' && delivery.outcome?.kind !== 'operator_resolution';
   const handled = failure && notifications.isAcknowledged(configuration.agent, session, delivery, 'failure_handled');
+  const showResponseAttribution = role === 'assistant' && !(delivery.author.kind === 'human' && delivery.author.id === configuration.viewerId);
   return <article className="delivery-context text-sm" aria-label="Delivery context">
-    {role === 'assistant' ? <p className="muted">In response to <strong>{delivery.author.name}</strong></p> : <p className="muted"><strong>{delivery.author.name}</strong> {delivery.author.kind === 'agent' ? 'delivered this input' : 'authored this input'}</p>}
+    {role === 'assistant' ? showResponseAttribution && <p className="muted">In response to <strong>{delivery.author.name}</strong></p> : <p className="muted"><strong>{delivery.author.name}</strong> {delivery.author.kind === 'agent' ? 'delivered this input' : 'authored this input'}</p>}
     {excerpt && <p>{delivery.payload.text.slice(0, 220)}{delivery.payload.text.length > 220 ? '…' : ''}</p>}
     {delivery.author.kind === 'agent' && delivery.author.session_id && <button className="app-button" onClick={() => configuration.onOpen(delivery.author.id, delivery.author.session_id!)}>Open source thread</button>}
     {delivery.payload.origin_id && <p className="muted">Linked to originating request {delivery.payload.origin_id.slice(0, 8)}</p>}
