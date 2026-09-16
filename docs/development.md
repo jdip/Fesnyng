@@ -108,6 +108,18 @@ the existing isolated Docker proof lifecycle: stop failed compute and retain
 diagnostics; remove successful fixtures. This is native protocol evidence, not
 authenticated model execution.
 
+### External Docker resource proof
+
+See [organization Docker access](docker-resources.md) for the dedicated-engine
+requirement. The opt-in `backend/tests/test_docker_resources_docker.py` proof runs
+on the organization work host with its local Docker socket and a freshly built
+pinned runtime image. It exercises Compose from an employee's mapped workspace,
+relative bind mounts, shared thread associations and explicit resource operations
+through the control-plane/host boundary. No model credentials are required.
+Do not use an engine containing other organizations' data. The proof reports exact
+identities, removes successful isolated fixtures, and stops failed compute while
+retaining diagnostics.
+
 ## Run locally
 
 Run the independent backend commands documented in [backend/README.md](../backend/README.md). The control plane normally listens on `127.0.0.1:8000`; each host uses a separate port and state directory. The host is independently runnable and does not require control-plane reachability for startup. Local SQLite state, credentials and runtime files stay outside Git.

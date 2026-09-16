@@ -81,6 +81,36 @@ test('keeps an unsent draft when the current organization is selected again', as
   expect(await screen.findByLabelText('Composer draft')).toHaveProperty('value', 'Keep this draft');
 });
 
+test('opens shared Resources for the selected employee without discarding its conversation draft', async () => {
+  window.history.replaceState(null, '', '/#organization=one&agent=agent-one&thread=thread-one');
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'one', name: 'First organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input === '/api/organizations/one/agents' ? [{ id: 'agent-one', organization_id: 'one', name: 'Developer', title: 'Engineering', host_id: 'host-one', reports_to_agent_id: null, desired_version: 1, applied_version: 1, configuration_status: 'applied', configuration: { execution_type: 'docker', provider: 'openai', model: 'example', profile_id: null, workspace: 'default', instructions: '', skills: [] } }]
+      : input.endsWith('/agents/agent-one/sessions/thread-one/workspace') ? { workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'ready', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread-one', repository: { state: 'absent' }, git: { kind: 'ordinary', state: 'safe', dirty: 0, untracked: 0, ignored: 0, ahead: 0 }, history: { state: 'verified' }, cleanup: { remove: { available: true }, discard: { available: true }, replace: { available: false } } }
+      : input.endsWith('/agents/agent-one/sessions') ? [{ session_id: 'thread-one', title: 'Implementation task' }]
+      : input.includes('/hosts/host-one/docker/capability') ? { enabled: false, available: false, reason: 'Docker resources are disabled for this organization host.' }
+      : input.endsWith('/hosts/host-one/docker') ? { capability: { enabled: false, available: false }, resources: [] }
+      : input.endsWith('/projects?include_archived=true') ? []
+      : input.endsWith('/thread-projects') ? { threads: [] }
+      : [];
+    return Response.json(body);
+  }));
+  render(<App />);
+
+  const draft = await screen.findByLabelText('Composer draft');
+  fireEvent.change(draft, { target: { value: 'Keep this implementation note' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Resources' }));
+  expect(await screen.findByRole('heading', { name: 'Developer resources', level: 1 })).toBeTruthy();
+  expect(await screen.findByText('Docker resources are disabled for this organization host.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Workspaces' }));
+  fireEvent.click(screen.getByRole('button', { name: /Developer/, pressed: true }));
+  expect(await screen.findByLabelText('Composer draft')).toHaveProperty('value', 'Keep this implementation note');
+});
+
 test('retries an unavailable organization role lookup when the workspace refreshes', async () => {
   let membershipRequests = 0;
   vi.stubGlobal('fetch', vi.fn(async (input: string) => {

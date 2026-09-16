@@ -12,6 +12,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ServiceName = Literal["control-plane", "agent-host"]
 
 
+class DockerCapabilitySettings(BaseModel):
+    """Explicit administrator grant of one organization-dedicated Docker engine."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: UUID
+    engine_id: str = Field(min_length=1)
+    socket_path: Path
+    employee_ids: tuple[UUID, ...] = ()
+
+    @model_validator(mode="after")
+    def require_safe_socket_path(self) -> DockerCapabilitySettings:
+        if not self.socket_path.is_absolute():
+            raise ValueError("Docker capability socket path must be absolute")
+        if not self.engine_id.strip():
+            raise ValueError("Docker capability engine id must not be blank")
+        return self
+
+
 class ServiceSettings(BaseModel):
     """Filesystem and identity inputs for one durable service instance."""
 
@@ -22,6 +41,7 @@ class ServiceSettings(BaseModel):
     state_directory: Path
     workspace_root: Path | None = None
     requested_instance_id: UUID | None = Field(default=None, alias="instance_id")
+    docker_capability: DockerCapabilitySettings | None = None
 
     @model_validator(mode="after")
     def reject_state_directory_as_database_path(self) -> ServiceSettings:
@@ -29,6 +49,8 @@ class ServiceSettings(BaseModel):
             raise ValueError("database path must not equal the state directory")
         if self.workspace_root is not None and not self.workspace_root.is_absolute():
             raise ValueError("workspace root must be an absolute path")
+        if self.docker_capability is not None and self.service != "agent-host":
+            raise ValueError("Only an agent host may configure Docker capability")
         return self
 
     @property
@@ -60,12 +82,18 @@ def settings_from_environment(service: ServiceName) -> ServiceSettings:
     )
     instance_id = os.environ.get(f"{prefix}_INSTANCE_ID")
     workspace_root = os.environ.get(f"{prefix}_WORKSPACE_ROOT")
+    docker_capability = os.environ.get(f"{prefix}_DOCKER_CAPABILITY")
     return ServiceSettings(
         service=service,
         database_path=database_path,
         state_directory=state_directory,
         instance_id=instance_id,
         workspace_root=Path(workspace_root) if workspace_root else None,
+        docker_capability=(
+            DockerCapabilitySettings.model_validate_json(docker_capability)
+            if docker_capability
+            else None
+        ),
     )
 
 

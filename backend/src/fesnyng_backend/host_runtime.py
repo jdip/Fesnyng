@@ -256,10 +256,19 @@ class DockerRuntime:
         return f"fesnyng-{self.store.instance_id}-{agent_id}"
 
     async def docker(self, *args: str, content: bytes | None = None) -> bytes:
+        return await self._docker(None, *args, content=content)
+
+    async def _docker(
+        self, socket_path: Path | None, *args: str, content: bytes | None = None
+    ) -> bytes:
         def execute() -> bytes:
             try:
+                command = ["docker"]
+                if socket_path is not None:
+                    command.extend(["--host", f"unix://{socket_path}"])
+                command.extend(args)
                 result = subprocess.run(
-                    ["docker", *args], input=content, capture_output=True, timeout=120, check=False
+                    command, input=content, capture_output=True, timeout=120, check=False
                 )
             except (OSError, subprocess.TimeoutExpired):
                 raise RuntimeUnavailable(
@@ -273,6 +282,115 @@ class DockerRuntime:
             return result.stdout
 
         return await asyncio.to_thread(execute)
+
+    async def docker_engine_id(self, socket_path: Path | None = None) -> str:
+        """Read a daemon identity without exposing endpoint details to callers."""
+        engine_id = (
+            (await self._docker(socket_path, "info", "--format", "{{.ID}}")).decode().strip()
+        )
+        if not engine_id:
+            raise RuntimeUnavailable("Docker operation unavailable; check host operations")
+        return engine_id
+
+    async def docker_capability_command(self, socket_path: Path, *args: str) -> bytes:
+        """Run a fixed argv Docker resource operation against the granted daemon."""
+        allowed = {
+            "compose",
+            "container",
+            "events",
+            "image",
+            "inspect",
+            "logs",
+            "network",
+            "rm",
+            "start",
+            "stop",
+            "volume",
+        }
+        if not args or args[0] not in allowed:
+            raise RuntimeUnavailable("Docker capability command is not allowed")
+        forbidden_endpoint_options = {"--config", "--context", "--host", "-H"}
+        if any(
+            argument in forbidden_endpoint_options
+            or any(argument.startswith(option + "=") for option in forbidden_endpoint_options)
+            for argument in args[1:]
+        ):
+            raise RuntimeUnavailable("Docker capability command cannot change its engine endpoint")
+        return await self._docker(socket_path, *args)
+
+    async def docker_capability_foreign_organizations(
+        self, socket_path: Path, organization_id: str
+    ) -> set[str]:
+        """Reject observed Fesnyng resources whose labels prove another org owns them.
+
+        Labels discover collisions; Docker's engine-wide administrative socket remains
+        an explicit administrator trust boundary and labels do not confer authority.
+        """
+
+        async def listed_resources(kind: str, name_format: str) -> list[str]:
+            resources: list[str] = []
+            for label in ("fesnyng.host", "fesnyng.organization"):
+                arguments = (
+                    (kind, "ls", "-a", "--filter", f"label={label}", "--format", name_format)
+                    if kind == "container"
+                    else (kind, "ls", "--filter", f"label={label}", "--format", name_format)
+                )
+                resources.extend(
+                    (await self._docker(socket_path, *arguments)).decode().splitlines()
+                )
+            return list(dict.fromkeys(resources))
+
+        names = await listed_resources("container", "{{.Names}}")
+        volumes = await listed_resources("volume", "{{.Name}}")
+        organizations: set[str] = set()
+        for kind, resources in (("container", names), ("volume", volumes)):
+            for resource in resources:
+                try:
+                    labels = json.loads(
+                        await self._docker(
+                            socket_path,
+                            kind,
+                            "inspect",
+                            "--format",
+                            "{{json .Config.Labels}}"
+                            if kind == "container"
+                            else "{{json .Labels}}",
+                            resource,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    raise RuntimeUnavailable(
+                        "Docker resource labels are invalid; resources retained"
+                    ) from None
+                labels = labels or {}
+                if not isinstance(labels, Mapping):
+                    raise RuntimeUnavailable(
+                        "Docker resource labels are invalid; resources retained"
+                    )
+                owner = labels.get("fesnyng.organization")
+                if not isinstance(owner, str) or not owner:
+                    if not self._is_legacy_employee_volume(kind, resource, labels, organization_id):
+                        organizations.add("unattributed")
+                elif owner != organization_id:
+                    organizations.add(owner)
+        return organizations
+
+    def _is_legacy_employee_volume(
+        self, kind: str, resource: str, labels: Mapping[str, Any], organization_id: str
+    ) -> bool:
+        """Recognize only pre-capability retained volumes belonging to this host's employee."""
+        if kind != "volume" or labels.get("fesnyng.host") != str(self.store.instance_id):
+            return False
+        agent_id = labels.get("fesnyng.agent")
+        if not isinstance(agent_id, str):
+            return False
+        if resource not in {f"{self.name(agent_id)}-home", f"{self.name(agent_id)}-workspace"}:
+            return False
+        try:
+            self.store.agent(organization_id, agent_id)
+        except LookupError:
+            return False
+        return True
 
     async def inspect(self, organization_id: str, agent_id: str) -> dict[str, Any] | None:
         name = self.name(agent_id)
@@ -309,6 +427,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None or not info["state"]["Running"]:
             raise RuntimeUnavailable("Agent container is not running")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         port = self._port(info)
         self.native_ports[(organization_id, agent_id)] = port
         return port
@@ -316,6 +435,8 @@ class DockerRuntime:
     async def ensure(self, organization_id: str, agent_id: str) -> None:
         agent = self.store.agent(organization_id, agent_id)
         info = await self.inspect(organization_id, agent_id)
+        if info is not None:
+            await self._require_docker_capability_admission(info, organization_id, agent_id)
         if info is None:
             if agent["applied_envelope"] and (
                 not agent["snapshot_image"] or agent["runtime_state"] != "replacing"
@@ -334,6 +455,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None:
             raise RuntimeUnavailable("Agent container is not running")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         self.native_ports[(organization_id, agent_id)] = self._port(info)
         await self._wait_healthy(organization_id, agent_id)
 
@@ -341,6 +463,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None:
             raise RuntimeUnavailable("Agent container is missing; rebuild is required")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         if not info["state"]["Running"]:
             await self.docker("start", self.name(agent_id))
         info = await self.inspect(organization_id, agent_id)
@@ -426,6 +549,20 @@ class DockerRuntime:
         desired = HostAgentConfiguration.model_validate_json(agent["desired_envelope"])
         runtime_type = desired.configuration.runtime_type
         name = self.name(agent_id)
+        docker_capability_args: list[str] = []
+        if self._employee_has_docker_capability(organization_id, agent_id):
+            from fesnyng_backend.host_docker_capability import DockerCapability
+
+            await DockerCapability(self.store, self).require(organization_id, agent_id)
+            capability = self.store.settings.docker_capability
+            if capability is None:  # pragma: no cover - checked by helper above
+                raise RuntimeUnavailable("Docker capability is not configured")
+            docker_capability_args = [
+                "-v",
+                f"{capability.socket_path}:/var/run/docker.sock",
+                "-e",
+                "DOCKER_HOST=unix:///var/run/docker.sock",
+            ]
         employee_workspace = self.employee_workspace_root(organization_id, agent_id)
         employee_workspace.mkdir(parents=True, mode=0o700, exist_ok=True)
         if employee_workspace.resolve() != employee_workspace:
@@ -466,6 +603,8 @@ class DockerRuntime:
                     f"fesnyng.agent={agent_id}",
                     "--label",
                     f"fesnyng.host={self.store.instance_id}",
+                    "--label",
+                    f"fesnyng.organization={organization_id}",
                     volume,
                 )
         await self.docker(
@@ -497,6 +636,7 @@ class DockerRuntime:
             f"{name}-workspace:/workspace",
             "-v",
             f"{employee_workspace}:{employee_workspace}",
+            *docker_capability_args,
             "-e",
             f"OPENCODE_SERVER_PASSWORD={agent['runtime_password']}",
             "-e",
@@ -536,6 +676,66 @@ class DockerRuntime:
             raise RuntimeUnavailable(
                 "Agent container lacks the configured workspace mount; use the explicit replacement flow"
             )
+
+    def _employee_has_docker_capability(self, organization_id: str, agent_id: str) -> bool:
+        capability = self.store.settings.docker_capability
+        return (
+            capability is not None
+            and str(capability.organization_id) == organization_id
+            and agent_id in {str(employee_id) for employee_id in capability.employee_ids}
+        )
+
+    def _require_docker_capability_mount(
+        self, info: Mapping[str, Any], organization_id: str, agent_id: str
+    ) -> None:
+        """Do not grant native work to a stale container after socket config changes."""
+        capability = self.store.settings.docker_capability
+        mounts = info.get("mounts")
+        if mounts is None:
+            return
+        has_socket_mount = isinstance(mounts, list) and any(
+            isinstance(mount, Mapping) and mount.get("Destination") == "/var/run/docker.sock"
+            for mount in mounts
+        )
+        if capability is None:
+            if has_socket_mount:
+                raise RuntimeUnavailable(
+                    "Agent container has a Docker socket mount but configured Docker capability is removed; use the explicit rebuild flow"
+                )
+            return
+        if str(capability.organization_id) != organization_id:
+            if has_socket_mount:
+                raise RuntimeUnavailable(
+                    "Agent container has a Docker socket mount outside its configured organization; use the explicit rebuild flow"
+                )
+            return
+        has_expected_mount = isinstance(mounts, list) and any(
+            isinstance(mount, Mapping)
+            and mount.get("Type") == "bind"
+            and mount.get("Source") == str(capability.socket_path)
+            and mount.get("Destination") == "/var/run/docker.sock"
+            for mount in mounts
+        )
+        if (
+            self._employee_has_docker_capability(organization_id, agent_id)
+            and not has_expected_mount
+        ):
+            raise RuntimeUnavailable(
+                "Agent container lacks the configured Docker socket mount; use the explicit rebuild flow"
+            )
+        if not self._employee_has_docker_capability(organization_id, agent_id) and has_socket_mount:
+            raise RuntimeUnavailable(
+                "Agent container has an unapproved Docker socket mount; use the explicit rebuild flow"
+            )
+
+    async def _require_docker_capability_admission(
+        self, info: Mapping[str, Any], organization_id: str, agent_id: str
+    ) -> None:
+        self._require_docker_capability_mount(info, organization_id, agent_id)
+        if self._employee_has_docker_capability(organization_id, agent_id):
+            from fesnyng_backend.host_docker_capability import DockerCapability
+
+            await DockerCapability(self.store, self).require(organization_id, agent_id)
 
     @staticmethod
     def _port(info: Mapping[str, Any]) -> int:
@@ -582,6 +782,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None or not info["state"]["Running"]:
             raise RuntimeUnavailable("Agent container is not running")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         ports = info["ports"].get("4096/tcp") or []
         if not ports or ports[0]["HostIp"] != "127.0.0.1":
             raise RuntimeUnavailable("Unexpected native runtime port binding")
@@ -622,6 +823,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None or not info["state"]["Running"]:
             raise RuntimeUnavailable("Agent container is not running")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         ports = info["ports"].get("4096/tcp") or []
         if not ports or ports[0]["HostIp"] != "127.0.0.1":
             raise RuntimeUnavailable("Unexpected native runtime port binding")
@@ -652,6 +854,7 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None or not info["state"]["Running"]:
             raise RuntimeUnavailable("Agent container is not running")
+        await self._require_docker_capability_admission(info, organization_id, agent_id)
         ports = info["ports"].get("4096/tcp") or []
         if not ports or ports[0]["HostIp"] != "127.0.0.1":
             raise RuntimeUnavailable("Unexpected native runtime port binding")
