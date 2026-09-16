@@ -12,6 +12,8 @@ type Props = {
   revision?: number;
   onChanged?: (state: Inspection['state'] | undefined) => void;
   onOperation?: (inspection: Inspection) => void;
+  onInspection?: (inspection: Inspection) => void;
+  onUnavailable?: () => void;
 };
 
 const stateLabel: Record<Inspection['state'], string> = {
@@ -34,7 +36,7 @@ const evidenceKey = (inspection: Inspection) => {
   return evidence && `${evidence.workspace_id}:${evidence.generation}:${evidence.safety_digest}`;
 };
 
-export function WorkspaceInspection({ organization, agent, session, csrf, compact = false, revision = 0, onChanged, onOperation }: Props) {
+export function WorkspaceInspection({ organization, agent, session, csrf, compact = false, revision = 0, onChanged, onOperation, onInspection, onUnavailable }: Props) {
   const path = workspacePath(organization, agent, session);
   const [result, setResult] = useState<{ path: string; inspection?: Inspection; error?: string }>({ path: '' });
   const [busy, setBusy] = useState<{ path: string; operation: 'remove' | 'discard' | 'replace' }>();
@@ -57,12 +59,14 @@ export function WorkspaceInspection({ organization, agent, session, csrf, compac
     setDiscardFingerprint(undefined);
     setResult({ path, inspection });
     onChanged?.(inspection.state);
+    onInspection?.(inspection);
   };
   const refresh = (signal?: AbortSignal, afterOperation = false) => {
     const token = ++request.current;
     void api<unknown>(path, { signal }).then(workspaceInspection).then((inspection) => { apply(inspection, token); if (afterOperation && current(token)) onOperation?.(inspection); }).catch((cause: unknown) => {
       if (signal?.aborted || !current(token)) return;
       setResult({ path, error: errorMessage(cause) });
+      onUnavailable?.();
     });
   };
   useEffect(() => {

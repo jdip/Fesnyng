@@ -199,6 +199,27 @@ button.agent-choice:focus-visible { outline-offset: -2px; }
 
 .conversation-region:not([hidden]) { display: flex; flex-direction: column; }
 .agent-list[hidden], .conversation-region[hidden] { display: none; }
+.thread-information { flex: 0 0 auto; border-bottom: 1px solid #e1e7df; background: #fff; }
+.thread-information-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 10px 16px; }
+.thread-information-title { min-width: 0; }
+.thread-information-title h2 { overflow: hidden; margin: 0; color: #25332c; font-size: 15px; font-weight: 600; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
+.thread-information-title p { overflow: hidden; margin: 3px 0 0; color: #71806f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.thread-information-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
+.thread-information-actions .app-button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; }
+.thread-information-actions .app-button svg { width: 15px; height: 15px; }
+.thread-information-actions .sidebar-icon-button { width: 30px; height: 30px; }
+.thread-information-actions .sidebar-icon-button svg { width: 15px; height: 15px; }
+.thread-information-details { border-top: 1px solid #edf0eb; }
+.thread-information-details > summary { padding: 8px 16px; color: #526052; cursor: pointer; font-size: 12px; font-weight: 550; user-select: none; }
+.thread-information-details[open] > summary { border-bottom: 1px solid #edf0eb; }
+.thread-information-details > .thread-information-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px 16px; margin: 0; padding: 12px 16px 0; font-size: 12px; }
+.thread-information-fields div { min-width: 0; }
+.thread-information-fields dt { color: #627467; }
+.thread-information-fields dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.thread-information-fields dd small { display: block; margin-top: 2px; color: #73806e; }
+.thread-information-details > .muted { margin: 0; padding: 12px 16px; font-size: 12px; }
+.thread-information-details > .workspace-inspection { margin: 0; border-width: 0; border-radius: 0; background: #fbfdfb; }
+@media(max-width:640px) { .thread-information-summary { min-height: 54px; padding: 8px 12px; } .thread-information-details > summary { padding-inline: 12px; } .thread-information-details > .thread-information-fields { padding-inline: 12px; } }
 .agent-choice { width: 100%; }
 .sidebar-agent-threads { padding: 4px 0 12px 8px; min-width: 0; }
 button[data-slot='aui_thread-list-show-more'] { font-size: 12px; }

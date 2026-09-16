@@ -18,7 +18,7 @@ import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './compon
 import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
 import { ThreadPolicyDialog } from './ThreadPolicyDialog';
-import { ThreadInformation } from './ThreadInformation';
+import { ThreadInformation, type ThreadWorkspace } from './ThreadInformation';
 import { ThreadWorkspaceContext, useThreadWorkspace } from './thread-context';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { NativeQuestionToolFallback } from './components/assistant-ui/elements/native-question-tool';
@@ -65,6 +65,7 @@ export type ConversationProps = {
   /** A managed workspace is absent or changing; readable history remains mounted. */
   executionBlocked?: boolean;
   executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
+  workspace?: ThreadWorkspace;
 };
 
 type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
@@ -99,6 +100,7 @@ export function Conversation({
   readOnly = false,
   executionBlocked = false,
   executionBlockedState,
+  workspace,
 }: ConversationProps) {
   const [files, setFiles] = useState<ThreadMenuTarget>();
   const [fileFocusRequest, setFileFocusRequest] = useState(0);
@@ -184,7 +186,7 @@ export function Conversation({
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
           {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} /></aside>}
-          <div className="fesnyng-thread-pane">{!executionDisabled && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
+          <div className="fesnyng-thread-pane"><ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} workspace={workspace} interactionDisabled={executionDisabled} onOpenFiles={executionDisabled ? undefined : openFiles} /><Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
           {!executionDisabled && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {!executionDisabled && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
@@ -207,14 +209,15 @@ function ThreadWorkspaceProvider({ baseUrl, csrfToken, refreshKey, children }: P
   return <ThreadWorkspaceContext.Provider value={value}>{children}</ThreadWorkspaceContext.Provider>;
 }
 
-function ActiveThreadInformation({ runtime, baseUrl, csrfToken, refreshKey }: {
-  runtime: ReturnType<typeof useOpenCodeRuntime>; baseUrl: string; csrfToken: string; refreshKey: number;
+function ActiveThreadInformation({ runtime, baseUrl, csrfToken, refreshKey, workspace: workspaceDetails, interactionDisabled, onOpenFiles }: {
+  runtime: ReturnType<typeof useOpenCodeRuntime>; baseUrl: string; csrfToken: string; refreshKey: number; workspace?: ThreadWorkspace; interactionDisabled: boolean;
+  onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void;
 }) {
   const item = useAuiState((state) => state.threads.threadItems.find((item) => item.id === state.threads.mainThreadId));
-  const workspace = useThreadWorkspace();
+  const workspaceContext = useThreadWorkspace();
   const session = item?.externalId ?? item?.remoteId;
   if (!session || !item) return null;
-  return <ThreadInformation key={session} baseUrl={baseUrl} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={workspace?.refreshKey ?? refreshKey} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
+  return <ThreadInformation key={session} baseUrl={baseUrl} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={workspaceContext?.refreshKey ?? refreshKey} workspace={workspaceDetails} interactionDisabled={interactionDisabled} onOpenFiles={onOpenFiles ? (trigger) => onOpenFiles({ id: session, title: item.title ?? 'New thread' }, trigger) : undefined} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
 }
 
 const OpenCodeToolFallback: ToolCallMessagePartComponent = (props) => {
