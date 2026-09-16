@@ -346,6 +346,52 @@ test('uses the latest ordered thought and tool description in collapsed group pr
   expect(screen.getByText('Run the latest migration')).toBeTruthy();
 });
 
+test('opens available OpenCode reasoning and failed or successful tool details from one group control', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const assistantMessage = [{
+    info: {
+      id: 'assistant-disclosure', role: 'assistant', sessionID: 'session-one', parentID: 'user-one',
+      modelID: 'model', providerID: 'provider', mode: 'primary', path: { cwd: '/', root: '/' },
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 }, finish: 'stop',
+    },
+    parts: [
+      { id: 'reasoning-blank', sessionID: 'session-one', messageID: 'assistant-disclosure', type: 'reasoning', text: '   ' },
+      { id: 'reasoning-available', sessionID: 'session-one', messageID: 'assistant-disclosure', type: 'reasoning', text: 'Available native reasoning.' },
+      { id: 'tool-success', callID: 'tool-success', sessionID: 'session-one', messageID: 'assistant-disclosure', type: 'tool', tool: 'read', state: { status: 'completed', input: { description: 'Read the report' }, output: 'Report contents' } },
+      { id: 'tool-failed', callID: 'tool-failed', sessionID: 'session-one', messageID: 'assistant-disclosure', type: 'tool', tool: 'bash', state: { status: 'error', input: { description: 'Run the migration' }, error: 'Migration failed' } },
+    ],
+  }];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.includes('/experimental/session')
+      ? [{ id: 'session-one', title: 'Disclosure', time: {} }]
+      : url.includes('/session/session-one/message')
+        ? assistantMessage
+        : url.includes('/session/session-one')
+          ? { id: 'session-one', title: 'Disclosure', time: {} }
+          : [];
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }));
+
+  render(<Conversation baseUrl="http://127.0.0.1:5175/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" sessionId="session-one" showThreadList={false} />);
+
+  const reasoning = await screen.findByRole('button', { name: 'Reasoning: Available native reasoning.' });
+  const tools = screen.getByRole('button', { name: '2 tool calls: Run the migration' });
+  fireEvent.click(reasoning);
+  fireEvent.click(tools);
+  expect(screen.getAllByText('Available native reasoning.')).toHaveLength(2);
+  expect(screen.getByText('Report contents')).toBeTruthy();
+  expect(screen.getByText('Migration failed')).toBeTruthy();
+  expect(screen.getAllByRole('button', { name: /Used tool:/ }).every((tool) => tool.getAttribute('aria-expanded') === 'true')).toBe(true);
+
+  fireEvent.click(tools);
+  expect(tools.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(tools);
+  expect(tools.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByText('Report contents')).toBeTruthy();
+});
+
 test('updates collapsed previews as streamed parts change and newer tools arrive', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const encoder = new TextEncoder();

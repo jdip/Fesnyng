@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  createContext,
   memo,
   useCallback,
+  useContext,
   useRef,
   useState,
   type FC,
@@ -20,6 +22,11 @@ import { cn } from "@/lib/utils";
 import { GroupPreviewTrigger } from "./group-preview";
 
 const ANIMATION_DURATION = 200;
+
+/** Tool fallbacks disclose their available details when their enclosing group opens. */
+const ToolGroupDetailsContext = createContext(false);
+
+export const useToolGroupDetails = () => useContext(ToolGroupDetailsContext);
 
 const toolGroupVariants = cva("aui-tool-group-root group/tool-group w-full", {
   variants: {
@@ -159,7 +166,9 @@ function ToolGroupContent({
           "[&>*:nth-child(n+5)]:[animation-delay:160ms]",
         )}
       >
-        {children}
+        <ToolGroupDetailsContext.Provider value>
+          {children}
+        </ToolGroupDetailsContext.Provider>
       </div>
     </CollapsibleContent>
   );
