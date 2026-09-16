@@ -32,6 +32,7 @@ import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-ic
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
 import { type NativeThreadCreation } from './workspace-api';
+import { useThreadFiles } from './thread-files';
 
 export type ConversationProps = {
   /** Absolute `/api/organizations/{org}/agents/{agent}/opencode` facade URL. */
@@ -102,23 +103,13 @@ export function Conversation({
   executionBlockedState,
   workspace,
 }: ConversationProps) {
-  const [files, setFiles] = useState<ThreadMenuTarget>();
-  const [fileFocusRequest, setFileFocusRequest] = useState(0);
   const [permissions, setPermissions] = useState<ThreadMenuTarget>();
   const permissionTrigger = useRef<HTMLButtonElement | null>(null);
-  const fileTrigger = useRef<HTMLButtonElement | null>(null);
   const conversationElement = useRef<HTMLElement>(null);
-  const openFiles = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
-    fileTrigger.current = trigger;
-    setFiles(target);
-    setFileFocusRequest((current) => current + 1);
-    onThreadSelect?.();
-  };
-  const closeFiles = () => {
-    setFiles(undefined);
-    fileTrigger.current?.focus();
-    if (document.activeElement !== fileTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
-  };
+  const { files, fileFocusRequest, openFiles, closeFiles } = useThreadFiles({
+    onOpened: onThreadSelect,
+    restoreFocus: () => conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus(),
+  });
   const openPermissions = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => {
     permissionTrigger.current = trigger;
     setPermissions(target);
