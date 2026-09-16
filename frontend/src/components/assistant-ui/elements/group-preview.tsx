@@ -63,8 +63,7 @@ export function GroupPreviewTrigger({
           "aui-group-preview-trigger-chevron pointer-events-none size-4 shrink-0",
           "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
           "-rotate-90",
-          "group-data-open/trigger:rotate-0",
-          "group-data-panel-open/trigger:rotate-0",
+          "group-data-[state=open]/trigger:rotate-0",
         )}
         aria-hidden="true"
       />

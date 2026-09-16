@@ -231,10 +231,16 @@ test('renders native question controls without generic Allow or Deny actions', a
     />,
   );
 
-  expect(await screen.findByRole('button', { name: 'Answer' })).toBeTruthy();
+  const answer = await screen.findByRole('button', { name: 'Answer' });
+  expect(answer).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
+
+  const message = document.querySelector('[data-slot="aui_assistant-message-root"]');
+  expect(message).not.toBeNull();
+  expect(message?.getAttribute('data-activity-only')).toBeNull();
+  expect(message?.querySelector('[data-slot="aui_assistant-message-footer"]')).not.toBeNull();
 });
 
 test('uses the latest ordered thought and tool description in collapsed group previews', async () => {
@@ -282,8 +288,11 @@ test('uses the latest ordered thought and tool description in collapsed group pr
   const tools = screen.getByRole('button', {
     name: '2 tool calls: Run the latest migration',
   });
+  const activity = reasoning.closest('[data-slot="aui_assistant-message-root"]');
   expect(reasoning.getAttribute('aria-expanded')).toBe('false');
   expect(tools.getAttribute('aria-expanded')).toBe('false');
+  expect(activity?.getAttribute('data-activity-only')).toBe('true');
+  expect(activity?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeNull();
   fireEvent.click(reasoning);
   fireEvent.click(tools);
   expect(screen.getByText('First thought.')).toBeTruthy();

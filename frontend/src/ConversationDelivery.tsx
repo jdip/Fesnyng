@@ -87,7 +87,7 @@ function DeliveryContext({ delivery, configuration, notifications, session, role
   const resolution = resolutionEvidence(delivery);
   const failure = delivery.state === 'failed' && delivery.outcome?.kind !== 'operator_resolution';
   const handled = failure && notifications.isAcknowledged(configuration.agent, session, delivery, 'failure_handled');
-  const showResponseAttribution = role === 'assistant' && delivery.author.id !== configuration.viewerId;
+  const showResponseAttribution = role === 'assistant' && !(delivery.author.kind === 'human' && delivery.author.id === configuration.viewerId);
   return <article className="delivery-context text-sm" aria-label="Delivery context">
     {role === 'assistant' ? showResponseAttribution && <p className="muted">In response to <strong>{delivery.author.name}</strong></p> : <p className="muted"><strong>{delivery.author.name}</strong> {delivery.author.kind === 'agent' ? 'delivered this input' : 'authored this input'}</p>}
     {excerpt && <p>{delivery.payload.text.slice(0, 220)}{delivery.payload.text.length > 220 ? '…' : ''}</p>}

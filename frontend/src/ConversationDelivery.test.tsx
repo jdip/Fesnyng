@@ -96,6 +96,18 @@ test('retains a response label when another human authored the matched request',
   expect(screen.getByText('Colleague')).toBeTruthy();
 });
 
+test('retains a response label when an agent has the same ID as the signed-in user', () => {
+  fixture.receipts = { junior: { 'receiving-thread': [{
+    ...peerDelivery,
+    author: { kind: 'agent', id: 'owner', name: 'Owner agent', session_id: 'source-thread' },
+  }] } };
+
+  renderDelivery(<ConversationDeliveryFooter />);
+
+  expect(screen.getByText('In response to')).toBeTruthy();
+  expect(screen.getByText('Owner agent')).toBeTruthy();
+});
+
 test('maps a peer delivery to its authored native input', () => {
   fixture.message = {
     id: 'input-one', role: 'user', status: { type: 'complete' }, metadata: { custom: { opencode: {
