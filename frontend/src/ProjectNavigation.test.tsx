@@ -29,8 +29,8 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   fireEvent.click(website);
   const details = await screen.findByRole('region', { name: 'Website project' });
   expect(within(details).getByRole('button', { name: 'Edit Project' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Build landing pageJunior developer' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Review copyReviewer' })).toBeTruthy();
+  expect(within(details).getByRole('button', { name: 'Build landing page Junior developer' })).toBeTruthy();
+  expect(within(details).getByRole('button', { name: 'Review copy Reviewer' })).toBeTruthy();
   fireEvent.change(within(details).getByRole('searchbox', { name: 'Search Website threads' }), { target: { value: 'copy' } });
   expect(within(details).queryByText('Build landing page')).toBeNull();
   expect(within(details).getByText('Review copy')).toBeTruthy();
@@ -163,4 +163,21 @@ test('keeps Project threads visible while its Workspaces view opens host-owned i
   expect((within(details).getByRole('button', { name: 'Remove workspace' }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(within(details).getByRole('tab', { name: 'Threads' }));
   expect(within(details).getByText('Build landing page')).toBeTruthy();
+});
+
+test('identifies the current sidebar thread and opens a separately labelled thread without confusing its agent', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    if (input.includes('/projects?')) return Response.json([]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [] });
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'current', title: 'Inspect current workspace' }, { session_id: 'next', title: 'Review changes' }]);
+    throw new Error(`Unexpected ${input}`);
+  }));
+  const open = vi.fn();
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager={false} currentThread={{ agent: 'junior', session: 'current' }} onOpenThread={open} onNewThread={vi.fn()} />);
+  const current = await screen.findByRole('button', { name: 'Inspect current workspace Junior developer' });
+  expect(current.getAttribute('aria-current')).toBe('page');
+  const next = screen.getByRole('button', { name: 'Review changes Junior developer' });
+  expect(next.hasAttribute('aria-current')).toBe(false);
+  fireEvent.click(next);
+  expect(open).toHaveBeenCalledWith('junior', 'next');
 });
