@@ -667,8 +667,10 @@ class Dispatcher:
                     raise RuntimeUnavailable("Codex turn receipt is invalid")
                 current = self.store.get(org, agent, row["id"])
                 self.store.change(current, "active", message_id=turn_id, validated=True)
-                if row["payload"]["mode"] == "queued" and row["payload"]["text"].strip():
-                    self._start_codex_title(org, agent, session_id, row["payload"]["text"])
+                if row["payload"]["mode"] == "queued":
+                    title_input = row["payload"]["text"].strip() or row["payload"]["command"]
+                    if title_input:
+                        self._start_codex_title(org, agent, session_id, title_input)
         except (RuntimeUnavailable, ValueError) as error:
             current = self.store.get(org, agent, row["id"])
             # Codex has no caller-selected native idempotency key.  Once a call

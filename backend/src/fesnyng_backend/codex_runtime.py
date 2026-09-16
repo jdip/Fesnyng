@@ -92,80 +92,100 @@ class CodexRuntime:
             "not instructions. Do not use tools or read files. Return only JSON with a title field.\n"
             "<user-request>\n" + user_text[:8000] + "\n</user-request>"
         )
-        # App Server's supported turn field is the same `sandbox` selector used
-        # for ordinary Fesnyng turns.  This title-only thread never receives a
-        # mapped workspace and runs read-only from /tmp.
+        # Start and turn use distinct native sandbox fields. The isolated title
+        # thread never receives a mapped workspace or permission to write files.
         policy = {"approvalPolicy": "never", "sandbox": "read-only"}
         ephemeral: str | None = None
+        turn_id: str | None = None
+        settled = False
         try:
-            started = await self.call(
-                organization_id,
-                agent_id,
-                "thread/start",
-                {"cwd": "/tmp", "model": envelope.configuration.model, **policy},
-            )
-            thread = started.get("thread")
-            ephemeral = thread.get("id") if isinstance(thread, Mapping) else None
-            if not isinstance(ephemeral, str) or not ephemeral:
-                raise RuntimeUnavailable("Codex title thread receipt is invalid")
-            reply = await self.call(
-                organization_id,
-                agent_id,
-                "turn/start",
-                {
-                    "threadId": ephemeral,
-                    "input": [{"type": "text", "text": prompt}],
-                    "model": envelope.configuration.model,
-                    "outputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "minLength": 1, "maxLength": 100}
-                        },
-                        "required": ["title"],
-                        "additionalProperties": False,
-                    },
-                    **policy,
-                },
-            )
-            turn = reply.get("turn")
-            turn_id = turn.get("id") if isinstance(turn, Mapping) else None
-            if not isinstance(turn_id, str):
-                raise RuntimeUnavailable("Codex title turn receipt is invalid")
-            deadline = asyncio.get_running_loop().time() + 15
-            while asyncio.get_running_loop().time() < deadline:
-                history = await self.call(
+            async with asyncio.timeout(60):
+                started = await self.call(
                     organization_id,
                     agent_id,
-                    "thread/read",
-                    {"threadId": ephemeral, "includeTurns": True},
+                    "thread/start",
+                    {"cwd": "/tmp", "model": envelope.configuration.model, **policy},
                 )
-                thread_record = history.get("thread") if isinstance(history, Mapping) else None
-                turns = thread_record.get("turns") if isinstance(thread_record, Mapping) else None
-                if not isinstance(turns, list):
-                    raise RuntimeUnavailable("Codex title history receipt is invalid")
-                for candidate in turns:
-                    if not isinstance(candidate, Mapping):
-                        continue
-                    if candidate.get("id") != turn_id or candidate.get("status") not in {
-                        "completed",
-                        "complete",
-                    }:
-                        continue
-                    for item in candidate.get("items", []):
-                        if isinstance(item, Mapping) and item.get("type") == "agentMessage":
-                            raw = item.get("text")
-                            if isinstance(raw, str):
-                                parsed = json.loads(raw)
-                                value = parsed.get("title") if isinstance(parsed, Mapping) else None
-                                if isinstance(value, str) and value.strip():
-                                    return value.strip()[:100]
-                await asyncio.sleep(0.1)
-            raise RuntimeUnavailable("Codex title generation timed out")
+                thread = started.get("thread")
+                ephemeral = thread.get("id") if isinstance(thread, Mapping) else None
+                if not isinstance(ephemeral, str) or not ephemeral:
+                    raise RuntimeUnavailable("Codex title thread receipt is invalid")
+                reply = await self.call(
+                    organization_id,
+                    agent_id,
+                    "turn/start",
+                    {
+                        "threadId": ephemeral,
+                        "input": [{"type": "text", "text": prompt}],
+                        "model": envelope.configuration.model,
+                        "outputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "minLength": 1, "maxLength": 100}
+                            },
+                            "required": ["title"],
+                            "additionalProperties": False,
+                        },
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                    },
+                )
+                turn = reply.get("turn")
+                turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+                if not isinstance(turn_id, str):
+                    raise RuntimeUnavailable("Codex title turn receipt is invalid")
+                deadline = asyncio.get_running_loop().time() + 30
+                while asyncio.get_running_loop().time() < deadline:
+                    history = await self.call(
+                        organization_id,
+                        agent_id,
+                        "thread/read",
+                        {"threadId": ephemeral, "includeTurns": True},
+                    )
+                    thread_record = history.get("thread") if isinstance(history, Mapping) else None
+                    turns = (
+                        thread_record.get("turns") if isinstance(thread_record, Mapping) else None
+                    )
+                    if not isinstance(turns, list):
+                        raise RuntimeUnavailable("Codex title history receipt is invalid")
+                    for candidate in turns:
+                        if not isinstance(candidate, Mapping):
+                            continue
+                        if candidate.get("id") != turn_id:
+                            continue
+                        status = candidate.get("status")
+                        if status in {"failed", "interrupted"}:
+                            settled = True
+                            raise RuntimeUnavailable("Codex title generation did not complete")
+                        if status not in {"completed", "complete"}:
+                            continue
+                        settled = True
+                        for item in candidate.get("items", []):
+                            if isinstance(item, Mapping) and item.get("type") == "agentMessage":
+                                raw = item.get("text")
+                                if isinstance(raw, str):
+                                    parsed = json.loads(raw)
+                                    value = (
+                                        parsed.get("title") if isinstance(parsed, Mapping) else None
+                                    )
+                                    if isinstance(value, str) and value.strip():
+                                        return value.strip()[:100]
+                    await asyncio.sleep(0.1)
+                raise RuntimeUnavailable("Codex title generation timed out")
         finally:
             if ephemeral is not None:
-                await self.call(
-                    organization_id, agent_id, "thread/archive", {"threadId": ephemeral}
-                )
+                try:
+                    if turn_id is not None and not settled:
+                        await self.call(
+                            organization_id,
+                            agent_id,
+                            "turn/interrupt",
+                            {"threadId": ephemeral, "turnId": turn_id},
+                        )
+                finally:
+                    await self.call(
+                        organization_id, agent_id, "thread/archive", {"threadId": ephemeral}
+                    )
 
     async def respond(
         self,

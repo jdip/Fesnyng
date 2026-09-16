@@ -19,6 +19,7 @@ export type CodexConversationProps = {
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
   onError?: (error: unknown) => void | Promise<void>;
+  onTitleChanged?: () => void;
   showThreadList?: boolean;
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
@@ -264,7 +265,7 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 
 function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted } = props;
-  const { onError: onTitleRefreshError, sessionId: selectedSessionId } = props;
+  const { onError: onTitleRefreshError, onTitleChanged, sessionId: selectedSessionId } = props;
   const [historyNotice, setHistoryNotice] = useState('');
   const executionDisabled = props.readOnly || props.executionBlocked;
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
@@ -274,10 +275,11 @@ function CodexConversationView(props: CodexConversationProps) {
     const refreshTitles = (event: Event) => {
       if (!(event instanceof CustomEvent) || event.detail !== selectedSessionId) return;
       void runtime.threads.reload().catch((cause: unknown) => onTitleRefreshError?.(cause));
+      onTitleChanged?.();
     };
     window.addEventListener('fesnyng:thread-title-updated', refreshTitles);
     return () => window.removeEventListener('fesnyng:thread-title-updated', refreshTitles);
-  }, [onTitleRefreshError, runtime, selectedSessionId]);
+  }, [onTitleChanged, onTitleRefreshError, runtime, selectedSessionId]);
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (executionDisabled || newThreadRequest === undefined || completed.current === newThreadRequest) return;

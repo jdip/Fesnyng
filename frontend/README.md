@@ -81,8 +81,14 @@ threads beyond the visible page and groups them by agent. Navigation preserves
 unsent text, selected workflows and retry identity within the current workspace;
 drafts are not stored on the server.
 
-The active thread has a compact information block with an editable title,
-repository, branch, Git changes, and native child-session count. Git totals compare
+New threads receive an agent-generated title once during their first turn. An
+explicit title or later manual rename takes precedence; a failed naming attempt
+leaves the current title and never rewrites or compacts conversation history.
+Project rows show the thread title above its agent name.
+
+The active thread header keeps its editable title and Files action visible, with
+repository and branch beneath. Expand Workspace details for Git changes, native
+child-session count and workspace lifecycle controls. Git totals compare
 tracked staged and unstaged workspace changes against HEAD; untracked files and
 binary changes are counted separately. These are workspace changes, not native
 session-summary totals. An unborn repository has no HEAD comparison; a detached
@@ -115,13 +121,19 @@ without changing the active conversation or its draft. While an agent is working
 steers on Enter; Queue remains a secondary action and Stop stays beside it. Type
 `/` in that composer to choose a configured explicit workflow. A rejected or
 uncertain submission retains its draft and selected workflow for retry without
-creating a second delivery. Files in each thread's menu opens that thread's
-authorized workspace in a resizable read-only panel, including when another
+creating a second delivery. The header Files action opens the current workspace
+for both harnesses. Files in each thread's menu opens that thread's authorized
+workspace in the same resizable read-only panel, including when another
 conversation is selected. Browse folders and breadcrumbs, filter and order the
 current listing, inspect metadata, refresh, preview supported files, and download
 their original bytes. Large and unsupported content has an explicit preview
 state. Opening or closing the panel preserves the conversation and draft; the
-resize separator supports keyboard control. Selection is preserved in the page fragment so a
+resize separator supports keyboard control. Relative and root-relative report
+links open the referenced workspace file in this panel; external web links keep
+their normal behavior. Missing files show a preview error. Routine replies to the
+viewing human omit redundant attribution; replies to other humans or agents retain
+it. Completed tool/reasoning-only entries use compact previews with accessible
+disclosure and action controls. Selection is preserved in the page fragment so a
 reload can reattach to the same authorized conversation.
 
 The sidebar identifies the current organization with its configured icon and name.
