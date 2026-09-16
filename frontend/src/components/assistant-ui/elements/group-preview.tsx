@@ -38,7 +38,7 @@ export function GroupPreviewTrigger({
       data-slot="group-preview-trigger"
       aria-label={ariaLabel ?? `${label}: ${visiblePreview}`}
       className={cn(
-        "aui-group-preview-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full max-w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-group-preview-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full max-w-full origin-left items-center gap-2 py-1 text-sm transition-[color,scale] active:scale-[0.98]",
         className,
       )}
       {...props}
@@ -60,7 +60,7 @@ export function GroupPreviewTrigger({
       <ChevronDownIcon
         data-slot="group-preview-trigger-chevron"
         className={cn(
-          "aui-group-preview-trigger-chevron size-4 shrink-0",
+          "aui-group-preview-trigger-chevron pointer-events-none size-4 shrink-0",
           "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
           "-rotate-90",
           "group-data-open/trigger:rotate-0",

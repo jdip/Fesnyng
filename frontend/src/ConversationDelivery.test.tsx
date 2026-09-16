@@ -42,8 +42,8 @@ const peerDelivery = {
   outcome: { kind: 'native_run_completed', message_id: 'response-head' },
 };
 
-function renderDelivery(children: ReactNode, onOpen = vi.fn()) {
-  return render(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={onOpen}>{children}</ConversationDeliveryProvider>);
+function renderDelivery(children: ReactNode, onOpen = vi.fn(), viewerId = 'owner') {
+  return render(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={onOpen} viewerId={viewerId}>{children}</ConversationDeliveryProvider>);
 }
 
 afterEach(() => {
@@ -70,6 +70,30 @@ test('shows peer authorship and source navigation for a native response merged i
   expect(screen.getByText('Senior engineer')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Open source thread' }));
   expect(open).toHaveBeenCalledWith('senior', 'source-thread');
+});
+
+test('omits a response label when the signed-in user authored the matched request', () => {
+  fixture.receipts = { junior: { 'receiving-thread': [{
+    ...peerDelivery,
+    author: { kind: 'human', id: 'owner', name: 'Owner' },
+  }] } };
+
+  renderDelivery(<ConversationDeliveryFooter />);
+
+  expect(screen.queryByText('In response to')).toBeNull();
+  expect(screen.queryByText('Owner')).toBeNull();
+});
+
+test('retains a response label when another human authored the matched request', () => {
+  fixture.receipts = { junior: { 'receiving-thread': [{
+    ...peerDelivery,
+    author: { kind: 'human', id: 'colleague', name: 'Colleague' },
+  }] } };
+
+  renderDelivery(<ConversationDeliveryFooter />);
+
+  expect(screen.getByText('In response to')).toBeTruthy();
+  expect(screen.getByText('Colleague')).toBeTruthy();
 });
 
 test('maps a peer delivery to its authored native input', () => {
@@ -113,7 +137,7 @@ test('acknowledges visible matched operator-resolution evidence', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Visible delivery result' }));
   expect(fixture.acknowledge).toHaveBeenCalledWith('junior', 'receiving-thread', expect.objectContaining({ id: resolution.id }), 'read');
   fixture.isAcknowledged.mockReturnValue(true);
-  mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()}><ConversationDeliveryFooter /></ConversationDeliveryProvider>);
+  mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()} viewerId="owner"><ConversationDeliveryFooter /></ConversationDeliveryProvider>);
   expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Visible delivery result' })).toBeNull();
 });
@@ -159,7 +183,7 @@ test('retains unmatched operator-resolution evidence after its read acknowledgem
   fireEvent.click(screen.getByRole('button', { name: 'Visible delivery result' }));
   expect(fixture.acknowledge).toHaveBeenCalledWith('junior', 'receiving-thread', resolution, 'read');
   fixture.isAcknowledged.mockReturnValue(true);
-  mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()}><ConversationDeliveryRecovery /></ConversationDeliveryProvider>);
+  mounted.rerender(<ConversationDeliveryProvider organization="org" agent="junior" session="receiving-thread" csrf="csrf-example" onOpen={vi.fn()} viewerId="owner"><ConversationDeliveryRecovery /></ConversationDeliveryProvider>);
   expect(screen.getByText(/Observed outcome: Completed/)).toBeTruthy();
   expect(screen.queryByText('Delivery needs review')).toBeNull();
 });
