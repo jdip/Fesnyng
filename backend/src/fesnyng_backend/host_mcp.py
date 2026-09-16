@@ -21,6 +21,11 @@ from fesnyng_backend.host_docker_resources import (
     ResourceRegistration,
     ResourceUpdate,
 )
+from fesnyng_backend.host_docker_services import (
+    DockerServices,
+    ServiceRegistration,
+    ServiceUpdate,
+)
 from fesnyng_backend.host_memory import MemoryStore
 from fesnyng_backend.host_models import Actor, NativeID, WorkspaceExpectation
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -407,3 +412,87 @@ def register_docker_tools(
             if expected_revision < 1:
                 raise ValueError("A current resource revision is required")
             return await resources.operate(org, str(resource_id), expected_revision, action)
+
+
+def register_service_tools(server: MCPServer, host: HostStore, services: DockerServices) -> None:
+    async def caller(source_session_id: str) -> tuple[str, str]:
+        identity = _authenticated_agent(host)
+        org, agent = identity["organization_id"], identity["agent_id"]
+        host.session(org, agent, source_session_id)
+        return org, agent
+
+    @server.tool(
+        description="List registered service links. Service metadata never creates network access or probes a URL. Requires an owned source thread."
+    )
+    async def service_list(source_session_id: NativeID) -> list[dict[str, Any]]:
+        with _workspace_tool_errors():
+            org, _ = await caller(source_session_id)
+            return await services.inventory(org)
+
+    @server.tool(
+        description="Register an HTTP(S) service for your own employee or an existing registered resource, associating your source thread. It does not create a route, network rule, or public exposure."
+    )
+    async def service_register(
+        source_session_id: NativeID,
+        name: str,
+        endpoint_url: str,
+        route: Literal["custom", "tailscale"],
+        resource_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            org, agent = await caller(source_session_id)
+            return await services.register(
+                org,
+                ServiceRegistration(
+                    name=name,
+                    target_kind="resource" if resource_id else "employee",
+                    target_id=resource_id or agent,
+                    endpoint_url=endpoint_url,
+                    route=route,
+                    threads=[{"agent_id": agent, "session_id": source_session_id}],
+                ),
+            )
+
+    @server.tool(
+        description="Add or remove your owned source thread from a service while preserving other links. Use its current revision."
+    )
+    async def service_associate(
+        source_session_id: NativeID,
+        service_id: UUID,
+        expected_revision: int,
+        associated: bool = True,
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            org, agent = await caller(source_session_id)
+            item = await services.inspect(org, str(service_id))
+            threads = [
+                thread
+                for thread in item["threads"]
+                if (thread["agent_id"], thread["session_id"]) != (agent, source_session_id)
+            ]
+            if associated:
+                threads.append({"agent_id": agent, "session_id": source_session_id})
+            return await services.update(
+                org,
+                str(service_id),
+                ServiceUpdate(
+                    name=item["name"],
+                    target_kind=item["target_kind"],
+                    target_id=item["target_id"],
+                    endpoint_url=item["endpoint_url"],
+                    route=item["route"],
+                    threads=threads,
+                    project_ids=item["project_ids"],
+                    expected_revision=expected_revision,
+                ),
+            )
+
+    @server.tool(
+        description="Remove only service registry metadata after inspecting sharing. It leaves the employee, external container, route, and network unchanged."
+    )
+    async def service_unregister(
+        source_session_id: NativeID, service_id: UUID, expected_revision: int
+    ) -> dict[str, bool]:
+        with _workspace_tool_errors():
+            org, _ = await caller(source_session_id)
+            return await services.unregister(org, str(service_id), expected_revision)

@@ -8,6 +8,7 @@ from fesnyng_backend.auth import router as auth_router
 from fesnyng_backend.control_codex_routes import router as codex_workspace_router
 from fesnyng_backend.control_dispatch_routes import router as dispatch_router
 from fesnyng_backend.control_docker_routes import router as docker_router
+from fesnyng_backend.control_docker_service_routes import router as docker_service_router
 from fesnyng_backend.control_host_routes import router as host_router
 from fesnyng_backend.control_interaction_routes import router as interaction_router
 from fesnyng_backend.control_memory_routes import router as memory_router
@@ -56,6 +57,7 @@ def create_app(
     app.include_router(departments_router)
     app.include_router(host_router)
     app.include_router(docker_router)
+    app.include_router(docker_service_router)
     app.include_router(memory_router)
     app.include_router(dispatch_router)
     app.include_router(interaction_router)

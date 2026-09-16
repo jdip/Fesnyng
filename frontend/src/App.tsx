@@ -23,6 +23,7 @@ import { createFesnyngOpenCodeThread } from './lib/opencode-client';
 import { createFesnyngCodexThread } from './lib/codex-client';
 import { EmployeeWorkspaces, WorkspaceInspection, type WorkspaceUpdate } from './WorkspaceInspection';
 import { DockerResources } from './DockerResources';
+import { Services } from './Services';
 import { agentPath, api, ApiError, errorMessage, WorkspaceCreationUncertain, type LoginSession, type NativeThreadCreation, type Organization, type Agent, type Member, type Project } from './workspace-api';
 
 type ThreadCreationAttempt = {
@@ -259,7 +260,7 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
     {view === 'organization' && manager && <OrganizationSettings onIdentityChanged={onIdentityChanged} organization={organization} csrf={session.csrf_token} agents={agents} onChanged={refreshWorkspace} />}
     {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
     {view === 'workspaces' && agent && <EmployeeWorkspaces organization={organization} agent={agent.id} csrf={session.csrf_token} onOpen={(session) => openAgent(agent.id, session)} onOperation={workspaceUpdated} />}
-    {view === 'resources' && agent && <DockerResources organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} />}
+    {view === 'resources' && agent && <><Services organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} /><DockerResources organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} /></>}
     {view === 'chart' && <DepartmentChart key={`${organization}:${version}`} organization={organization} agents={agents} manager={manager} csrf={session.csrf_token} onSelect={(item) => openAgent(item.id)} />}
     </div></main></div></ThreadNotificationsProvider></ConversationDraftsProvider>;
 }

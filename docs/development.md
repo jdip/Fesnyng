@@ -120,6 +120,19 @@ Do not use an engine containing other organizations' data. The proof reports exa
 identities, removes successful isolated fixtures, and stops failed compute while
 retaining diagnostics.
 
+The same proof registers real applications inside the employee and its Compose
+sibling, verifies their HTTP responses, shared service associations, stopped and
+missing target status, and metadata-only unregister. On the dedicated private
+Linux proving host, `FESNYNG_SERVICES_TAILSCALE_PROOF=true` additionally exercises
+an actual host Tailscale Serve route through Fesnyng's service APIs. It requires
+an already authenticated HTTPS-capable host Tailscale installation, noninteractive
+`sudo -n tailscale`, no existing Serve configuration, and free ports 18081/18443.
+It creates one labeled loopback proxy, removes only its exact Serve route, and
+uses the same proof cleanup boundary. It never enables Funnel. These HTTP checks
+originate on the work host; the independent external-client restart matrix in the
+[private service deployment guide](private-services.md) verifies LAN denial and
+tailnet ingress separately. Neither is evidence of public-Internet testing.
+
 ## Run locally
 
 Run the independent backend commands documented in [backend/README.md](../backend/README.md). The control plane normally listens on `127.0.0.1:8000`; each host uses a separate port and state directory. The host is independently runnable and does not require control-plane reachability for startup. Local SQLite state, credentials and runtime files stay outside Git.

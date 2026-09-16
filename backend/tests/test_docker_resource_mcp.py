@@ -71,7 +71,28 @@ def test_docker_tools_refuse_disabled_capability_and_foreign_source_thread(tmp_p
                 "docker_register",
                 "docker_operate",
                 "docker_associate",
+                "service_list",
+                "service_register",
+                "service_associate",
+                "service_unregister",
             }
+            service = await call(
+                client,
+                "tools/call",
+                {
+                    "name": "service_register",
+                    "arguments": {
+                        "source_session_id": "thread_0",
+                        "name": "Preview",
+                        "endpoint_url": "http://127.0.0.1:8081",
+                        "route": "custom",
+                    },
+                },
+            )
+            assert service.get("isError") is not True
+            text = json.dumps(service)
+            assert "network_reachability" in text
+            assert "unverified" in text
             for session in ("thread_0", "thread_1"):
                 result = await call(
                     client,
