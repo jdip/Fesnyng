@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
 import type { ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 
-type OpenFiles = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void;
+export type OpenThreadFiles = (target: ThreadMenuTarget, trigger: HTMLElement | null, path?: string) => void;
+type FileTarget = ThreadMenuTarget & { path?: string };
 
 /**
  * Keeps the existing workspace-files drawer scoped to the session that opened it.
@@ -11,14 +12,14 @@ type OpenFiles = (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) =
 export function useThreadFiles({ onOpened, restoreFocus }: {
   onOpened?: () => void;
   restoreFocus: () => void;
-}): { files: ThreadMenuTarget | undefined; fileFocusRequest: number; openFiles: OpenFiles; closeFiles: () => void } {
-  const [panel, setPanel] = useState<ThreadMenuTarget>();
+}): { files: FileTarget | undefined; fileFocusRequest: number; openFiles: OpenThreadFiles; closeFiles: () => void } {
+  const [panel, setPanel] = useState<FileTarget>();
   const [fileFocusRequest, setFileFocusRequest] = useState(0);
-  const trigger = useRef<HTMLButtonElement | null>(null);
+  const trigger = useRef<HTMLElement | null>(null);
 
-  const openFiles: OpenFiles = (target, nextTrigger) => {
+  const openFiles: OpenThreadFiles = (target, nextTrigger, path) => {
     trigger.current = nextTrigger;
-    setPanel(target);
+    setPanel({ ...target, path });
     setFileFocusRequest((current) => current + 1);
     onOpened?.();
   };

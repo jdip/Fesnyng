@@ -4,6 +4,7 @@ import { createFesnyngOpenCodeFetch } from './lib/opencode-client';
 import './ThreadArtifact.css';
 
 type ArtifactEntry = { name: string; path: string; type: 'directory' | 'file'; size: number; modifiedAt: number };
+type SelectedFile = Pick<ArtifactEntry, 'name' | 'path'> & Partial<Pick<ArtifactEntry, 'size' | 'modifiedAt'>>;
 type ArtifactList = { rootSessionID: string; sessionID: string; path: string; entries: ArtifactEntry[] };
 type ArtifactContent = { rootSessionID: string; sessionID: string; path: string; type: 'text' | 'binary'; content: string; encoding: 'utf-8' | 'base64'; size: number; truncated: boolean; contentType: string };
 type LoadState<T> = { scope: string; loading: boolean; value?: T; error: string };
@@ -58,19 +59,20 @@ function crumbPaths(path: string) {
 }
 
 /** Read-only, session-scoped project file navigation. It never changes the active conversation runtime. */
-export function ThreadArtifactPanel({ baseUrl, csrfToken, session, focusRequest, onClose }: {
+export function ThreadArtifactPanel({ baseUrl, csrfToken, session, focusRequest, initialPath, onClose }: {
   baseUrl: string;
   csrfToken: string;
   session: { id: string; title: string };
   focusRequest: number;
+  initialPath?: string;
   onClose: () => void;
 }) {
   const request = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
-  const [path, setPath] = useState('');
+  const [path, setPath] = useState(() => initialPath?.includes('/') ? initialPath.slice(0, initialPath.lastIndexOf('/')) : '');
   const [refresh, setRefresh] = useState(0);
   const [filter, setFilter] = useState('');
   const [sort, setSort] = useState<'name' | 'modified' | 'size'>('name');
-  const [selected, setSelected] = useState<ArtifactEntry>();
+  const [selected, setSelected] = useState<SelectedFile | undefined>(() => initialPath ? { path: initialPath, name: initialPath.split('/').at(-1)! } : undefined);
   const [width, setWidth] = useState(400);
   const [maximumWidth, setMaximumWidth] = useState(MAX_WIDTH);
   const [imageFailureScope, setImageFailureScope] = useState('');
@@ -108,7 +110,7 @@ export function ThreadArtifactPanel({ baseUrl, csrfToken, session, focusRequest,
     void request(endpoint(baseUrl, 'file', session.id, path), { signal: controller.signal }).then((response) => response.json()).then(artifactList).then((value) => {
       if (current && !controller.signal.aborted) {
         setListing({ scope: listScope, loading: false, value, error: '' });
-        setSelected((previous) => previous ? value.entries.find((entry) => entry.path === previous.path && entry.type === 'file') : undefined);
+        setSelected((previous) => previous ? value.entries.find((entry) => entry.path === previous.path && entry.type === 'file') ?? previous : undefined);
       }
     }).catch((cause: unknown) => {
       if (current && !controller.signal.aborted) setListing({ scope: listScope, loading: false, error: cause instanceof Error ? cause.message : 'Could not read workspace files.' });
@@ -179,7 +181,7 @@ export function ThreadArtifactPanel({ baseUrl, csrfToken, session, focusRequest,
       {activeList.loading && <p role="status" className="thread-artifact-status">Loading files…</p>}
       {activeList.error && <p role="alert" className="thread-artifact-error">{activeList.error}</p>}
       {!activeList.loading && !activeList.error && <ul className="thread-artifact-list">{entries.map((entry) => <li key={entry.path}><button type="button" aria-label={entry.name} aria-pressed={selected?.path === entry.path} onClick={() => entry.type === 'directory' ? openDirectory(entry) : selectFile(entry)}>{entry.type === 'directory' ? <FolderIcon aria-hidden /> : <FileIcon aria-hidden />}<span>{entry.name}<small>{entry.type === 'directory' ? 'Folder' : `${displaySize(entry.size)} · ${new Date(entry.modifiedAt).toLocaleString()}`}</small></span></button></li>)}{entries.length === 0 && <li className="thread-artifact-empty">No matching files.</li>}</ul>}
-      <section className="thread-artifact-preview" aria-label="File preview">{selected && <><header><strong>{selected.path}</strong>{downloadUrl && <a className="thread-artifact-download" href={downloadUrl} download={selected.name}><DownloadIcon aria-hidden />Download</a>}</header><p className="thread-artifact-meta">{displaySize(selected.size)} · {new Date(selected.modifiedAt).toLocaleString()}</p>{activeContent.loading && <p role="status">Loading preview…</p>}{activeContent.error && <p role="alert" className="thread-artifact-error">{activeContent.error}</p>}{preview && preview.truncated && <p>This file is larger than the preview limit. Download it to inspect its complete contents.</p>}{preview && !preview.truncated && previewImage && !imageFailed && <img className="thread-artifact-image" src={`data:${previewImage};base64,${preview.content}`} alt={`Preview of ${selected.name}`} onError={() => setImageFailureScope(contentScope)} />}{preview && !preview.truncated && previewImage && imageFailed && <p>Image preview is unavailable. Download it to inspect the exact file.</p>}{preview && !preview.truncated && preview.type === 'text' && preview.encoding === 'utf-8' && <pre>{preview.content}</pre>}{preview && !preview.truncated && !previewImage && (preview.type !== 'text' || preview.encoding !== 'utf-8') && <p>This binary file does not have a safe preview. Download it to inspect its exact contents.</p>}</>}</section>
+      <section className="thread-artifact-preview" aria-label="File preview">{selected && <><header><strong>{selected.path}</strong>{downloadUrl && <a className="thread-artifact-download" href={downloadUrl} download={selected.name}><DownloadIcon aria-hidden />Download</a>}</header>{selected.size !== undefined && selected.modifiedAt !== undefined && <p className="thread-artifact-meta">{displaySize(selected.size)} · {new Date(selected.modifiedAt).toLocaleString()}</p>}{activeContent.loading && <p role="status">Loading preview…</p>}{activeContent.error && <p role="alert" className="thread-artifact-error">{activeContent.error}</p>}{preview && preview.truncated && <p>This file is larger than the preview limit. Download it to inspect its complete contents.</p>}{preview && !preview.truncated && previewImage && !imageFailed && <img className="thread-artifact-image" src={`data:${previewImage};base64,${preview.content}`} alt={`Preview of ${selected.name}`} onError={() => setImageFailureScope(contentScope)} />}{preview && !preview.truncated && previewImage && imageFailed && <p>Image preview is unavailable. Download it to inspect the exact file.</p>}{preview && !preview.truncated && preview.type === 'text' && preview.encoding === 'utf-8' && <pre>{preview.content}</pre>}{preview && !preview.truncated && !previewImage && (preview.type !== 'text' || preview.encoding !== 'utf-8') && <p>This binary file does not have a safe preview. Download it to inspect its exact contents.</p>}</>}</section>
     </section>
   </div>;
 }

@@ -18,6 +18,24 @@ function renderPanel(onClose = vi.fn(), focusRequest = 0) {
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+test('opens a linked nested file directly and reports a missing linked file', async () => {
+  const request = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    const path = url.searchParams.get('path') ?? '';
+    if (url.pathname.endsWith('/file/content')) return path === 'docs/missing.md'
+      ? response({ detail: 'File not found.' }, 404) : response(content(path));
+    return response(listing(path, [entry('report.md', 'docs/report.md', 'file')]));
+  });
+  vi.stubGlobal('fetch', request);
+  const view = render(<ThreadArtifactPanel baseUrl={baseUrl} csrfToken="csrf-example" session={session} focusRequest={1} initialPath="docs/report.md" onClose={vi.fn()} />);
+  expect(await screen.findByText('Verified release evidence')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download' }).getAttribute('href')).toContain('path=docs%2Freport.md');
+  expect(request).toHaveBeenCalledWith(`${baseUrl}/file?sessionID=thread&path=docs`, expect.anything());
+  view.unmount();
+  render(<ThreadArtifactPanel baseUrl={baseUrl} csrfToken="csrf-example" session={session} focusRequest={2} initialPath="docs/missing.md" onClose={vi.fn()} />);
+  expect(await screen.findByText('File not found.')).toBeTruthy();
+});
+
 test('navigates folders through the authorized thread facade and previews selected text', async () => {
   const request = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
