@@ -5,10 +5,15 @@ const runtime = { id: 'runtime' };
 const client = { id: 'client' };
 const useOpenCodeRuntime = vi.fn(() => runtime);
 const createFesnyngOpenCodeClient = vi.fn(() => client);
+const assistantState = {
+  threadListItem: {},
+  threads: { threadItems: [], mainThreadId: undefined },
+  thread: { isLoading: false, messages: [] },
+};
 
 vi.mock('@assistant-ui/react', () => ({
   AssistantRuntimeProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useAuiState: () => undefined,
+  useAuiState: (selector: (state: typeof assistantState) => unknown) => selector(assistantState),
 }));
 vi.mock('@assistant-ui/react-opencode', () => ({
   useOpenCodeRuntime,
