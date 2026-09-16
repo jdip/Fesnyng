@@ -161,3 +161,25 @@ flows against real Python hosts and Docker execution. Tests alone do not establi
 the retained full-system MVP acceptance. The [local retained-MVP guide](../docs/local-mvp.md)
 documents browser login, host-local profile login, and the complete local startup
 and recovery sequence; acceptance remains active in issue #18.
+
+### File-panel layout regression check
+
+The DOM-based tests do not calculate browser layout. For changes to the Files
+panel or conversation sizing, repeat this rendered check for OpenCode and Codex
+at desktop and narrow (390 × 844) viewport sizes:
+
+1. Open a conversation long enough to scroll, containing a workspace link to a
+   text report of at least 100 lines. Type an unsent draft, then open the link.
+2. Verify the preview stays visible after the directory listing finishes loading,
+   including when that listing is delayed relative to the file response.
+3. Check that the preview and composer bounding rectangles remain within the
+   conversation rectangle. A loaded preview in the DOM is not sufficient: the
+   grid row must not grow beyond the conversation's available height.
+4. Scroll the preview and chat separately; verify each scroll position changes
+   without moving the other. Close and reopen Files and verify the draft remains.
+5. Switch threads and verify that old file contents are not shown in the newly
+   selected workspace; check the existing missing-file error path too.
+
+Use fictional files in a test workspace or the existing API test fixtures. Do not
+publish real report contents. This catches the failure where a content-sized grid
+row pushes the preview and composer below an overflow-clipped conversation.
