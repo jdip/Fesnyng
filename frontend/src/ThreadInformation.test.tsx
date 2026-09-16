@@ -102,3 +102,19 @@ test('retains workspace details while omitting thread mutations for frozen or un
   expect(screen.queryByRole('button', { name: 'Rename thread' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
 });
+
+test('keeps an in-progress rename safe to cancel when execution becomes unavailable', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json(context)));
+  const rename = vi.fn(async () => {});
+  const view = render(<ThreadInformation {...props} onRename={rename} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Rename thread' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Thread title' }), { target: { value: 'Blocked rename' } });
+
+  view.rerender(<ThreadInformation {...props} onRename={rename} interactionDisabled />);
+  expect((screen.getByRole('textbox', { name: 'Thread title' }) as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Save title' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Save title' }));
+  expect(rename).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('textbox', { name: 'Thread title' })).toBeNull();
+});

@@ -64,10 +64,10 @@ export function ThreadInformation({ baseUrl, csrfToken, session, refreshKey, onR
       </div>
     </div>
     {editing && <form className="thread-title-form" onSubmit={(event) => {
-      event.preventDefault(); const title = draft.trim(); if (!title || saving) return;
+      event.preventDefault(); const title = draft.trim(); if (!title || saving || interactionDisabled) return;
       setSaving(true); setError('');
       void onRename(title).then(close).catch(() => setError('Could not rename this thread. Try again.')).finally(() => setSaving(false));
-    }}><input ref={input} className="app-input" aria-label="Thread title" required maxLength={120} value={draft} disabled={saving} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape' && !saving) { event.preventDefault(); close(); } }} /><button className="app-button" disabled={saving}>Save title</button><button className="app-button quiet" type="button" disabled={saving} onClick={close}>Cancel</button>{error && <p role="alert" className="app-error">{error}</p>}</form>}
+    }}><input ref={input} className="app-input" aria-label="Thread title" required maxLength={120} value={draft} disabled={saving || interactionDisabled} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape' && !saving) { event.preventDefault(); close(); } }} /><button className="app-button" disabled={saving || interactionDisabled}>Save title</button><button className="app-button quiet" type="button" disabled={saving} onClick={close}>Cancel</button>{error && <p role="alert" className="app-error">{error}</p>}</form>}
     <details className="thread-information-details">
       <summary>Workspace details</summary>
       {data && <dl className="thread-information-fields">
