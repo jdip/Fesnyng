@@ -1,6 +1,7 @@
 import asyncio
 import secrets
 from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -249,16 +250,24 @@ def test_runtime_quiet_check_rejects_malformed_opencode_status_as_unknown(tmp_pa
     )
     store.stage_agent(envelope)
     store.mark_applied(envelope)
-    runtime = DockerRuntime(store, "http://credentials", "test-image")
 
-    async def inspect(_org: str, _agent: str):
-        return {"state": {"Running": True}}
+    class MalformedRuntime(DockerRuntime):
+        async def inspect(self, organization_id: str, agent_id: str) -> dict[str, Any] | None:
+            return {"state": {"Running": True}}
 
-    async def request(*_args, **_kwargs):
-        return {"ses_malformed": {"type": []}}
+        async def request(
+            self,
+            organization_id: str,
+            agent_id: str,
+            path: str,
+            *,
+            method: str = "GET",
+            body: Any = None,
+            directory: str | None = None,
+        ) -> Any:
+            return {"ses_malformed": {"type": []}}
 
-    runtime.inspect = inspect  # type: ignore[method-assign]
-    runtime.request = request  # type: ignore[method-assign]
+    runtime = MalformedRuntime(store, "http://credentials", "test-image")
 
     with pytest.raises(RuntimeUnavailable, match="status response is invalid"):
         asyncio.run(runtime.assert_quiet(org, agent))
@@ -287,10 +296,10 @@ def test_lifecycle_waiting_on_runtime_inspection_cannot_transition_after_acquire
             self.locks: dict[str, asyncio.Lock] = {}
             self.inspections = 0
 
-        def lock(self, target: str):
-            return self.locks.setdefault(target, asyncio.Lock())
+        def lock(self, agent_id: str):
+            return self.locks.setdefault(agent_id, asyncio.Lock())
 
-        async def inspect(self, _org: str, _agent: str):
+        async def inspect(self, organization_id: str, agent_id: str) -> dict[str, Any] | None:
             self.inspections += 1
             if self.inspections == 1:
                 inspection_started.set()
@@ -299,21 +308,36 @@ def test_lifecycle_waiting_on_runtime_inspection_cannot_transition_after_acquire
         async def assert_quiet(self, _org: str, _agent: str) -> None:
             return None
 
-    class Dispatcher:
-        async def agent_activity(self, *_args) -> str:
-            return ""
-
-        async def quiesce_agent(self, *_args) -> None:
-            raise AssertionError("no active work")
-
-        async def reconcile_agent_effects(self, *_args) -> None:
+        async def start(self, organization_id: str, agent_id: str) -> None:
             raise AssertionError("lifecycle must not start")
 
-        def agent_effects_settled(self, *_args) -> bool:
+        async def stop(self, organization_id: str, agent_id: str) -> None:
+            raise AssertionError("lifecycle must not start")
+
+        async def restart(self, organization_id: str, agent_id: str) -> None:
+            raise AssertionError("lifecycle must not start")
+
+        async def rebuild(self, organization_id: str, agent_id: str) -> None:
+            raise AssertionError("lifecycle must not start")
+
+    class Dispatcher:
+        async def agent_active(self, organization_id: str, agent_id: str) -> bool:
+            return False
+
+        async def agent_activity(self, organization_id: str, agent_id: str) -> str:
+            return ""
+
+        async def quiesce_agent(self, organization_id: str, agent_id: str, author: Actor) -> None:
+            raise AssertionError("no active work")
+
+        async def reconcile_agent_effects(self, organization_id: str, agent_id: str) -> None:
+            raise AssertionError("lifecycle must not start")
+
+        def agent_effects_settled(self, organization_id: str, agent_id: str) -> bool:
             return True
 
     class Configuration:
-        async def apply_agent(self, *_args) -> str:
+        async def apply_agent(self, organization_id: str, agent_id: str) -> str:
             raise AssertionError("lifecycle must not start")
 
     runtime = Runtime()
@@ -360,7 +384,7 @@ def test_maintenance_closure_blocks_harness_switch_transition(tmp_path: Path):
 
 @pytest.mark.parametrize("runtime_type", ["opencode", "codex"])
 def test_maintenance_acquire_defers_busy_or_unknown_native_work_for_each_harness(
-    tmp_path: Path, monkeypatch, runtime_type: str
+    tmp_path: Path, monkeypatch, runtime_type: Literal["opencode", "codex"]
 ):
     token = secrets.token_urlsafe(32)
     monkeypatch.setenv("FESNYNG_MAINTENANCE_TOKEN", token)
