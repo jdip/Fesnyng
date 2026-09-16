@@ -1,0 +1,6 @@
+[Unit]
+Description=Prepare and activate a quiet Fesnyng test update
+
+[Service]
+Type=oneshot
+ExecStart=__DEPLOY_BASE__/bin/update

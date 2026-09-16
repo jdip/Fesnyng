@@ -1,0 +1,11 @@
+[Unit]
+Description=Fesnyng test control-plane browser service
+After=network-online.target
+
+[Service]
+ExecStart=__DEPLOY_BASE__/bin/run-control
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -384,7 +384,7 @@ test.each(['available', 'failed-refresh', 'lost-response'])('keeps the conversat
   fireEvent.click(screen.getByRole('button', { name: 'Workspaces' }));
   expect(await screen.findByRole('heading', { name: 'Workspaces', level: 2 })).toBeTruthy();
   const employeeWorkspaces = await screen.findByRole('region', { name: 'Employee Workspaces' });
-  expect(within(employeeWorkspaces).getByText('/workspaces/one/agent-one/thread-one')).toBeTruthy();
+  expect(await within(employeeWorkspaces).findByText('/workspaces/one/agent-one/thread-one')).toBeTruthy();
   expect(screen.getByText('Native conversation thread-one')).toBeTruthy();
   fireEvent.click(within(employeeWorkspaces).getByRole('button', { name: 'Remove workspace' }));
   expect(await within(employeeWorkspaces).findByText(/^Removed · Ordinary directory$/)).toBeTruthy();
