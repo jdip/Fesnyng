@@ -33,6 +33,11 @@ class HostAgentConfiguration(Contract):
 class SessionCreate(Contract):
     title: Name = "New thread"
     workspace: Slug = "default"
+    creation_id: UUID | None = None
+    project_id: UUID | None = None
+    requested_checkout_branch: str | None = Field(default=None, max_length=500)
+    repository_url: str | None = Field(default=None, max_length=2_000)
+    checkout_branch: str | None = Field(default=None, max_length=500)
 
 
 class SessionProjectProvenance(Contract):

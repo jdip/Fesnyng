@@ -170,6 +170,8 @@ def test_native_session_creation_and_inventory_keep_project_grouping_control_pla
                 return httpx.Response(200, json={"id": "session_new"})
             return httpx.Response(200, json={"id": "thread_new"})
         if request.method == "GET":
+            if "/workspace-creations/" in request.url.path:
+                return httpx.Response(404)
             if request.url.path.endswith(f"/agents/{agent['id']}/sessions"):
                 return httpx.Response(
                     200,
@@ -216,7 +218,10 @@ def test_native_session_creation_and_inventory_keep_project_grouping_control_pla
             assert (await client.post(codex, json={"project_id": project_id})).json() == {
                 "id": "thread_new"
             }
-            assert forwarded_bodies == [{}, {}]
+            assert forwarded_bodies == [
+                {"project_id": project_id, "requested_checkout_branch": None},
+                {"project_id": project_id, "requested_checkout_branch": None},
+            ]
             assert (await client.get(opencode)).json() == [{"id": "session_peer"}]
             assert (await client.get(codex)).json() == [{"id": "thread_peer"}]
             assert (
@@ -239,7 +244,7 @@ def test_native_session_creation_and_inventory_keep_project_grouping_control_pla
     asyncio.run(exercise())
 
 
-def test_native_creation_remains_usable_when_grouping_is_pending_and_blocks_repo_projects(
+def test_native_creation_keeps_grouping_pending_and_prepares_repository_project_requests(
     organization, monkeypatch
 ):
     settings, _control, owner, org, agents, host_id = organization
@@ -255,6 +260,8 @@ def test_native_creation_remains_usable_when_grouping_is_pending_and_blocks_repo
         if request.method == "POST":
             native_creates += 1
             return httpx.Response(200, json={"id": "session_pending"})
+        if request.method == "GET" and "/workspace-creations/" in request.url.path:
+            return httpx.Response(404)
         raise AssertionError((request.method, request.url.path))
 
     client_factory = lambda _: HostClient(agents, transport=httpx.MockTransport(host))
@@ -298,11 +305,330 @@ def test_native_creation_remains_usable_when_grouping_is_pending_and_blocks_repo
                     "default_checkout_branch": "test",
                 },
             )
-            blocked = await client.post(
+            creation_id = str(uuid4())
+            prepared = await client.post(
                 f"/organizations/{org.id}/agents/{agent['id']}/opencode/session",
-                json={"project_id": repository.json()["id"]},
+                json={"project_id": repository.json()["id"], "creation_id": creation_id},
             )
-            assert blocked.status_code == 409
+            assert prepared.status_code == 200
+            assert prepared.json()["id"] == "session_pending"
+            assert native_creates == 2
 
     asyncio.run(exercise())
-    assert native_creates == 1
+    assert native_creates == 2
+
+
+def test_repository_project_native_creates_forward_only_control_resolved_workspace_inputs(
+    organization, monkeypatch
+):
+    settings, _control, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    agents.set_host_credential(org.id, host_id, "x" * 32)
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+    forwarded: list[tuple[str, dict[str, object]]] = []
+
+    def host(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST":
+            forwarded.append((request.url.path, json.loads(request.content)))
+            native_id = "thread_prepared" if "/codex/" in request.url.path else "session_prepared"
+            return httpx.Response(201, json={"id": native_id})
+        if request.method == "GET" and "/workspace-creations/" in request.url.path:
+            return httpx.Response(404)
+        raise AssertionError((request.method, request.url.path))
+
+    client_factory = lambda _: HostClient(agents, transport=httpx.MockTransport(host))
+    monkeypatch.setattr(control_host_routes, "host_client", client_factory)
+    monkeypatch.setattr(control_workspace_routes, "host_client", client_factory)
+    monkeypatch.setattr(control_codex_routes, "host_client", client_factory)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            repository = await client.post(
+                f"/organizations/{org.id}/projects",
+                json={
+                    "name": "Repository launch",
+                    "target_repository_url": "https://example.test/launch.git",
+                    "default_checkout_branch": "test",
+                },
+            )
+            project_id = repository.json()["id"]
+            opencode_creation = str(uuid4())
+            codex_creation = str(uuid4())
+            opencode = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/opencode/session",
+                json={
+                    "project_id": project_id,
+                    "checkout_branch": "release",
+                    "creation_id": opencode_creation,
+                },
+            )
+            codex = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/codex/session",
+                json={"project_id": project_id, "creation_id": codex_creation},
+            )
+            assert opencode.status_code == 201
+            assert codex.status_code == 201
+            assert forwarded == [
+                (
+                    f"/organizations/{org.id}/agents/{agent['id']}/opencode/session",
+                    {
+                        "creation_id": opencode_creation,
+                        "project_id": project_id,
+                        "requested_checkout_branch": "release",
+                        "repository_url": "https://example.test/launch.git",
+                        "checkout_branch": "release",
+                    },
+                ),
+                (
+                    f"/organizations/{org.id}/agents/{agent['id']}/codex/session",
+                    {
+                        "creation_id": codex_creation,
+                        "project_id": project_id,
+                        "requested_checkout_branch": None,
+                        "repository_url": "https://example.test/launch.git",
+                        "checkout_branch": "test",
+                    },
+                ),
+            ]
+            unsafe = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/opencode/session",
+                json={"repository_url": "https://attacker.test/repository.git"},
+            )
+            assert unsafe.status_code == 422
+            assert (
+                await client.post(
+                    f"/organizations/{org.id}/agents/{agent['id']}/opencode/session",
+                    json={"requested_checkout_branch": "attacker"},
+                )
+            ).status_code == 422
+            missing_id = await client.post(
+                f"/organizations/{org.id}/agents/{agent['id']}/codex/session",
+                json={"project_id": project_id},
+            )
+            assert missing_id.status_code == 422
+            assert len(forwarded) == 2
+
+    asyncio.run(exercise())
+
+
+def test_legacy_host_session_create_rejects_browser_workspace_selection(organization, monkeypatch):
+    settings, _control, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    agents.set_host_credential(org.id, host_id, "x" * 32)
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+    forwarded: list[dict[str, object]] = []
+
+    def host(request: httpx.Request) -> httpx.Response:
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "session_created"})
+
+    monkeypatch.setattr(
+        control_host_routes,
+        "host_client",
+        lambda _: HostClient(agents, transport=httpx.MockTransport(host)),
+    )
+
+    async def exercise() -> None:
+        path = f"/organizations/{org.id}/agents/{agent['id']}/sessions"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            creation_id = str(uuid4())
+            ordinary = await client.post(path, json={"creation_id": creation_id})
+            assert ordinary.status_code == 201
+            assert forwarded == [
+                {
+                    "title": "New thread",
+                    "workspace": "default",
+                    "creation_id": creation_id,
+                    "project_id": None,
+                    "requested_checkout_branch": None,
+                    "repository_url": None,
+                    "checkout_branch": None,
+                }
+            ]
+            assert (
+                await client.post(path, json={"repository_url": "https://attacker.test/repo.git"})
+            ).status_code == 422
+            assert (await client.post(path, json={"checkout_branch": "test"})).status_code == 422
+            assert (await client.post(path, json={"directory": "/outside"})).status_code == 422
+            assert len(forwarded) == 1
+
+    asyncio.run(exercise())
+
+
+def test_project_create_retries_use_host_snapshot_after_project_changes_or_removal(
+    organization, monkeypatch
+):
+    settings, _control, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    agents.set_host_credential(org.id, host_id, "x" * 32)
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+    reservations: dict[str, dict[str, object]] = {}
+    forwarded: list[dict[str, object]] = []
+
+    def host(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/workspace-creations/" in request.url.path:
+            creation_id = request.url.path.rsplit("/", 1)[1]
+            reservation = reservations.get(creation_id)
+            return httpx.Response(200, json=reservation) if reservation else httpx.Response(404)
+        if request.method == "PUT":
+            return httpx.Response(200, json={"ok": True})
+        if request.method != "POST":
+            raise AssertionError((request.method, request.url.path))
+        body = json.loads(request.content)
+        forwarded.append(body)
+        creation_id = body["creation_id"]
+        if creation_id not in reservations:
+            reservations[creation_id] = {
+                "creation_id": creation_id,
+                "project_id": body["project_id"],
+                "requested_checkout_branch": body["requested_checkout_branch"],
+                "repository_url": body["repository_url"],
+                "checkout_branch": body["checkout_branch"],
+                "state": "uncertain",
+                "native_receipt": None,
+            }
+            return httpx.Response(
+                503,
+                json={
+                    "detail": {
+                        "code": "workspace_creation_uncertain",
+                        "creation_id": creation_id,
+                        "detail": "reconcile",
+                    }
+                },
+            )
+        return httpx.Response(201, json={"id": f"session_{creation_id[-6:]}"})
+
+    client_factory = lambda _: HostClient(agents, transport=httpx.MockTransport(host))
+    monkeypatch.setattr(control_host_routes, "host_client", client_factory)
+    monkeypatch.setattr(control_workspace_routes, "host_client", client_factory)
+
+    async def exercise() -> None:
+        base = f"/organizations/{org.id}/agents/{agent['id']}/opencode/session"
+        projects_path = f"/organizations/{org.id}/projects"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            created_project = await client.post(
+                projects_path,
+                json={
+                    "name": "Launch",
+                    "target_repository_url": "https://example.test/alpha.git",
+                    "default_checkout_branch": "test",
+                },
+            )
+            project_id = created_project.json()["id"]
+            creation_id = str(uuid4())
+            first = await client.post(
+                base, json={"project_id": project_id, "creation_id": creation_id}
+            )
+            assert first.status_code == 503
+            changed = await client.patch(
+                f"{projects_path}/{project_id}",
+                json={
+                    "target_repository_url": "https://example.test/beta.git",
+                    "default_checkout_branch": "main",
+                },
+            )
+            assert changed.status_code == 200
+            retry = await client.post(
+                base, json={"project_id": project_id, "creation_id": creation_id}
+            )
+            assert retry.status_code == 201
+            assert forwarded[-1] == {
+                "creation_id": creation_id,
+                "project_id": project_id,
+                "requested_checkout_branch": None,
+                "repository_url": "https://example.test/alpha.git",
+                "checkout_branch": "test",
+            }
+
+            other = await client.post(projects_path, json={"name": "Other"})
+            mismatch = await client.post(
+                base, json={"project_id": other.json()["id"], "creation_id": creation_id}
+            )
+            assert mismatch.status_code == 409
+            assert len(forwarded) == 2
+
+            archived_id = str(uuid4())
+            assert (
+                await client.post(base, json={"project_id": project_id, "creation_id": archived_id})
+            ).status_code == 503
+            assert (await client.post(f"{projects_path}/{project_id}/archive")).status_code == 200
+            archived = await client.post(
+                base, json={"project_id": project_id, "creation_id": archived_id}
+            )
+            assert archived.status_code == 201
+            assert archived.json()["fesnyng_project_grouping"]["state"] == "ungrouped"
+
+            assert (await client.post(f"{projects_path}/{project_id}/restore")).status_code == 200
+            deleted_id = str(uuid4())
+            assert (
+                await client.post(base, json={"project_id": project_id, "creation_id": deleted_id})
+            ).status_code == 503
+            assert (await client.delete(f"{projects_path}/{project_id}")).status_code == 204
+            deleted = await client.post(
+                base, json={"project_id": project_id, "creation_id": deleted_id}
+            )
+            assert deleted.status_code == 201
+            assert deleted.json()["fesnyng_project_grouping"]["state"] == "ungrouped"
+
+    asyncio.run(exercise())
+
+
+def test_known_project_selection_failures_are_escapable_preparation_failures(
+    organization, monkeypatch
+):
+    settings, _control, owner, org, agents, host_id = organization
+    agent = agents.create_agent(org.id, owner.id, {"name": "Engineer", "host_id": host_id})
+    agents.set_host_credential(org.id, host_id, "x" * 32)
+    app = create_app(settings, ControlPlaneSessionSettings(allowed_origin=ORIGIN))
+    host_calls: list[httpx.Request] = []
+
+    def host(request: httpx.Request) -> httpx.Response:
+        host_calls.append(request)
+        assert request.method == "GET"
+        assert "/workspace-creations/" in request.url.path
+        return httpx.Response(404)
+
+    client_factory = lambda _: HostClient(agents, transport=httpx.MockTransport(host))
+    monkeypatch.setattr(control_host_routes, "host_client", client_factory)
+    monkeypatch.setattr(control_workspace_routes, "host_client", client_factory)
+
+    async def exercise() -> None:
+        base = f"/organizations/{org.id}/agents/{agent['id']}/opencode/session"
+        projects_path = f"/organizations/{org.id}/projects"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url=ORIGIN, headers={"Origin": ORIGIN}
+        ) as client:
+            await _sign_in(client, "owner", "correct horse battery staple")
+            project = await client.post(projects_path, json={"name": "Plain"})
+            project_id = project.json()["id"]
+            failures = [
+                {"project_id": "not-a-uuid", "creation_id": str(uuid4())},
+                {"project_id": project_id, "checkout_branch": " ", "creation_id": str(uuid4())},
+            ]
+            assert (await client.post(f"{projects_path}/{project_id}/archive")).status_code == 200
+            failures.append({"project_id": project_id, "creation_id": str(uuid4())})
+            for payload in failures:
+                response = await client.post(base, json=payload)
+                assert response.status_code == 503
+                assert response.json() == {
+                    "detail": {
+                        "code": "workspace_preparation_failed",
+                        "creation_id": payload["creation_id"],
+                        "detail": response.json()["detail"]["detail"],
+                    }
+                }
+            assert len(host_calls) == 1
+
+    asyncio.run(exercise())

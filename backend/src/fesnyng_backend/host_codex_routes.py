@@ -23,7 +23,7 @@ from fesnyng_backend.codex_history import full_turns, is_unmaterialized
 from fesnyng_backend.host_models import Actor, NativeID, SessionCreate
 from fesnyng_backend.host_routes import host_errors, require_binding
 from fesnyng_backend.host_runtime import RuntimeUnavailable
-from fesnyng_backend.host_workspace import SessionUpdate, Workspace
+from fesnyng_backend.host_workspace import SessionUpdate, Workspace, session_create_kwargs
 
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["codex workspace"])
 
@@ -220,7 +220,9 @@ async def create_session(
         else envelope.configuration.workspace
     )
     with host_errors():
-        created = await request.app.state.host_runtime.create_session(org, agent, title, workspace)
+        created = await request.app.state.host_runtime.create_session(
+            org, agent, title, workspace, **session_create_kwargs(body)
+        )
         session_id = created.get("id") if isinstance(created, Mapping) else None
         if not isinstance(session_id, str):
             raise RuntimeUnavailable("Codex thread creation receipt is invalid")

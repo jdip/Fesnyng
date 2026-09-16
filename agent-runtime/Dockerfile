@@ -2,7 +2,7 @@ FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d4
 WORKDIR /opt/fesnyng
 COPY package.json package-lock.json ./
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && npm ci --omit=dev \
     && mkdir -p /workspace /home/agent

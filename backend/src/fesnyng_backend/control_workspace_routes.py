@@ -172,16 +172,16 @@ async def facade(
     if resource_path == "file/download":
         return await _download(request, organization, agent)
     body = await _body(request) if mutation else None
-    project_id = (
-        projects.project_id_for_native_session_create(body) if resource_path == "session" else None
-    )
-    if project_id is not None:
-        try:
-            projects.require_project_for_native_session_create(request, organization, project_id)
-        except projects.RepositoryWorkspaceUnavailable as error:
-            raise HTTPException(409, str(error)) from None
-        except (LookupError, ValueError) as error:
-            raise HTTPException(422, str(error)) from None
+    try:
+        project_id = (
+            await projects.prepare_native_session_create(request, organization, agent, body)
+            if resource_path == "session"
+            else None
+        )
+    except LookupError as error:
+        raise HTTPException(422, str(error)) from None
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
     idempotency_key = None
     headers: dict[str, str] = {}
     if actor is not None:

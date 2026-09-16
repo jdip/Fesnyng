@@ -2,7 +2,7 @@ import asyncio
 import json
 import secrets
 import sqlite3
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -1139,13 +1139,12 @@ def test_real_runtime_session_persistence_is_reused_by_peer_reservation(tmp_path
     assert receipt["state"] == "accepted"
     saved = host.session(service["organization_id"], str(agent), "ses_runtime")
     assert saved["directory"] == f"/workspace/default/threads/peer-{delivery_id.hex}"
-    assert runtime.session_posts == [
-        {
-            "title": "Peer collaboration",
-            "permission": [{"permission": "*", "pattern": "*", "action": "allow"}],
-            "metadata": {"fesnyng_delivery_id": str(delivery_id)},
-        }
-    ]
+    assert len(runtime.session_posts) == 1
+    posted = runtime.session_posts[0]
+    assert posted["title"] == "Peer collaboration"
+    assert posted["permission"] == [{"permission": "*", "pattern": "*", "action": "allow"}]
+    assert posted["metadata"]["fesnyng_delivery_id"] == str(delivery_id)
+    assert UUID(posted["metadata"]["fesnyng_creation_id"])
 
 
 def test_unmatched_lost_native_create_stays_uncertain_without_replaying_create(tmp_path):
@@ -1508,6 +1507,9 @@ class NativeBoundaryRuntime(DockerRuntime):
 
     async def docker(self, *args, content=None):
         return b""
+
+    async def inspect(self, organization_id, agent_id):
+        return {"state": {"Running": True}}
 
     async def request(
         self, organization_id, agent_id, path, *, method="GET", body=None, directory=None

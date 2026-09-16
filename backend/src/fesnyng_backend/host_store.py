@@ -87,6 +87,23 @@ class HostStore:
                     snapshot TEXT NOT NULL,
                     FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
                 );
+                CREATE TABLE IF NOT EXISTS host_workspace_creations (
+                    creation_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
+                    directory TEXT NOT NULL,
+                    project_id TEXT,
+                    requested_checkout_branch TEXT,
+                    repository_url TEXT,
+                    checkout_branch TEXT,
+                    starting_revision TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('reserved','native_attempted','completed','uncertain')),
+                    native_receipt TEXT,
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    FOREIGN KEY(organization_id,agent_id) REFERENCES host_agents(organization_id,agent_id)
+                );
             """)
             columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_sessions)")
@@ -104,6 +121,18 @@ class HostStore:
             if "project_provenance_initialized" not in columns:
                 connection.execute(
                     "ALTER TABLE host_sessions ADD COLUMN project_provenance_initialized INTEGER NOT NULL DEFAULT 0"
+                )
+            workspace_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(host_workspace_creations)")
+            }
+            if "project_id" not in workspace_columns:
+                connection.execute(
+                    "ALTER TABLE host_workspace_creations ADD COLUMN project_id TEXT"
+                )
+            if "requested_checkout_branch" not in workspace_columns:
+                connection.execute(
+                    "ALTER TABLE host_workspace_creations ADD COLUMN requested_checkout_branch TEXT"
                 )
             agent_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(host_agents)")
@@ -413,6 +442,139 @@ class HostStore:
                 "INSERT INTO host_sessions(session_id,organization_id,agent_id,directory,title,runtime_type) "
                 "VALUES(?,?,?,?,?,?)",
                 (session_id, organization_id, agent_id, directory, title, runtime_type),
+            )
+
+    def reserve_workspace_creation(
+        self,
+        organization_id: str,
+        agent_id: str,
+        creation_id: str,
+        request_fingerprint: str,
+        directory: str,
+        repository_url: str | None,
+        checkout_branch: str | None,
+        *,
+        project_id: str | None = None,
+        requested_checkout_branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Reserve one exact native-create intent before any native call occurs."""
+        UUID(creation_id)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.require_writable(organization_id, agent_id, connection=connection)
+            existing = connection.execute(
+                "SELECT * FROM host_workspace_creations WHERE creation_id=?", (creation_id,)
+            ).fetchone()
+            if existing is not None:
+                row = dict(existing)
+                if (
+                    row["organization_id"],
+                    row["agent_id"],
+                    row["request_fingerprint"],
+                    row["directory"],
+                    row["project_id"],
+                    row["requested_checkout_branch"],
+                    row["repository_url"],
+                    row["checkout_branch"],
+                ) != (
+                    organization_id,
+                    agent_id,
+                    request_fingerprint,
+                    directory,
+                    project_id,
+                    requested_checkout_branch,
+                    repository_url,
+                    checkout_branch,
+                ):
+                    raise ValueError("Workspace creation retry does not match its original request")
+                return row
+            connection.execute(
+                """INSERT INTO host_workspace_creations(
+                    creation_id,organization_id,agent_id,request_fingerprint,directory,
+                    project_id,requested_checkout_branch,repository_url,checkout_branch,state
+                ) VALUES(?,?,?,?,?,?,?,?,?,'reserved')""",
+                (
+                    creation_id,
+                    organization_id,
+                    agent_id,
+                    request_fingerprint,
+                    directory,
+                    project_id,
+                    requested_checkout_branch,
+                    repository_url,
+                    checkout_branch,
+                ),
+            )
+        return self.workspace_creation(organization_id, agent_id, creation_id)
+
+    def workspace_creation(
+        self, organization_id: str, agent_id: str, creation_id: str
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM host_workspace_creations
+                WHERE creation_id=? AND organization_id=? AND agent_id=?""",
+                (creation_id, organization_id, agent_id),
+            ).fetchone()
+        if row is None:
+            raise LookupError("Workspace creation not found")
+        return dict(row)
+
+    def mark_workspace_prepared(
+        self,
+        organization_id: str,
+        agent_id: str,
+        creation_id: str,
+        starting_revision: str | None,
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_creations SET starting_revision=?,updated_at=unixepoch()
+                WHERE creation_id=? AND organization_id=? AND agent_id=? AND state='reserved'""",
+                (starting_revision, creation_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace creation is not available for preparation")
+
+    def mark_workspace_native_attempted(
+        self, organization_id: str, agent_id: str, creation_id: str
+    ) -> None:
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_creations SET state='native_attempted',updated_at=unixepoch()
+                WHERE creation_id=? AND organization_id=? AND agent_id=? AND state='reserved'""",
+                (creation_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace creation is not available for native creation")
+
+    def complete_workspace_creation(
+        self,
+        organization_id: str,
+        agent_id: str,
+        creation_id: str,
+        receipt: dict[str, Any],
+    ) -> None:
+        encoded = json.dumps(receipt, separators=(",", ":"))
+        with self.connect() as connection:
+            changed = connection.execute(
+                """UPDATE host_workspace_creations SET state='completed',native_receipt=?,updated_at=unixepoch()
+                WHERE creation_id=? AND organization_id=? AND agent_id=?
+                  AND state IN ('native_attempted','uncertain')""",
+                (encoded, creation_id, organization_id, agent_id),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("Workspace creation receipt cannot be recorded")
+
+    def mark_workspace_creation_uncertain(
+        self, organization_id: str, agent_id: str, creation_id: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE host_workspace_creations SET state='uncertain',updated_at=unixepoch()
+                WHERE creation_id=? AND organization_id=? AND agent_id=?
+                  AND state='native_attempted'""",
+                (creation_id, organization_id, agent_id),
             )
 
     def begin_harness_switch(

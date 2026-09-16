@@ -10,6 +10,25 @@ export type Project = {
   default_checkout_branch: string | null;
   archived: boolean;
 };
+/** Control-plane selection fields for one native thread creation attempt. */
+export type NativeThreadCreation = {
+  project_id?: string;
+  checkout_branch?: string;
+  creation_id: string;
+};
+export class WorkspaceCreationUncertain extends Error {
+  constructor(message: string, readonly creationId: string) { super(message); }
+}
+/** A host-confirmed pre-native rejection may safely start a different intent. */
+export class WorkspacePreparationFailed extends Error {}
+export function workspaceCreationFailure(detail: unknown, fallback: string): Error {
+  if (typeof detail === 'string') return new Error(detail);
+  if (!detail || typeof detail !== 'object') return new Error(fallback);
+  const value = detail as Record<string, unknown>;
+  if (value.code === 'workspace_creation_uncertain' && typeof value.creation_id === 'string' && typeof value.detail === 'string') return new WorkspaceCreationUncertain(value.detail, value.creation_id);
+  if (value.code === 'workspace_preparation_failed' && typeof value.detail === 'string') return new WorkspacePreparationFailed(value.detail);
+  return new Error(typeof value.detail === 'string' ? value.detail : fallback);
+}
 export type Member = { user_id: string; login: string; display_name: string; role: string };
 export type Host = { id: string; name: string };
 export type Profile = { id: string; name: string; provider: string };

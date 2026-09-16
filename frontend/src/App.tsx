@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { BrainIcon, LogOutIcon, PlusIcon, RefreshCwIcon, SettingsIcon, SlidersHorizontalIcon, XIcon } from 'lucide-react';
 import { readWorkspaceLocation, saveWorkspaceLocation } from './workspace-location';
@@ -17,9 +17,19 @@ import { AgentSettings } from './AgentSettings';
 import { OrganizationSettings } from './OrganizationSettings';
 import { AgentMemory } from './AgentMemory';
 import { DepartmentChart } from './DepartmentChart';
-import { EmployeeNewThreadChooser, ProjectNavigation } from './ProjectNavigation';
+import { EmployeeNewThreadChooser, ProjectNavigation, type ProjectThreadSelection } from './ProjectNavigation';
 import { type ProjectGroupingWarning } from './project-grouping-warning';
-import { agentPath, api, ApiError, errorMessage, type LoginSession, type Organization, type Agent, type Member, type Project } from './workspace-api';
+import { createFesnyngOpenCodeThread } from './lib/opencode-client';
+import { createFesnyngCodexThread } from './lib/codex-client';
+import { agentPath, api, ApiError, errorMessage, WorkspaceCreationUncertain, type LoginSession, type NativeThreadCreation, type Organization, type Agent, type Member, type Project } from './workspace-api';
+
+type ThreadCreationAttempt = {
+  request: NativeThreadCreation & { agent: string; id: number };
+  state: 'pending' | 'failed' | 'completed';
+  detail?: string;
+  uncertain?: boolean;
+  session?: string;
+};
 
 function Brand() { return <div className="brand"><span className="brand-mark" aria-hidden="true">f</span>Fesnyng</div>; }
 export function App() {
@@ -100,11 +110,26 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
   const [thread, setThread] = useState<string | undefined>(() => readWorkspaceLocation().organization === organization ? readWorkspaceLocation().thread : undefined);
   const lastThreads = useRef<Record<string, string | undefined>>({});
   const newThreadSequence = useRef(0);
+  const navigationSequence = useRef(0);
+  const activeCreationRequest = useRef<number | undefined>(undefined);
+  const workspaceMounted = useRef(true);
   const [threadListTarget, setThreadListTarget] = useState<HTMLDivElement | null>(null);
-  const [newThreadRequest, setNewThreadRequest] = useState<{ agent: string; id: number; project: string | null }>();
+  const [threadCreationAttempts, setThreadCreationAttempts] = useState<Record<string, ThreadCreationAttempt>>({});
+  const [activeCreationId, setActiveCreationId] = useState<string>();
+  const latestRequestByCreation = useRef<Record<string, number>>({});
+  const [createdGroupingWarnings, setCreatedGroupingWarnings] = useState<Record<string, { agent: string; session: string; warning: ProjectGroupingWarning }>>({});
   const [newThreadEmployee, setNewThreadEmployee] = useState<string>();
   const [threadPageSize, setThreadPageSize] = useState(6);
   const projectNavigationKey = `fesnyng:project-navigation:${session.user.id}:${organization}`;
+  const clearCreatedGroupingWarning = useCallback((agent: string, session: string) => {
+    const key = groupingWarningKey(organization, agent, session);
+    setCreatedGroupingWarnings((current) => {
+      if (!(key in current)) return current;
+      const remaining = { ...current };
+      delete remaining[key];
+      return remaining;
+    });
+  }, [organization]);
   const [navigationMode, setNavigationMode] = useState<'projects' | 'employees'>(() => window.localStorage.getItem(projectNavigationKey) === 'projects' ? 'projects' : 'employees');
   const [projectDetailsTarget, setProjectDetailsTarget] = useState<HTMLDivElement | null>(null);
   const [view, setView] = useState(() => initialView ?? (readWorkspaceLocation().organization === organization && readWorkspaceLocation().agent ? 'conversation' : 'chart'));
@@ -113,6 +138,13 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
   const [mobile, setMobile] = useState(false);
   const [version, setVersion] = useState(0);
   const [projectRevision, setProjectRevision] = useState(0);
+  useEffect(() => {
+    workspaceMounted.current = true;
+    return () => {
+      workspaceMounted.current = false;
+      activeCreationRequest.current = undefined;
+    };
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     void Promise.all([api<Agent[]>(`/organizations/${organization}/agents`, { signal: controller.signal }), api<Member[]>(`/organizations/${organization}/members`, { signal: controller.signal })]).then(([items, people]) => {
@@ -125,15 +157,77 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
   const navigate = (next: string) => { setView(next); setMobile(false); setError(''); };
   useEffect(() => { window.localStorage.setItem(projectNavigationKey, navigationMode); }, [navigationMode, projectNavigationKey]);
   const refreshWorkspace = () => { setVersion((current) => current + 1); onRefreshRoles(); };
-  const openAgent = (id: string, nativeSession?: string) => { if (selected) lastThreads.current[selected] = thread; const nextThread = nativeSession ?? (id === selected ? thread : lastThreads.current[id]); saveWorkspaceLocation(organization, id, nextThread); setSelected(id); setThread(nextThread); navigate('conversation'); };
-  const openNewThread = (id: string, project: string | null = null) => { if (selected) lastThreads.current[selected] = thread; saveWorkspaceLocation(organization, id); setSelected(id); setThread(undefined); newThreadSequence.current += 1; setNewThreadRequest({ agent: id, id: newThreadSequence.current, project }); navigate('conversation'); };
-  const chooseNewThread = (id: string) => { setNewThreadEmployee(id); navigate('new-thread'); };
+  const openAgent = (id: string, nativeSession?: string) => {
+    navigationSequence.current += 1;
+    activeCreationRequest.current = undefined;
+    if (selected) lastThreads.current[selected] = thread;
+    const nextThread = nativeSession ?? (id === selected ? thread : lastThreads.current[id]);
+    saveWorkspaceLocation(organization, id, nextThread); setSelected(id); setThread(nextThread); navigate('conversation');
+  };
+  const openNewThread = async (id: string, selection: ProjectThreadSelection = { project: null }, existing?: NativeThreadCreation) => {
+    const creation: NativeThreadCreation = existing ? {
+      creation_id: existing.creation_id,
+      ...(existing.project_id ? { project_id: existing.project_id } : {}),
+      ...(existing.checkout_branch ? { checkout_branch: existing.checkout_branch } : {}),
+    } : { creation_id: crypto.randomUUID(), ...(selection.project ? { project_id: selection.project } : {}), ...(selection.checkoutBranch ? { checkout_branch: selection.checkoutBranch } : {}) };
+    if (selected) lastThreads.current[selected] = thread;
+    saveWorkspaceLocation(organization, id); setSelected(id); setThread(undefined); newThreadSequence.current += 1;
+    navigationSequence.current += 1;
+    const request = { agent: id, id: newThreadSequence.current, ...creation };
+    activeCreationRequest.current = request.id;
+    setActiveCreationId(request.creation_id);
+    latestRequestByCreation.current[request.creation_id] = request.id;
+    setThreadCreationAttempts((current) => ({ ...current, [request.creation_id]: { request, state: 'pending' } }));
+    navigate('conversation');
+    try {
+      const target = agents.find((item) => item.id === id);
+      if (!target) throw new Error('Employee is not available for workspace preparation.');
+      const baseUrl = new URL(`/api/organizations/${organization}/agents/${id}/${target.configuration.runtime_type === 'codex' ? 'codex' : 'opencode'}`, window.location.origin).href;
+      const nativeThread = target.configuration.runtime_type === 'codex'
+        ? await createFesnyngCodexThread(baseUrl, session.csrf_token, creation)
+        : await createFesnyngOpenCodeThread(baseUrl, session.csrf_token, creation);
+      if (!workspaceMounted.current) return;
+      const warning = nativeThread.groupingWarning;
+      if (warning && groupingWarningSession(warning, organization, id) === nativeThread.id) setCreatedGroupingWarnings((current) => ({ ...current, [groupingWarningKey(organization, id, nativeThread.id)]: { agent: id, session: nativeThread.id, warning } }));
+      setProjectRevision((current) => current + 1);
+      if (latestRequestByCreation.current[request.creation_id] !== request.id) return;
+      setThreadCreationAttempts((current) => ({ ...current, [request.creation_id]: { request, state: 'completed', session: nativeThread.id } }));
+      if (activeCreationRequest.current === request.id) {
+        setThread(nativeThread.id); lastThreads.current[id] = nativeThread.id; saveWorkspaceLocation(organization, id, nativeThread.id);
+      }
+    } catch (cause) {
+      if (workspaceMounted.current && latestRequestByCreation.current[request.creation_id] === request.id) setThreadCreationAttempts((current) => ({ ...current, [request.creation_id]: { request, state: 'failed', detail: errorMessage(cause), uncertain: cause instanceof WorkspaceCreationUncertain } }));
+    }
+  };
+  const retryNewThread = (request: NativeThreadCreation & { agent: string; id: number }) => {
+    void openNewThread(request.agent, { project: request.project_id ?? null, ...(request.checkout_branch ? { checkoutBranch: request.checkout_branch } : {}) }, request);
+  };
+  const leaveFailedThreadCreation = (request: ThreadCreationAttempt['request']) => {
+    if (threadCreationAttempts[request.creation_id]?.state !== 'failed' || threadCreationAttempts[request.creation_id]?.uncertain) return;
+    activeCreationRequest.current = undefined;
+    setActiveCreationId((current) => current === request.creation_id ? undefined : current);
+  };
+  const returnToThreadCreation = (request: NativeThreadCreation & { agent: string; id: number }) => {
+    navigationSequence.current += 1;
+    activeCreationRequest.current = request.id;
+    if (selected) lastThreads.current[selected] = thread;
+    saveWorkspaceLocation(organization, request.agent);
+    setSelected(request.agent);
+    setThread(undefined);
+    setActiveCreationId(request.creation_id);
+    navigate('conversation');
+  };
+  const chooseNewThread = (id: string) => {
+    setNewThreadEmployee(id); navigate('new-thread');
+  };
+  const activeThreadCreation = activeCreationId === undefined ? undefined : threadCreationAttempts[activeCreationId];
+  const creationBlocksConversation = activeThreadCreation?.request.agent === selected && !thread && (activeThreadCreation.state === 'pending' || activeThreadCreation.state === 'failed');
   const openOrganizationView = (id: string, next: 'chart' | 'organization') => { if (id === organization) navigate(next); else onOrganization(id, next); };
   return <ConversationDraftsProvider organization={organization}><ThreadNotificationsProvider organization={organization} agents={agents} csrf={session.csrf_token} selectedAgent={selected}><div className="app-shell"><aside className={`app-sidebar ${mobile ? 'is-open' : ''}`} aria-label="Workspace navigation"><OrganizationSwitcher organizations={organizations} selected={organization} managerOrganizationIds={managerOrganizationIds} onSelect={(id) => { if (id !== organization) onOrganization(id); }} onOpen={openOrganizationView} />
     <input type="search" className="app-input" aria-label="Search organization threads" placeholder="Search all threads…" value={search} onChange={(event) => setSearch(event.target.value)} />
     <div className="sidebar-view-toggle" role="group" aria-label="Thread navigation view"><button className="app-button quiet" aria-pressed={navigationMode === 'projects'} onClick={() => setNavigationMode('projects')}>Projects</button><button className="app-button quiet" aria-pressed={navigationMode === 'employees'} onClick={() => setNavigationMode('employees')}>Employees</button></div>
     <div className="sidebar-thread-navigation">
-      {navigationMode === 'projects' ? <ProjectNavigation organization={organization} agents={agents} csrf={session.csrf_token} manager={manager} projectRevision={projectRevision} onChanged={() => setProjectRevision((current) => current + 1)} currentThread={selected && thread ? { agent: selected, session: thread } : undefined} detailsTarget={view === 'projects' ? projectDetailsTarget : null} onOpenProject={() => navigate('projects')} onOpenThread={(agentId, sessionId) => openAgent(agentId, sessionId)} onNewThread={({ agent: agentId, project }) => openNewThread(agentId, project)} /> : <><div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
+      {navigationMode === 'projects' ? <ProjectNavigation organization={organization} agents={agents} csrf={session.csrf_token} manager={manager} projectRevision={projectRevision} onChanged={() => setProjectRevision((current) => current + 1)} currentThread={selected && thread ? { agent: selected, session: thread } : undefined} detailsTarget={view === 'projects' ? projectDetailsTarget : null} onOpenProject={() => navigate('projects')} onOpenThread={(agentId, sessionId) => openAgent(agentId, sessionId)} onNewThread={({ agent: agentId, ...selection }) => { void openNewThread(agentId, selection); }} /> : <><div className="sidebar-heading"><span>Agents · {agents.length}</span>{manager && <button className="app-button quiet" aria-label="Create agent" onClick={() => { setSelected(''); navigate('agent-settings'); }}>+</button>}</div>
       {search.trim() && <OrganizationThreadSearch organization={organization} agents={agents} query={search} onOpen={openAgent} />}
       <div className="agent-list" hidden={Boolean(search.trim())}>{agents.map((item) => <div className="agent-entry" key={item.id}>
         <div className="agent-card"><button className="agent-choice" aria-pressed={selected === item.id} aria-expanded={selected === item.id} onClick={() => openAgent(item.id)}><span className="agent-avatar-wrap"><span className="agent-avatar" aria-hidden="true">{item.name.slice(0, 2).toUpperCase()}</span><ThreadNotificationBadge agent={item.id} /></span><span className="agent-name-row"><span className="agent-name">{item.name}</span></span><small className="agent-role">{item.title || 'Agent'}</small></button><button className="agent-new-thread-button" aria-label={`New thread for ${item.name}`} title="New thread" onClick={() => chooseNewThread(item.id)}><PlusIcon aria-hidden="true" size={16} /></button></div>
@@ -144,9 +238,16 @@ function OrganizationWorkspace({ organization, organizations, managerOrganizatio
   </aside><main className="app-workspace"><header className="workspace-header"><button className="app-button mobile-menu" onClick={() => setMobile(!mobile)} aria-label="Toggle navigation">☰</button><div><h1 ref={headingRef} tabIndex={-1}>{view === 'chart' ? 'Reporting chart' : view === 'organization' ? 'Organization settings' : view === 'projects' ? 'Projects' : agent?.name ?? 'Create agent'}</h1><p className="muted">{agent && !['chart', 'organization', 'projects'].includes(view) ? `${agent.title || 'Persistent agent'} · ${agent.configuration.workspace}` : organizations.find((item) => item.id === organization)?.name}</p></div>
     <div className="header-actions">{agent && !['chart', 'organization'].includes(view) && <><button className="app-button quiet header-icon-button" aria-label="Memory" title="Memory" onClick={() => navigate('memory')}><BrainIcon aria-hidden="true" /></button>{manager && <button className="app-button quiet header-icon-button" aria-label="Agent settings" title="Agent settings" onClick={() => navigate('agent-settings')}><SettingsIcon aria-hidden="true" /></button>}</>}<button className="app-button quiet header-icon-button" aria-label="Refresh workspace" title="Refresh workspace" onClick={refreshWorkspace}><RefreshCwIcon aria-hidden="true" /></button></div></header>
     {error && <p className="app-error" role="alert">{error}</p>}<div className="workspace-content"><NotificationErrors />
-    {agent && <AgentConversation organization={organization} agent={agent} csrfToken={session.csrf_token} hidden={view !== 'conversation'} refreshKey={version} projectRevision={projectRevision} sessionId={thread} threadListTarget={navigationMode === 'employees' ? threadListTarget : null} newThreadRequest={newThreadRequest?.agent === agent.id ? newThreadRequest.id : undefined} projectId={newThreadRequest?.agent === agent.id ? newThreadRequest.project : null} onNewThreadStarted={() => {}} threadPageSize={threadPageSize} onThreadSelect={() => { navigate('conversation'); setMobile(false); }} onSessionChange={(id) => { setMobile(false); setThread(id); lastThreads.current[agent.id] = id; if (id) { setNewThreadRequest((current) => current?.agent === agent.id ? undefined : current); setProjectRevision((current) => current + 1); } saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} onOpen={openAgent} />}
+    {Object.values(threadCreationAttempts).map((attempt) => {
+      const employee = agents.find((item) => item.id === attempt.request.agent)?.name ?? 'the selected employee';
+      const current = activeThreadCreation?.request.creation_id === attempt.request.creation_id && attempt.request.agent === selected;
+      if (attempt.state === 'pending') return <p key={attempt.request.id} className="app-notice" role="status">Preparing this thread workspace… {!current && <button className="app-button quiet" onClick={() => returnToThreadCreation(attempt.request)}>Return to {employee} preparation</button>}</p>;
+      if (attempt.state === 'failed') return <p key={attempt.request.id} className="app-error" role="alert">{attempt.detail} <button className="app-button quiet" onClick={() => retryNewThread(attempt.request)}>{attempt.uncertain ? 'Check preparation again' : 'Retry preparation'}</button>{!attempt.uncertain && current && <button className="app-button quiet" onClick={() => leaveFailedThreadCreation(attempt.request)}>Start a different thread</button>}{!current && <button className="app-button quiet" onClick={() => returnToThreadCreation(attempt.request)}>Return to {employee} preparation</button>}</p>;
+      return <p key={attempt.request.id} className="app-notice" role="status">A thread workspace is ready for {employee}. <button className="app-button quiet" onClick={() => openAgent(attempt.request.agent, attempt.session)}>Open prepared thread</button></p>;
+    })}
+    {agent && !creationBlocksConversation && <AgentConversation organization={organization} agent={agent} csrfToken={session.csrf_token} hidden={view !== 'conversation'} refreshKey={version} projectRevision={projectRevision} sessionId={thread} threadListTarget={navigationMode === 'employees' ? threadListTarget : null} newThreadRequest={undefined} createdGroupingWarning={thread ? createdGroupingWarnings[groupingWarningKey(organization, agent.id, thread)]?.warning : undefined} onGroupingWarningResolved={thread ? () => clearCreatedGroupingWarning(agent.id, thread) : undefined} onNewThreadStarted={() => {}} threadPageSize={threadPageSize} onThreadSelect={() => { navigate('conversation'); setMobile(false); activeCreationRequest.current = undefined; setActiveCreationId(undefined); }} onSessionChange={(id) => { setMobile(false); setThread(id); activeCreationRequest.current = undefined; setActiveCreationId(undefined); lastThreads.current[agent.id] = id; if (id) setProjectRevision((current) => current + 1); saveWorkspaceLocation(organization, agent.id, id); }} onError={(cause) => setError(errorMessage(cause))} onOpen={openAgent} />}
     {view === 'projects' && <div className="workspace-page project-details-page" ref={setProjectDetailsTarget} />}
-    {newThreadEmployee && agents.find((item) => item.id === newThreadEmployee) && <div className="workspace-page"><EmployeeNewThreadChooser organization={organization} agent={agents.find((item) => item.id === newThreadEmployee)!} onCancel={() => { setNewThreadEmployee(undefined); navigate('conversation'); }} onStart={(project) => { const employee = newThreadEmployee; setNewThreadEmployee(undefined); openNewThread(employee, project); }} /></div>}
+    {newThreadEmployee && agents.find((item) => item.id === newThreadEmployee) && <div className="workspace-page"><EmployeeNewThreadChooser organization={organization} agent={agents.find((item) => item.id === newThreadEmployee)!} onCancel={() => { setNewThreadEmployee(undefined); navigate('conversation'); }} onStart={(selection) => { const employee = newThreadEmployee; setNewThreadEmployee(undefined); void openNewThread(employee, selection); }} /></div>}
     {view === 'agent-settings' && manager && <AgentSettings key={agent?.id ?? 'new'} organization={organization} agent={agent} agents={agents} csrf={session.csrf_token} onSaved={(saved) => { setAgents((items) => [...items.filter((item) => item.id !== saved.id), saved]); setSelected(saved.id); }} />}
     {view === 'organization' && manager && <OrganizationSettings onIdentityChanged={onIdentityChanged} organization={organization} csrf={session.csrf_token} agents={agents} onChanged={refreshWorkspace} />}
     {view === 'memory' && agent && <AgentMemory key={agent.id} organization={organization} agent={agent.id} csrf={session.csrf_token} />}
@@ -188,7 +289,7 @@ function FrozenHistoryNavigation({ bindings, current, onSelect }: { bindings: Se
   return <section className="app-panel" aria-label="Frozen thread history"><h3>Frozen history</h3><p className="muted">These original threads remain permanently read-only.</p>{frozen.map((binding) => <button key={binding.session_id} type="button" className="app-button quiet" aria-current={binding.session_id === current ? 'page' : undefined} onClick={() => onSelect(binding.session_id)}>{binding.title} <span className="muted">({binding.runtime_type === 'codex' ? 'Codex' : 'OpenCode'})</span></button>)}</section>;
 }
 
-export function AgentConversation({ organization, agent, csrfToken, hidden, refreshKey, projectRevision = 0, sessionId, threadListTarget, newThreadRequest, projectId, onNewThreadStarted, threadPageSize, onThreadSelect, onSessionChange, onError, onOpen }: { organization: string; agent: Agent; csrfToken: string; hidden: boolean; refreshKey: number; projectRevision?: number; sessionId: string | undefined; threadListTarget: HTMLElement | null; newThreadRequest: number | undefined; projectId?: string | null; onNewThreadStarted: (request: number) => void; threadPageSize: number; onThreadSelect: () => void; onSessionChange: (id: string | undefined) => void; onError: (cause: unknown) => void; onOpen: (id: string, session?: string) => void }) {
+export function AgentConversation({ organization, agent, csrfToken, hidden, refreshKey, projectRevision = 0, sessionId, threadListTarget, newThreadRequest, creation, createdGroupingWarning, onGroupingWarningResolved, onNewThreadStarted, onNewThreadFailed, threadPageSize, onThreadSelect, onSessionChange, onError, onOpen }: { organization: string; agent: Agent; csrfToken: string; hidden: boolean; refreshKey: number; projectRevision?: number; sessionId: string | undefined; threadListTarget: HTMLElement | null; newThreadRequest: number | undefined; creation?: NativeThreadCreation; createdGroupingWarning?: ProjectGroupingWarning; onGroupingWarningResolved?: () => void; onNewThreadStarted: (request: number) => void; onNewThreadFailed?: (request: number, cause: unknown) => void; threadPageSize: number; onThreadSelect: () => void; onSessionChange: (id: string | undefined) => void; onError: (cause: unknown) => void; onOpen: (id: string, session?: string) => void }) {
   const inventoryKey = `${organization}:${agent.id}:${refreshKey}:${sessionId ?? ''}`;
   const [inventory, setInventory] = useState<{ key: string; bindings?: SessionBinding[]; error?: string }>({ key: '' });
   const [projectLabels, setProjectLabels] = useState<Record<string, string>>({});
@@ -229,9 +330,10 @@ export function AgentConversation({ organization, agent, csrfToken, hidden, refr
         }
         return changed ? remaining : current;
       });
+      if (createdGroupingWarning && sessionId && resolvedWarnings.has(groupingWarningKey(organization, agent.id, sessionId))) onGroupingWarningResolved?.();
     }).catch(() => { if (!controller.signal.aborted) setProjectLabels({}); });
     return () => controller.abort();
-  }, [agent.id, organization, projectRevision, refreshKey]);
+  }, [agent.id, createdGroupingWarning, onGroupingWarningResolved, organization, projectRevision, refreshKey, sessionId]);
   const bindings = inventory.key === inventoryKey ? inventory.bindings : undefined;
   const bindingError = inventory.key === inventoryKey ? inventory.error ?? '' : '';
   const selectedBinding = sessionId ? bindings?.find((binding) => binding.session_id === sessionId) : undefined;
@@ -243,8 +345,8 @@ export function AgentConversation({ organization, agent, csrfToken, hidden, refr
   const navigation = <FrozenHistoryNavigation bindings={bindings ?? []} current={sessionId} onSelect={(id) => { onSessionChange(id); onThreadSelect(); }} />;
   if (!sessionId && agent.configuration_status === 'pending') return <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}<p className="app-notice" role="status">The selected harness is still applying. New threads will be available after configuration finishes.</p></div>;
   const sessionChanged = (id: string | undefined) => { onSessionChange(id); };
-  const groupingWarning = sessionId ? projectGroupingWarnings[groupingWarningKey(organization, agent.id, sessionId)] : undefined;
-  const conversation = <ConversationBoundary key={`${agent.id}:${sessionId ?? 'new'}:${harness}:${readOnly}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}>{harness === 'codex' ? <CodexConversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/codex`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} projectId={projectId} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} /> : <Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} projectId={projectId} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} />}</Suspense></ConversationBoundary>;
+  const groupingWarning = sessionId ? projectGroupingWarnings[groupingWarningKey(organization, agent.id, sessionId)] ?? (createdGroupingWarning && groupingWarningSession(createdGroupingWarning, organization, agent.id) === sessionId ? createdGroupingWarning : undefined) : undefined;
+  const conversation = <ConversationBoundary key={`${agent.id}:${sessionId ?? 'new'}:${harness}:${readOnly}`}><Suspense fallback={<p role="status" className="app-empty">Loading conversation…</p>}>{harness === 'codex' ? <CodexConversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/codex`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} creation={creation} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} onNewThreadFailed={onNewThreadFailed} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} /> : <Conversation key={agent.id} baseUrl={new URL(`/api/organizations/${organization}/agents/${agent.id}/opencode`, window.location.origin).href} csrfToken={csrfToken} refreshKey={refreshKey} sessionId={sessionId} showThreadList={false} threadListTarget={readOnly ? null : threadListTarget} newThreadRequest={readOnly ? undefined : newThreadRequest} creation={creation} projectLabels={projectLabels} onNewThreadStarted={onNewThreadStarted} onNewThreadFailed={onNewThreadFailed} threadPageSize={threadPageSize} onThreadSelect={onThreadSelect} onSessionChange={sessionChanged} onError={onError} readOnly={readOnly} />}</Suspense></ConversationBoundary>;
   const shell = <div className="conversation-region" hidden={hidden}>{threadListTarget ? createPortal(navigation, threadListTarget) : navigation}{groupingWarning && <p className="app-notice" role="status">This thread was created, but its Project could not be saved: {groupingWarning.detail} Open Projects and assign the thread to retry.</p>}{conversation}</div>;
   return <ConversationDeliveryProvider organization={organization} agent={agent.id} session={sessionId} csrf={csrfToken} onOpen={onOpen} readOnly={readOnly}>{shell}</ConversationDeliveryProvider>;
 }

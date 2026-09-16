@@ -1,5 +1,6 @@
 import { createOpencodeClient, type OpencodeClient } from '@assistant-ui/react-opencode';
-import { publishProjectGroupingWarning } from '../project-grouping-warning';
+import { projectGroupingWarning, publishProjectGroupingWarning } from '../project-grouping-warning';
+import { WorkspaceCreationUncertain, WorkspacePreparationFailed, workspaceCreationFailure, type NativeThreadCreation } from '../workspace-api';
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -29,7 +30,7 @@ async function activeOpenCodeThreadList(response: Response) {
 async function nativeFailure(response: Response) {
   const body: unknown = await response.clone().json().catch(() => undefined);
   const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
-  return new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+  return workspaceCreationFailure(detail, `Request failed (${response.status}).`);
 }
 
 /**
@@ -60,17 +61,34 @@ export function createFesnyngOpenCodeFetch(csrfToken: string, fetchImpl: FetchLi
   };
 }
 
-export function createFesnyngOpenCodeClient(baseUrl: string, csrfToken: string, projectId?: string | null): OpencodeClient {
+export function createFesnyngOpenCodeClient(baseUrl: string, csrfToken: string, creation?: NativeThreadCreation): OpencodeClient {
   const transport = createFesnyngOpenCodeFetch(csrfToken);
   return createOpencodeClient({
     baseUrl,
     fetch: (input, init = {}) => {
       const method = (init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
       const url = input instanceof Request ? input.url : String(input);
-      const isNewThread = projectId && method === 'POST' && new URL(url, window.location.origin).pathname.endsWith('/session');
+      const isNewThread = creation && method === 'POST' && new URL(url, window.location.origin).pathname.endsWith('/session');
       if (!isNewThread) return transport(input, init);
       const current = typeof init.body === 'string' && init.body ? JSON.parse(init.body) as Record<string, unknown> : {};
-      return transport(input, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers }, body: JSON.stringify({ ...current, project_id: projectId }) });
+      return transport(input, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers }, body: JSON.stringify({ ...current, ...creation }) });
     },
   });
+}
+
+/** Prepare one OpenCode thread before the conversation runtime opens it. */
+export async function createFesnyngOpenCodeThread(baseUrl: string, csrfToken: string, creation: NativeThreadCreation) {
+  try {
+    const response = await createFesnyngOpenCodeFetch(csrfToken)(`${baseUrl.replace(/\/$/, '')}/session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(creation),
+    });
+    const receipt: unknown = await response.json();
+    if (!receipt || typeof receipt !== 'object') throw new Error('OpenCode thread receipt is invalid.');
+    const id = (receipt as Record<string, unknown>).id ?? (receipt as Record<string, unknown>).session_id;
+    if (typeof id !== 'string') throw new Error('OpenCode thread receipt is invalid.');
+    return { id, groupingWarning: projectGroupingWarning(receipt) };
+  } catch (cause) {
+    if (cause instanceof WorkspaceCreationUncertain || cause instanceof WorkspacePreparationFailed) throw cause;
+    throw new WorkspaceCreationUncertain('Thread preparation may have started. Check this preparation again to recover its result.', creation.creation_id);
+  }
 }

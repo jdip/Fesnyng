@@ -31,6 +31,7 @@ import { toolPreviewText } from './components/assistant-ui/elements/group-previe
 import { TooltipIconButton } from './components/assistant-ui/elements/tooltip-icon-button';
 import { InlineComposer } from './InlineComposer';
 import { createFesnyngOpenCodeClient } from './lib/opencode-client';
+import { type NativeThreadCreation } from './workspace-api';
 
 export type ConversationProps = {
   /** Absolute `/api/organizations/{org}/agents/{agent}/opencode` facade URL. */
@@ -50,12 +51,13 @@ export type ConversationProps = {
   threadListTarget?: HTMLElement | null;
   /** Monotonic shell request that starts a maintained native new thread. */
   newThreadRequest?: number;
-  /** A newly-created native thread may receive this control-plane Project after its native receipt. */
-  projectId?: string | null;
+  /** Control-plane-only selection for one new native thread. */
+  creation?: NativeThreadCreation;
   /** Fesnyng-owned grouping labels for employee navigation. */
   projectLabels?: Readonly<Record<string, string>>;
   /** Acknowledges the request only after the runtime accepts its transition. */
   onNewThreadStarted?: (request: number) => void;
+  onNewThreadFailed?: (request: number, error: unknown) => void;
   threadPageSize?: number;
   onThreadSelect?: () => void;
   /** A durable historical snapshot. Its original harness remains readable but cannot write. */
@@ -85,9 +87,10 @@ export function Conversation({
   refreshKey = 0,
   threadListTarget,
   newThreadRequest,
-  projectId,
+  creation,
   projectLabels,
   onNewThreadStarted,
+  onNewThreadFailed,
   threadPageSize = 6,
   onThreadSelect,
   readOnly = false,
@@ -119,8 +122,8 @@ export function Conversation({
     if (document.activeElement !== permissionTrigger.current) conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus();
   };
   const client = useMemo(
-    () => projectId ? createFesnyngOpenCodeClient(baseUrl, csrfToken, projectId) : createFesnyngOpenCodeClient(baseUrl, csrfToken),
-    [baseUrl, csrfToken, projectId],
+    () => creation ? createFesnyngOpenCodeClient(baseUrl, csrfToken, creation) : createFesnyngOpenCodeClient(baseUrl, csrfToken),
+    [baseUrl, csrfToken, creation],
   );
   const runtime = useOpenCodeRuntime({
     client,
@@ -150,10 +153,13 @@ export function Conversation({
     void runtime.threads.switchToNewThread().then(() => {
       completedNewThreadRequest.current = newThreadRequest;
       onNewThreadStarted?.(newThreadRequest);
-    }).catch((error: unknown) => onError?.(error)).finally(() => {
+    }).catch((error: unknown) => {
+      if (onNewThreadFailed) onNewThreadFailed(newThreadRequest, error);
+      else onError?.(error);
+    }).finally(() => {
       if (inFlightNewThreadRequest.current === newThreadRequest) inFlightNewThreadRequest.current = undefined;
     });
-  }, [newThreadRequest, onError, onNewThreadStarted, runtime]);
+  }, [newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, runtime]);
   const components = useMemo(() => ({
     Composer: readOnly ? FrozenThreadNotice : ConversationComposer,
     ToolFallback: OpenCodeToolFallback,

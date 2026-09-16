@@ -71,6 +71,25 @@ class PermissionReply(Contract):
     reply: Literal["once", "reject"]
 
 
+def session_create_kwargs(body: SessionCreate | None) -> dict[str, str]:
+    """Pass host-resolved workspace preparation fields only when the caller supplied them."""
+
+    if body is None:
+        return {}
+    values: dict[str, str] = {}
+    if body.creation_id is not None:
+        values["creation_id"] = str(body.creation_id)
+    if body.project_id is not None:
+        values["project_id"] = str(body.project_id)
+    if body.requested_checkout_branch is not None:
+        values["requested_checkout_branch"] = body.requested_checkout_branch
+    if body.repository_url is not None:
+        values["repository_url"] = body.repository_url
+    if body.checkout_branch is not None:
+        values["checkout_branch"] = body.checkout_branch
+    return values
+
+
 class NativeRuntime(Protocol):
     def lock(self, agent_id: str) -> asyncio.Lock: ...
 
@@ -86,7 +105,17 @@ class NativeRuntime(Protocol):
     ) -> Any: ...
 
     async def create_session(
-        self, organization_id: str, agent_id: str, title: str, workspace: str
+        self,
+        organization_id: str,
+        agent_id: str,
+        title: str,
+        workspace: str,
+        *,
+        creation_id: str | None = None,
+        project_id: str | None = None,
+        requested_checkout_branch: str | None = None,
+        repository_url: str | None = None,
+        checkout_branch: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def workspace_path(
@@ -184,12 +213,9 @@ class Workspace:
         )
         if workspace != envelope.configuration.workspace:
             raise ValueError("Workspace is not assigned to this agent")
-        try:
-            return await self.runtime.create_session(org, agent, title, workspace)
-        except RuntimeUnavailable as error:
-            raise RuntimeUnavailable(
-                "Native session creation outcome is uncertain; inspect mapped sessions before retrying"
-            ) from error
+        return await self.runtime.create_session(
+            org, agent, title, workspace, **session_create_kwargs(body)
+        )
 
     async def get(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         session = await self._scoped_session(org, agent, session_id)

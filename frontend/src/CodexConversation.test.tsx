@@ -42,6 +42,22 @@ test('uses the Codex facade for the writable native thread inventory and mutatio
   expect(JSON.parse(request.mock.calls[4][1]!.body as string)).toEqual({ time: { archived: null } });
 });
 
+test('sends one stable Project workspace selection on a Codex creation retry', async () => {
+  const request = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    void input;
+    void init;
+    return new Response(JSON.stringify({ id: 'thread-two', title: 'New thread' }));
+  });
+  vi.stubGlobal('fetch', request);
+  const creation = { project_id: 'website', checkout_branch: 'release', creation_id: 'f6940d82-c96d-4e36-8dd5-ebd63a4999c4' };
+  const adapter = createCodexThreadListAdapter('http://workspace.test/api/organizations/org/agents/agent/codex', 'csrf-example', creation);
+
+  await adapter.initialize('local-one');
+  await adapter.initialize('local-two');
+
+  expect(request.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string))).toEqual([creation, creation]);
+});
+
 
 test('mounts a Codex thread with native pending input and its streamed completion', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);

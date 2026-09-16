@@ -339,12 +339,13 @@ test('expands only the selected agent and searches titles beyond the sidebar pag
 });
 
 test('starts a new native thread from every agent card without selecting the card button first', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
     const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
       : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
       : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
       : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
       : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents/beta/opencode/session') && init.method === 'POST' ? { id: 'beta-new', title: 'New thread' }
       : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
       : [];
     return new Response(JSON.stringify(body));
@@ -381,6 +382,270 @@ test('switches to Projects without replacing the current conversation draft and 
   fireEvent.click(screen.getByRole('button', { name: 'Projects' }));
   expect(await screen.findByRole('button', { name: 'Website', pressed: true })).toBeTruthy();
   expect(screen.getByRole('textbox', { name: 'Composer draft' })).toHaveProperty('value', 'Keep this draft while organizing.');
+});
+
+test('retries a failed repository preparation with the same creation identity', async () => {
+  let nativePosts = 0;
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/opencode/session') && init.method === 'POST') {
+      nativePosts += 1;
+      return nativePosts === 1
+        ? Response.json({ detail: { code: 'workspace_preparation_failed', detail: 'Git authentication failed.' } }, { status: 422 })
+        : Response.json({ id: 'prepared-thread', title: 'Prepared thread', fesnyng_project_grouping: { state: 'ungrouped', requested_project_id: 'website', retry_path: '/organizations/org/agents/alpha/sessions/prepared-thread/project', detail: 'Project assignment needs retry.' } });
+    }
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: 'https://example.test/website.git', default_checkout_branch: 'test', archived: false }]
+      : [];
+    return Response.json(body);
+  });
+  vi.stubGlobal('fetch', request);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'website' } });
+  fireEvent.change(screen.getByLabelText('Starting branch'), { target: { value: 'release' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByText('Git authentication failed.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry preparation' }));
+  expect(await screen.findByText('Native conversation prepared-thread')).toBeTruthy();
+  expect(await screen.findByText(/Project assignment needs retry/)).toBeTruthy();
+  const creations = request.mock.calls.filter(([url, init]) => String(url).endsWith('/opencode/session') && (init as RequestInit).method === 'POST').map(([, init]) => JSON.parse((init as RequestInit).body as string));
+  expect(creations).toHaveLength(2);
+  expect(creations[0]).toEqual({ project_id: 'website', checkout_branch: 'release', creation_id: expect.any(String) });
+  expect(creations[1]).toEqual(creations[0]);
+});
+
+test('keeps the conversation selected after navigating away from a pending Project thread creation', async () => {
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finish = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') return pending;
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : input.endsWith('/agents/beta/sessions') ? [{ session_id: 'thread-b', title: 'Existing B' }]
+      : [];
+    return Response.json(body);
+  }));
+  window.history.replaceState(null, '', '/#organization=org&agent=beta&thread=thread-b');
+  render(<App />);
+  expect(await screen.findByText('Native conversation thread-b')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByText('Preparing this thread workspace…')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /Beta/, pressed: false }));
+  expect(await screen.findByText('Native conversation thread-b')).toBeTruthy();
+
+  finish(Response.json({ id: 'thread-a', title: 'Created A' }));
+
+  await waitFor(() => expect(screen.getByText('Native conversation thread-b')).toBeTruthy());
+  expect(screen.queryByText('Native conversation thread-a')).toBeNull();
+});
+
+test('does not restore an unmounted organization when its creation finishes late', async () => {
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finish = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/organizations/org-a/agents/alpha/opencode/session') && init.method === 'POST') return pending;
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org-a', name: 'Organization A' }, { id: 'org-b', name: 'Organization B' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input === '/api/organizations/org-a/agents' ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org-b/agents' ? [{ id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org-a/projects' ? [{ id: 'project-a', organization_id: 'org-a', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : [];
+    return Response.json(body);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  fireEvent.pointerDown(screen.getByRole('button', { name: 'Switch organization: Organization A' }), { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Organization B' }));
+  expect(await screen.findByRole('heading', { name: 'Reporting chart' })).toBeTruthy();
+  const locationAfterSwitch = window.location.hash;
+  finish(Response.json({ id: 'late-a', title: 'Late A' }));
+  await waitFor(() => expect(window.location.hash).toBe(locationAfterSwitch));
+});
+
+test('keeps an existing conversation mounted when a pending Project thread creation fails elsewhere', async () => {
+  let reject!: (cause: Error) => void;
+  const pending = new Promise<Response>((_resolve, rejectPromise) => { reject = rejectPromise; });
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') return pending;
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : input.endsWith('/agents/beta/sessions') ? [{ session_id: 'thread-b', title: 'Existing B' }]
+      : [];
+    return Response.json(body);
+  }));
+  window.history.replaceState(null, '', '/#organization=org&agent=beta&thread=thread-b');
+  render(<App />);
+  expect(await screen.findByText('Native conversation thread-b')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  fireEvent.click(screen.getByRole('button', { name: /Beta/, pressed: false }));
+  expect(await screen.findByText('Native conversation thread-b')).toBeTruthy();
+
+  reject(new Error('Workspace preparation failed.'));
+
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  expect(screen.getByText('Native conversation thread-b')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /Alpha/, pressed: false }));
+  expect(await screen.findByRole('alert')).toHaveProperty(
+    'textContent',
+    expect.stringContaining('Thread preparation may have started.'),
+  );
+});
+
+test('keeps an existing thread available while another Project thread prepares for the same employee', async () => {
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finish = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') return pending;
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : input.endsWith('/agents/alpha/sessions') ? [{ session_id: 'existing-a', title: 'Existing A' }]
+      : [];
+    return Response.json(body);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search organization threads' }), { target: { value: 'Existing A' } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Existing A' }));
+
+  expect(await screen.findByText('Native conversation existing-a')).toBeTruthy();
+  expect(screen.getByText('Preparing this thread workspace…')).toBeTruthy();
+  finish(Response.json({ id: 'new-a', title: 'Created A' }));
+  await waitFor(() => expect(screen.queryByText('Preparing this thread workspace…')).toBeNull());
+});
+
+test('keeps an uncertain creation recoverable while a distinct thread succeeds', async () => {
+  let alphaPosts = 0;
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') {
+      alphaPosts += 1;
+      return alphaPosts === 1
+        ? Response.json({ detail: 'The receipt was lost.' }, { status: 503 })
+        : Response.json({ id: 'recovered-a', title: 'Recovered A' });
+    }
+    if (input.endsWith('/agents/beta/opencode/session') && init.method === 'POST') return Response.json({ id: 'new-b', title: 'Created B' });
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : [];
+    return Response.json(body);
+  });
+  vi.stubGlobal('fetch', request);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Thread preparation may have started.'));
+  const firstAlphaRequest = request.mock.calls.find(([url, init]) => String(url).endsWith('/agents/alpha/opencode/session') && (init as RequestInit).method === 'POST');
+  const firstCreation = JSON.parse((firstAlphaRequest![1] as RequestInit).body as string).creation_id;
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Beta' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByText('Native conversation new-b')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Check preparation again' }));
+  expect(await screen.findByText('Native conversation recovered-a')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Check preparation again' })).toBeNull();
+  const alphaBodies = request.mock.calls.filter(([url, init]) => String(url).endsWith('/agents/alpha/opencode/session') && (init as RequestInit).method === 'POST').map(([, init]) => JSON.parse((init as RequestInit).body as string));
+  expect(alphaBodies).toHaveLength(2);
+  expect(alphaBodies[1].creation_id).toBe(firstCreation);
+});
+
+test('lets a confirmed Project workspace failure be left before a distinct new thread is started', async () => {
+  let posts = 0;
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') {
+      posts += 1;
+      return posts === 1
+        ? Response.json({ detail: { code: 'workspace_preparation_failed', detail: 'The configured branch does not exist.' } }, { status: 422 })
+        : Response.json({ id: 'replacement-thread', title: 'Replacement thread' });
+    }
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : [];
+    return Response.json(body);
+  });
+  vi.stubGlobal('fetch', request);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByText('The configured branch does not exist.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Start a different thread' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  expect(await screen.findByText('Native conversation replacement-thread')).toBeTruthy();
+  const bodies = request.mock.calls.filter(([url, init]) => String(url).endsWith('/opencode/session') && (init as RequestInit).method === 'POST').map(([, init]) => JSON.parse((init as RequestInit).body as string));
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1].creation_id).not.toBe(bodies[0].creation_id);
+});
+
+test('offers a visible return to the employee with a pending Project preparation', async () => {
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finish = resolve; });
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input.endsWith('/agents/alpha/opencode/session') && init.method === 'POST') return pending;
+    const body = input === '/api/auth/session' ? { user: { id: 'human', display_name: 'Member' }, csrf_token: 'csrf-example' }
+      : input === '/api/organizations' ? [{ id: 'org', name: 'Organization' }]
+      : input.endsWith('/workspace-preferences') ? { thread_list_page_size: 6 }
+      : input.endsWith('/thread-acknowledgements') ? { acknowledgements: [] }
+      : input.endsWith('/members') ? [{ user_id: 'human', role: 'member' }]
+      : input.endsWith('/agents') ? [{ id: 'alpha', name: 'Alpha', configuration: { workspace: 'default' } }, { id: 'beta', name: 'Beta', configuration: { workspace: 'default' } }]
+      : input === '/api/organizations/org/projects' ? [{ id: 'project-a', organization_id: 'org', name: 'Project A', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]
+      : [];
+    return Response.json(body);
+  });
+  vi.stubGlobal('fetch', request);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'New thread for Alpha' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'project-a' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Start thread' }));
+  fireEvent.click(screen.getByRole('button', { name: /Beta/, pressed: false }));
+  fireEvent.click(screen.getByRole('button', { name: 'New thread for Beta' }));
+  expect(await screen.findByRole('button', { name: 'Return to Alpha preparation' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Return to Alpha preparation' }));
+  expect(await screen.findByText('Preparing this thread workspace…')).toBeTruthy();
+  expect(request.mock.calls.filter(([url, init]) => String(url).endsWith('/agents/beta/opencode/session') && (init as RequestInit).method === 'POST')).toHaveLength(0);
+  finish(Response.json({ id: 'new-a', title: 'Created A' }));
+  expect(await screen.findByText('Native conversation new-a')).toBeTruthy();
 });
 
 test('keeps the role selectable inside the compact agent card while threads remain outside it', async () => {
