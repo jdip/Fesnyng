@@ -23,6 +23,7 @@ export type CodexConversationProps = {
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
   onError?: (error: unknown) => void | Promise<void>;
+  onTitleChanged?: () => void;
   showThreadList?: boolean;
   refreshKey?: number;
   threadListTarget?: HTMLElement | null;
@@ -142,6 +143,10 @@ function useCodexHistory(baseUrl: string, csrfToken: string, sessionId: string |
         if (typeof value.method !== 'string' || !value.params || typeof value.params !== 'object') return;
         const notification: CodexEvent = { method: value.method, params: value.params as Record<string, unknown> };
         setData((current) => current ? applyCodexEvent(current, notification) : current);
+        if (notification.method === 'thread/name/updated') {
+          window.dispatchEvent(new CustomEvent('fesnyng:thread-title-updated', { detail: sessionId }));
+          void reload();
+        }
         if (notification.method === 'turn/completed' || notification.method === 'thread/deleted' || notification.method === 'thread/archived') void reload();
       } catch { /* EventSource reconnect and completed-turn reconciliation recover malformed notices. */ }
     });
@@ -265,6 +270,7 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 
 function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted } = props;
+  const { onError: onTitleRefreshError, onTitleChanged, sessionId: selectedSessionId } = props;
   const [historyNotice, setHistoryNotice] = useState('');
   const executionDisabled = Boolean(props.readOnly || props.executionBlocked);
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
@@ -275,6 +281,15 @@ function CodexConversationView(props: CodexConversationProps) {
     onOpened: props.onThreadSelect,
     restoreFocus: () => conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus(),
   });
+  useEffect(() => {
+    const refreshTitles = (event: Event) => {
+      if (!(event instanceof CustomEvent) || event.detail !== selectedSessionId) return;
+      void runtime.threads.reload().catch((cause: unknown) => onTitleRefreshError?.(cause));
+      onTitleChanged?.();
+    };
+    window.addEventListener('fesnyng:thread-title-updated', refreshTitles);
+    return () => window.removeEventListener('fesnyng:thread-title-updated', refreshTitles);
+  }, [onTitleChanged, onTitleRefreshError, runtime, selectedSessionId]);
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (executionDisabled || newThreadRequest === undefined || completed.current === newThreadRequest) return;

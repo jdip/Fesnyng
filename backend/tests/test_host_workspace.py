@@ -161,6 +161,41 @@ class Native:
         raise AssertionError((path, method, body, directory))
 
 
+def test_native_title_is_persisted_once_without_overriding_a_manual_rename(tmp_path):
+    org, agent = str(uuid4()), str(uuid4())
+    store = HostStore(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store.initialize()
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Agent"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.save_session(
+        org,
+        agent,
+        "thread",
+        "/workspace/default/thread",
+        "New thread",
+        title_generation_state="native_pending",
+    )
+    assert (
+        store.observe_native_title(org, agent, "thread", "New session - 2026-09-16T15:00:00Z")
+        == "New thread"
+    )
+    assert store.session(org, agent, "thread")["title_generation_state"] == "native_pending"
+    assert store.observe_native_title(org, agent, "thread", "Plan release") == "Plan release"
+    assert store.session(org, agent, "thread")["title_generation_state"] == "generated"
+    store.rename_session(org, agent, "thread", "My title")
+    assert store.observe_native_title(org, agent, "thread", "Late native title") == "My title"
+
+
 class EventNative(Native):
     def __init__(self):
         super().__init__()
@@ -479,6 +514,7 @@ def test_workspace_facade_scopes_native_history_and_persists_text_prompt(tmp_pat
                 "creation_id": creation_id,
                 "repository_url": "https://example.test/repository.git",
                 "checkout_branch": "test",
+                "automatic_title": True,
             }
             uncertain_id = str(uuid4())
             native.creation_error = WorkspaceCreationUncertain(uncertain_id, "reconcile")

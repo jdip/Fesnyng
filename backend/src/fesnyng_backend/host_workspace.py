@@ -120,6 +120,7 @@ class NativeRuntime(Protocol):
         requested_checkout_branch: str | None = None,
         repository_url: str | None = None,
         checkout_branch: str | None = None,
+        automatic_title: bool = False,
     ) -> dict[str, Any]: ...
 
     async def workspace_path(
@@ -260,6 +261,7 @@ class Workspace:
     async def create(self, org: str, agent: str, body: SessionCreate | None) -> dict[str, Any]:
         envelope = self.interactions._applied_envelope(org, agent)
         RuntimeRouter.require_supported(envelope.configuration.runtime_type)
+        automatic_title = body is None or "title" not in body.model_fields_set
         title = body.title if body is not None else "New thread"
         # The native SDK sends `{}` for a normal create.  Pydantic fills its
         # model default in that case, so distinguish omission from an explicit
@@ -272,7 +274,12 @@ class Workspace:
         if workspace != envelope.configuration.workspace:
             raise ValueError("Workspace is not assigned to this agent")
         return await self.runtime.create_session(
-            org, agent, title, workspace, **session_create_kwargs(body)
+            org,
+            agent,
+            title,
+            workspace,
+            automatic_title=automatic_title,
+            **session_create_kwargs(body),
         )
 
     async def get(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
@@ -282,9 +289,12 @@ class Workspace:
         result = await self._runtime_for(session).request(
             org, agent, f"/session/{session_id}", directory=session["directory"]
         )
-        return self._project_session(
-            session, self._session_receipt(result, session_id, session["directory"])
-        )
+        receipt = self._session_receipt(result, session_id, session["directory"])
+        native_title = receipt.get("title")
+        if "title" in session and isinstance(native_title, str) and native_title:
+            self.host.observe_native_title(org, agent, session_id, native_title)
+            session = self.host.session(org, agent, session_id)
+        return self._project_session(session, receipt)
 
     async def context(self, org: str, agent: str, session_id: str) -> dict[str, Any]:
         """Return safe workspace context for one mapped native thread."""
@@ -1202,6 +1212,10 @@ class Workspace:
             return copied
         info = properties.get("info")
         if isinstance(info, dict):
+            native_title = info.get("title")
+            if isinstance(native_title, str) and native_title:
+                self.host.observe_native_title(org, agent, session_id, native_title)
+                session = self.host.session(org, agent, session_id)
             copied["properties"]["info"] = self._project_session(session, info)
         return copied
 
@@ -1458,6 +1472,7 @@ class Workspace:
         if result.get("id") == session["session_id"]:
             result = {
                 **result,
+                **({"title": session["title"]} if "title" in session else {}),
                 "runtime_type": session["runtime_type"],
                 "frozen": session.get("frozen_at") is not None,
                 "frozen_at": session.get("frozen_at"),

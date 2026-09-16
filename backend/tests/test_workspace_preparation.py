@@ -499,11 +499,14 @@ def test_codex_recovery_reads_string_inventory_and_recovers_workspace_context(tm
     )
 
     receipt = asyncio.run(
-        runtime._recover_codex_creation(organization, agent, creation, directory, "Requested")
+        runtime._recover_codex_creation(
+            organization, agent, creation, directory, "New thread", automatic_title=True
+        )
     )
 
-    assert receipt == {"id": "thr_lost", "title": "Recovered", "directory": directory}
+    assert receipt == {"id": "thr_lost", "title": "New thread", "directory": directory}
     assert store.session(organization, agent, "thr_lost")["runtime_type"] == "codex"
+    assert store.session(organization, agent, "thr_lost")["title_generation_state"] == "pending"
     assert store.workspace_creation(organization, agent, creation)["state"] == "completed"
     assert context_calls == [("thr_lost", directory)]
     assert [method for method, _params in transport.calls] == [

@@ -46,6 +46,7 @@ export type ConversationProps = {
   onSessionChange?: (sessionId: string | undefined) => void;
   /** Receives adapter/runtime failures without inventing a conversation reply. */
   onError?: (error: unknown) => void | Promise<void>;
+  onTitleChanged?: () => void;
   /** Lets the shell place agent navigation beside or above the runtime thread list. */
   showThreadList?: boolean;
   /** Reloads the maintained thread inventory without remounting the composer. */
@@ -89,6 +90,7 @@ export function Conversation({
   sessionId,
   onSessionChange,
   onError,
+  onTitleChanged,
   showThreadList = true,
   refreshKey = 0,
   threadListTarget,
@@ -174,6 +176,7 @@ export function Conversation({
   return (
     <AssistantRuntimeProvider runtime={runtime}><WorkspaceFileLinks baseUrl={baseUrl} disabled={Boolean(executionDisabled)} openFiles={openFiles}>
       <ThreadWorkspaceProvider baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey}>
+      <OpenCodeTitleNotifier runtime={runtime} onTitleChanged={onTitleChanged} onError={onError} />
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
@@ -187,6 +190,19 @@ export function Conversation({
       </ThreadWorkspaceProvider>
     </WorkspaceFileLinks></AssistantRuntimeProvider>
   );
+}
+
+function OpenCodeTitleNotifier({ runtime, onTitleChanged, onError }: { runtime: ReturnType<typeof useOpenCodeRuntime>; onTitleChanged?: () => void; onError?: ConversationProps['onError'] }) {
+  const title = useOpenCodeThreadState((state) => state.session?.title);
+  const previous = useRef(title);
+  useEffect(() => {
+    if (previous.current !== undefined && title !== previous.current) {
+      void runtime.threads.reload().catch((cause: unknown) => onError?.(cause));
+      onTitleChanged?.();
+    }
+    previous.current = title;
+  }, [onError, onTitleChanged, runtime, title]);
+  return null;
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;

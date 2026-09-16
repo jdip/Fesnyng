@@ -16,6 +16,29 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test('publishes an OpenCode generated title to the header and Project inventory without losing a draft', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  let events: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let title = 'New thread';
+  const onTitleChanged = vi.fn();
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.endsWith('/event')) return new Response(new ReadableStream({ start(controller) { events = controller; } }), { headers: { 'content-type': 'text/event-stream' } });
+    const session = { id: 'session-one', title, time: {} };
+    return Response.json(url.includes('/experimental/session') ? [session] : url.endsWith('/session/session-one') ? session : []);
+  }));
+  render(<Conversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/opencode" csrfToken="csrf" sessionId="session-one" showThreadList={false} onTitleChanged={onTitleChanged} />);
+  await screen.findByRole('heading', { name: 'New thread' });
+  const composer = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(composer, { target: { value: 'Keep this draft' } });
+  await waitFor(() => expect(events).toBeTruthy());
+  title = 'Review release report';
+  events!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'session.updated', properties: { info: { id: 'session-one', title, time: {} } } })}\n\n`));
+  await screen.findByRole('heading', { name: title });
+  await waitFor(() => expect(onTitleChanged).toHaveBeenCalledTimes(1));
+  expect((composer as HTMLTextAreaElement).value).toBe('Keep this draft');
+});
+
 test('mounts the maintained thread before an OpenCode-backed session exists', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([]), {

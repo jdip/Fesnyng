@@ -263,6 +263,7 @@ class Dispatcher:
         self.changed = asyncio.Event()
         self.tasks: dict[str, asyncio.Task] = {}
         self.probes: dict[tuple[str, str, str], asyncio.Task] = {}
+        self.title_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
 
     _STOP_SETTLE_SECONDS = 5.0
 
@@ -277,7 +278,7 @@ class Dispatcher:
                 yield
             finally:
                 supervisor.cancel()
-                tasks = [*self.tasks.values(), *self.probes.values()]
+                tasks = [*self.tasks.values(), *self.probes.values(), *self.title_tasks.values()]
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -305,6 +306,11 @@ class Dispatcher:
                 del self.probes[key]
                 if not probe.cancelled():
                     probe.result()
+        for key, task in list(self.title_tasks.items()):
+            if task.done():
+                del self.title_tasks[key]
+                if not task.cancelled():
+                    task.result()
         groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in self.store.pending():
             agent = self.store.host.agent(row["organization_id"], row["agent_id"])
@@ -661,6 +667,10 @@ class Dispatcher:
                     raise RuntimeUnavailable("Codex turn receipt is invalid")
                 current = self.store.get(org, agent, row["id"])
                 self.store.change(current, "active", message_id=turn_id, validated=True)
+                if row["payload"]["mode"] == "queued":
+                    title_input = row["payload"]["text"].strip() or row["payload"]["command"]
+                    if title_input:
+                        self._start_codex_title(org, agent, session_id, title_input)
         except (RuntimeUnavailable, ValueError) as error:
             current = self.store.get(org, agent, row["id"])
             # Codex has no caller-selected native idempotency key.  Once a call
@@ -680,6 +690,35 @@ class Dispatcher:
             raise
         finally:
             self.wake()
+
+    def _start_codex_title(self, org: str, agent: str, session_id: str, text: str) -> None:
+        key = (org, agent, session_id)
+        if key not in self.title_tasks and self.store.host.claim_title_generation(
+            org, agent, session_id
+        ):
+            self.title_tasks[key] = asyncio.create_task(self._generate_codex_title(key, text))
+
+    async def _generate_codex_title(self, key: tuple[str, str, str], text: str) -> None:
+        org, agent, session_id = key
+        try:
+            session = self.store.host.session(org, agent, session_id)
+            adapter = self._codex(session)
+            title = await adapter.generate_thread_title(org, agent, text)
+            if not isinstance(title, str) or not title:
+                raise RuntimeUnavailable("Codex title generation receipt is invalid")
+            title = title.strip()[:100]
+            async with self.runtime.lock(agent):
+                current = self.store.host.session(org, agent, session_id)
+                if current["title_generation_state"] != "generating":
+                    return
+                await adapter.call(
+                    org, agent, "thread/name/set", {"threadId": session_id, "name": title}
+                )
+                self.store.host.complete_title_generation(org, agent, session_id, title)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - title generation must not affect the user turn.
+            self.store.host.fail_title_generation(org, agent, session_id)
 
     async def _require_codex_admission(
         self, organization_id: str, agent_id: str, session_id: str, *, apply_policy: bool
@@ -1190,6 +1229,11 @@ class Dispatcher:
 
     async def agent_activity(self, organization_id: str, agent_id: str) -> str:
         active: list[str] = []
+        active.extend(
+            f"codex-title:{session_id}"
+            for (org, agent, session_id), task in self.title_tasks.items()
+            if (org, agent) == (organization_id, agent_id) and not task.done()
+        )
         sessions = [
             session
             for session in self.store.host.sessions(organization_id, agent_id)

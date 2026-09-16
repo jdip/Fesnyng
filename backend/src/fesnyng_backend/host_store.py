@@ -74,6 +74,8 @@ class HostStore:
                 CREATE TABLE IF NOT EXISTS host_sessions (
                     session_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL,
+                    title_generation_state TEXT NOT NULL DEFAULT 'manual'
+                        CHECK(title_generation_state IN ('manual','native_pending','pending','generating','generated','failed')),
                     runtime_type TEXT NOT NULL DEFAULT 'opencode'
                         CHECK(runtime_type IN ('opencode','codex')),
                     fesnyng_project_id TEXT,
@@ -139,6 +141,12 @@ class HostStore:
             if "runtime_type" not in columns:
                 connection.execute(
                     "ALTER TABLE host_sessions ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'opencode'"
+                )
+            if "title_generation_state" not in columns:
+                # Existing threads already have an operator or legacy title; never
+                # start a title job just because a host was upgraded.
+                connection.execute(
+                    "ALTER TABLE host_sessions ADD COLUMN title_generation_state TEXT NOT NULL DEFAULT 'manual'"
                 )
             if "fesnyng_project_id" not in columns:
                 connection.execute("ALTER TABLE host_sessions ADD COLUMN fesnyng_project_id TEXT")
@@ -611,6 +619,7 @@ class HostStore:
         title: str,
         *,
         runtime_type: str = "opencode",
+        title_generation_state: str = "manual",
     ) -> None:
         if runtime_type not in {"opencode", "codex"}:
             raise ValueError("Unknown thread harness")
@@ -618,7 +627,7 @@ class HostStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT organization_id,agent_id,directory,title,runtime_type FROM host_sessions "
+                "SELECT organization_id,agent_id,directory,runtime_type FROM host_sessions "
                 "WHERE session_id=?",
                 (session_id,),
             ).fetchone()
@@ -629,15 +638,67 @@ class HostStore:
                     current["organization_id"],
                     current["agent_id"],
                     current["directory"],
-                    current["title"],
-                ) != (organization_id, agent_id, directory, title):
+                ) != (organization_id, agent_id, directory):
                     raise ValueError("Thread binding is immutable")
                 return
             connection.execute(
-                "INSERT INTO host_sessions(session_id,organization_id,agent_id,directory,title,runtime_type) "
-                "VALUES(?,?,?,?,?,?)",
-                (session_id, organization_id, agent_id, directory, title, runtime_type),
+                "INSERT INTO host_sessions(session_id,organization_id,agent_id,directory,title,runtime_type,title_generation_state) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    organization_id,
+                    agent_id,
+                    directory,
+                    title,
+                    runtime_type,
+                    title_generation_state,
+                ),
             )
+
+    def claim_title_generation(self, organization_id: str, agent_id: str, session_id: str) -> bool:
+        with self.connect() as connection:
+            changed = connection.execute(
+                "UPDATE host_sessions SET title_generation_state='generating' WHERE organization_id=? AND agent_id=? AND session_id=? AND title_generation_state='pending' AND deleted_at IS NULL",
+                (organization_id, agent_id, session_id),
+            ).rowcount
+        return changed == 1
+
+    def complete_title_generation(
+        self, organization_id: str, agent_id: str, session_id: str, title: str
+    ) -> bool:
+        with self.connect() as connection:
+            changed = connection.execute(
+                "UPDATE host_sessions SET title=?, title_generation_state='generated' WHERE organization_id=? AND agent_id=? AND session_id=? AND title_generation_state='generating' AND deleted_at IS NULL",
+                (title, organization_id, agent_id, session_id),
+            ).rowcount
+        return changed == 1
+
+    def fail_title_generation(self, organization_id: str, agent_id: str, session_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE host_sessions SET title_generation_state='failed' WHERE organization_id=? AND agent_id=? AND session_id=? AND title_generation_state='generating'",
+                (organization_id, agent_id, session_id),
+            )
+
+    def observe_native_title(
+        self, organization_id: str, agent_id: str, session_id: str, title: str
+    ) -> str:
+        # OpenCode's native default is a timestamped "New session" label.  It
+        # proves only creation, not successful title generation.
+        if title.startswith("New session -"):
+            return self.session(organization_id, agent_id, session_id)["title"]
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE host_sessions SET title=?, title_generation_state='generated' WHERE organization_id=? AND agent_id=? AND session_id=? AND title_generation_state='native_pending' AND deleted_at IS NULL AND title<>?",
+                (title, organization_id, agent_id, session_id, title),
+            )
+            row = connection.execute(
+                "SELECT title FROM host_sessions WHERE organization_id=? AND agent_id=? AND session_id=?",
+                (organization_id, agent_id, session_id),
+            ).fetchone()
+        if row is None:
+            raise LookupError("Thread not found")
+        return str(row["title"])
 
     def reserve_workspace_creation(
         self,
@@ -1279,7 +1340,7 @@ class HostStore:
     ) -> None:
         with self.connect() as connection:
             changed = connection.execute(
-                """UPDATE host_sessions SET title=?
+                """UPDATE host_sessions SET title=?, title_generation_state='manual'
                 WHERE organization_id=? AND agent_id=? AND session_id=? AND deleted_at IS NULL""",
                 (title, organization_id, agent_id, session_id),
             ).rowcount

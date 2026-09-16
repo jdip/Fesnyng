@@ -63,6 +63,8 @@ test('mounts a Codex thread with native pending input and its streamed completio
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
   let completed = false;
+  let title = 'Investigate';
+  let sessionReads = 0;
   let historyReads = 0;
   class EventSourceStub {
     static instances: EventSourceStub[] = [];
@@ -76,7 +78,7 @@ test('mounts a Codex thread with native pending input and its streamed completio
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = input instanceof Request ? input.url : String(input);
     const request = input instanceof Request ? input : undefined;
-    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Investigate', time: {} }]));
+    if (url.endsWith('/session')) { sessionReads += 1; return new Response(JSON.stringify([{ id: 'thread-one', title, time: {} }])); }
     if (url.includes('/history')) { historyReads += 1; return new Response(JSON.stringify({ thread: { id: 'thread-one' }, turns: [{ id: 'turn-one', status: completed ? 'completed' : 'inProgress', items: completed ? [{ id: 'assistant-one', type: 'agentMessage', text: 'Done' }] : [{ id: 'user-one', type: 'userMessage', content: 'Start' }] }], historyState: 'complete' })); }
     if (url.includes('/pending?')) return new Response(JSON.stringify([
       { id: 'question-one', method: 'item/tool/requestUserInput', params: { question: 'Proceed?', questions: [{ id: 'choice', question: 'Choose', options: [{ label: 'Yes', description: 'Continue' }] }] } },
@@ -104,6 +106,12 @@ test('mounts a Codex thread with native pending input and its streamed completio
   EventSourceStub.instances[0]!.emit('open', {});
   EventSourceStub.instances[0]!.emit('open', {});
   await waitFor(() => expect(historyReads).toBeGreaterThan(1));
+  const draft = screen.getByRole('textbox', { name: 'Message input' });
+  fireEvent.change(draft, { target: { value: 'Keep this draft.' } });
+  title = 'Workspace header';
+  EventSourceStub.instances[0]!.emit('message', { method: 'thread/name/updated', params: { threadId: 'thread-one' } });
+  await waitFor(() => expect(sessionReads).toBeGreaterThan(1));
+  expect((screen.getByRole('textbox', { name: 'Message input' }) as HTMLTextAreaElement).value).toBe('Keep this draft.');
   completed = true;
   EventSourceStub.instances[0]!.emit('message', { method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'completed', items: [{ id: 'assistant-one', type: 'agentMessage', text: 'Done' }] } } });
   expect(await screen.findByText('Done')).toBeTruthy();

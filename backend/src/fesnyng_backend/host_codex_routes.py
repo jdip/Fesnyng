@@ -211,6 +211,7 @@ async def create_session(
 ):
     org, agent = str(organization_id), str(agent_id)
     _mutation(request, org, actor)
+    automatic_title = body is None or "title" not in body.model_fields_set
     title = body.title if body is not None else "New thread"
     envelope = request.app.state.interactions._applied_envelope(org, agent)
     if envelope.configuration.runtime_type != "codex":
@@ -222,7 +223,12 @@ async def create_session(
     )
     with host_errors():
         created = await request.app.state.host_runtime.create_session(
-            org, agent, title, workspace, **session_create_kwargs(body)
+            org,
+            agent,
+            title,
+            workspace,
+            automatic_title=automatic_title,
+            **session_create_kwargs(body),
         )
         session_id = created.get("id") if isinstance(created, Mapping) else None
         if not isinstance(session_id, str):
@@ -598,6 +604,15 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                 continue
             if session["runtime_type"] != "codex" or session.get("frozen_at") is not None:
                 continue
+            if notification.get("method") == "thread/name/updated":
+                params = notification.get("params")
+                title = params.get("threadName") if isinstance(params, Mapping) else None
+                if isinstance(title, str) and title:
+                    # Commit the host projection before forwarding the native
+                    # notification; list/header reload then cannot observe old data.
+                    request.app.state.host_store.complete_title_generation(
+                        org, agent, thread_id, title[:100]
+                    )
             yield f"event: message\ndata: {json.dumps(notification, separators=(',', ':'))}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
