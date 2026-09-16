@@ -23,7 +23,7 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   const open = vi.fn();
   const create = vi.fn();
   const detailsTarget = document.body.appendChild(document.createElement('div'));
-  render(<ProjectNavigation organization="org" agents={agents} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} onOpenThread={open} onNewThread={create} />);
+  render(<ProjectNavigation organization="org" agents={agents} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} currentThread={{ agent: 'junior', session: 'build' }} onOpenThread={open} onNewThread={create} />);
 
   const website = await screen.findByRole('button', { name: 'Website' });
   fireEvent.click(website);
@@ -37,6 +37,10 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   expect(review.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
   expect(build.className).toContain('pe-44');
   expect(build.className).not.toContain('group-hover:pe-9');
+  expect(build.getAttribute('aria-current')).toBe('page');
+  expect(build.closest('[data-thread-card]')?.getAttribute('data-active')).toBe('true');
+  expect(review.hasAttribute('aria-current')).toBe(false);
+  expect(review.closest('[data-thread-card]')?.hasAttribute('data-active')).toBe(false);
   fireEvent.change(within(details).getByRole('searchbox', { name: 'Search Website threads' }), { target: { value: 'copy' } });
   expect(within(details).queryByText('Build landing page')).toBeNull();
   expect(within(details).getByText('Review copy')).toBeTruthy();
@@ -220,8 +224,10 @@ test('identifies the current sidebar thread and opens a separately labelled thre
   render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager={false} currentThread={{ agent: 'junior', session: 'current' }} onOpenThread={open} onNewThread={vi.fn()} />);
   const current = await screen.findByRole('button', { name: 'Inspect current workspace Junior developer' });
   expect(current.getAttribute('aria-current')).toBe('page');
+  expect(current.closest('[data-thread-card]')?.getAttribute('data-active')).toBe('true');
   const next = screen.getByRole('button', { name: 'Review changes Junior developer' });
   expect(next.hasAttribute('aria-current')).toBe(false);
+  expect(next.closest('[data-thread-card]')?.hasAttribute('data-active')).toBe(false);
   fireEvent.click(next);
   expect(open).toHaveBeenCalledWith('junior', 'next');
 });
