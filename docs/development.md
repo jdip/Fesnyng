@@ -120,6 +120,19 @@ Do not use an engine containing other organizations' data. The proof reports exa
 identities, removes successful isolated fixtures, and stops failed compute while
 retaining diagnostics.
 
+Build the pinned runtime as `fesnyng-agent:docker-121`, verify the dedicated
+engine identity and socket, and create the proof root before running:
+
+```bash
+FESNYNG_AGENT_HOST_IMAGE=fesnyng-agent:docker-121 \
+FESNYNG_DOCKER_RESOURCES_DOCKER_TESTS=true \
+FESNYNG_DOCKER_RESOURCES_ENGINE_ID=VERIFIED_DEDICATED_ENGINE_ID \
+FESNYNG_DOCKER_RESOURCES_SOCKET_PATH=/var/run/docker.sock \
+FESNYNG_DOCKER_RESOURCES_PROOF_ROOT=/absolute/docker-shared/proof-root \
+  uv run --locked --project backend pytest \
+  backend/tests/test_docker_resources_docker.py -q -s
+```
+
 The same proof registers real applications inside the employee and its Compose
 sibling, verifies their HTTP responses, shared service associations, stopped and
 missing target status, and metadata-only unregister. On the dedicated private
