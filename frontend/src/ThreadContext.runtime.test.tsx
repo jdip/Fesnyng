@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const baseUrl = 'http://localhost/api/organizations/org/agents/agent/opencode';
 const metadata = { repository: { state: 'available', name: 'sample-project' }, branch: { state: 'available', name: 'feature' }, changes: { state: 'available', added: 7, deleted: 3, untracked: 2, binaryFiles: 0 }, subagents: { state: 'available', count: 0 }, backgroundProcesses: { state: 'unavailable' } };
 
-function serve(withOther = false, events?: ReadableStream<Uint8Array>) {
+function serve(withOther = false, events?: ReadableStream<Uint8Array>, repositoryUnavailable = false) {
   let title = 'Layout work';
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   const requests = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -22,7 +22,7 @@ function serve(withOther = false, events?: ReadableStream<Uint8Array>) {
       const body = init?.body ? JSON.parse(String(init.body)) : await request?.json();
       title = body.title;
     }
-    const body = url.pathname.endsWith('/context') ? (url.pathname.includes('/two/') ? { ...metadata, repository: { state: 'absent' } } : metadata)
+    const body = url.pathname.endsWith('/context') ? (repositoryUnavailable ? { ...metadata, repository: { state: 'unavailable' } } : url.pathname.includes('/two/') ? { ...metadata, repository: { state: 'absent' } } : metadata)
       : url.pathname.endsWith('/thread-pins') ? { session_ids: withOther ? ['one'] : [] }
       : url.pathname.endsWith('/session') || url.pathname.endsWith('/experimental/session') ? [{ id: 'one', title, time: {} }, ...(withOther ? [{ id: 'two', title: 'Other workspace', time: {} }] : [])]
       : url.pathname.endsWith('/session/one') ? { id: 'one', title, time: {} }
@@ -56,8 +56,30 @@ test('pinned and unpinned thread subtitles use each thread workspace and keep th
   const unpinned = await screen.findByRole('button', { name: 'Other workspace' });
   expect(await within(pinned).findByText('sample-project')).toBeTruthy();
   expect(await within(unpinned).findByText('No repository')).toBeTruthy();
+  expect(within(pinned).getByText('sample-project').getAttribute('title')).toBe('sample-project');
   expect(within(pinned).getByRole('img', { name: 'Pinned' })).toBeTruthy();
   expect(screen.getAllByRole('button', { name: 'More options' })).toHaveLength(2);
+});
+
+test('an assigned Project replaces repository metadata with one shared employee card subtitle', async () => {
+  serve();
+  render(<Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="one" projectLabels={{ one: 'Website' }} />);
+
+  const thread = await screen.findByRole('button', { name: /Layout work/ });
+  const card = thread.closest('[data-thread-card]');
+  if (!(card instanceof HTMLElement)) throw new Error('Expected the employee thread card.');
+  expect(within(card).getByText('Website')).toBeTruthy();
+  expect(within(card).queryByText('sample-project')).toBeNull();
+  expect(card.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
+});
+
+test('an unassigned employee card keeps the repository-unavailable fallback', async () => {
+  serve(false, undefined, true);
+  render(<Conversation baseUrl={baseUrl} csrfToken="csrf-example" sessionId="one" />);
+
+  const thread = await screen.findByRole('button', { name: 'Layout work' });
+  expect(await within(thread).findByText('Repository unavailable')).toBeTruthy();
+  expect(thread.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
 });
 
 test('explicit refresh reloads the active workspace context without remounting the composer', async () => {

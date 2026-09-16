@@ -29,8 +29,14 @@ test('shows Projects with reciprocal employee labels, Ungrouped threads, filteri
   fireEvent.click(website);
   const details = await screen.findByRole('region', { name: 'Website project' });
   expect(within(details).getByRole('button', { name: 'Edit Project' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Build landing page Junior developer' })).toBeTruthy();
-  expect(within(details).getByRole('button', { name: 'Review copy Reviewer' })).toBeTruthy();
+  const build = within(details).getByRole('button', { name: 'Build landing page Junior developer' });
+  const review = within(details).getByRole('button', { name: 'Review copy Reviewer' });
+  expect(build.closest('[data-thread-card]')).toBeTruthy();
+  expect(review.closest('[data-thread-card]')).toBeTruthy();
+  expect(build.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
+  expect(review.closest('[data-thread-card]')?.querySelectorAll('[data-slot="thread-card-subtitle"]')).toHaveLength(1);
+  expect(build.className).toContain('pe-44');
+  expect(build.className).not.toContain('group-hover:pe-9');
   fireEvent.change(within(details).getByRole('searchbox', { name: 'Search Website threads' }), { target: { value: 'copy' } });
   expect(within(details).queryByText('Build landing page')).toBeNull();
   expect(within(details).getByText('Review copy')).toBeTruthy();
