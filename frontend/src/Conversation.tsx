@@ -17,6 +17,7 @@ import { ConversationDeliveryRecovery, ConversationMessageFooter } from './Conve
 import { Thread, type ThreadComposerProps, type ThreadGroupPart } from './components/assistant-ui/elements/thread.aui';
 import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { ThreadArtifactPanel } from './ThreadArtifact';
+import { WorkspaceFileLinks } from './WorkspaceFileLinks';
 import { ThreadPolicyDialog } from './ThreadPolicyDialog';
 import { ThreadInformation, type ThreadWorkspace } from './ThreadInformation';
 import { ThreadWorkspaceContext, useThreadWorkspace } from './thread-context';
@@ -171,20 +172,20 @@ export function Conversation({
   }), [executionBlocked, executionBlockedState, executionDisabled, onError, readOnly, runtime]);
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
+    <AssistantRuntimeProvider runtime={runtime}><WorkspaceFileLinks baseUrl={baseUrl} disabled={Boolean(executionDisabled)} openFiles={openFiles}>
       <ThreadWorkspaceProvider baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey}>
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
           {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} /></aside>}
           <div className="fesnyng-thread-pane"><ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} workspace={workspace} interactionDisabled={executionDisabled} onOpenFiles={executionDisabled ? undefined : openFiles} /><Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
-          {!executionDisabled && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
+          {!executionDisabled && files && <ThreadArtifactPanel key={files.path === undefined ? files.id : `${files.id}:${fileFocusRequest}`} initialPath={files.path} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
           {!executionDisabled && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>
       </ThreadWorkspaceProvider>
-    </AssistantRuntimeProvider>
+    </WorkspaceFileLinks></AssistantRuntimeProvider>
   );
 }
 
