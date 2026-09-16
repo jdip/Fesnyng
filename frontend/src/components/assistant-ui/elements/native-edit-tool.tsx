@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import type { ToolCallMessagePartComponent } from '@assistant-ui/react';
 import { ToolFallback } from './tool-fallback.aui';
+import { useToolGroupDetails } from './tool-group.aui';
 
 type EditChange = {
   path: string;
@@ -97,6 +99,8 @@ function parseEditChanges(toolName: string, argsText: string | undefined): EditC
  */
 export const NativeEditToolFallback: ToolCallMessagePartComponent = (props) => {
   const changes = parseEditChanges(props.toolName, props.argsText);
+  const discloseWithGroup = useToolGroupDetails();
+  const [open, setOpen] = useState(discloseWithGroup);
   if (props.isError || !changes || props.status?.type !== 'complete') {
     return <ToolFallback {...props} />;
   }
@@ -106,7 +110,7 @@ export const NativeEditToolFallback: ToolCallMessagePartComponent = (props) => {
     : <>Applied patch to {changes.length} files</>;
 
   return (
-    <details className="fesnyng-native-edit-tool">
+    <details className="fesnyng-native-edit-tool" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>{summary}</summary>
       <div className="fesnyng-native-edit-diff" aria-label="Structured file changes">
         {changes.map((change) => (

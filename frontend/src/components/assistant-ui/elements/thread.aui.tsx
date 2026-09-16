@@ -152,12 +152,16 @@ const DefaultReasoningGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> =
     const part = latestIndex === undefined ? undefined : state.message.parts[latestIndex];
     return part?.type === "reasoning" ? groupPreviewText(part.text) : "";
   });
+  const hasDetails = useAuiState((state) => group.indices.some((index) => {
+    const part = state.message.parts[index];
+    return part?.type === "reasoning" && groupPreviewText(part.text).length > 0;
+  }));
 
   return (
     <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
       <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
-        <ReasoningText>{children}</ReasoningText>
+        {hasDetails ? <ReasoningText>{children}</ReasoningText> : <p className="text-muted-foreground py-1 text-sm">No native reasoning details were provided.</p>}
       </ReasoningContent>
     </ReasoningRoot>
   );

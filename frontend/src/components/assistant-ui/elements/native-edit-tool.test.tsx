@@ -21,6 +21,7 @@ test('renders a collapsed structured diff for a native OpenCode edit result', ()
 
   expect(screen.getAllByText('src/agent.ts')).toHaveLength(2);
   expect(screen.getByLabelText('Structured file changes').textContent).toContain('const mode = "new";');
+  expect(screen.getByLabelText('Structured file changes').closest('details')?.open).toBe(false);
 });
 
 test('renders native apply_patch file changes instead of a generic patch payload', () => {
