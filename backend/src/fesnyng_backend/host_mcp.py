@@ -1,5 +1,7 @@
-"""Native MCP tools for host-owned agent memory."""
+"""Authenticated MCP tools for host-owned employee capabilities."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -14,8 +16,10 @@ from starlette.applications import Starlette
 
 from fesnyng_backend.agent_models import Slug
 from fesnyng_backend.host_memory import MemoryStore
-from fesnyng_backend.host_models import Actor, NativeID
+from fesnyng_backend.host_models import Actor, NativeID, WorkspaceExpectation
+from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
+from fesnyng_backend.host_workspace import Workspace
 from fesnyng_backend.peer_delivery import PeerDeliveryService, PeerSend
 from fesnyng_backend.peer_discovery import DiscoveryQuery, PeerDiscovery
 
@@ -58,7 +62,7 @@ def create_memory_mcp(
 
     server = MCPServer(
         "fesnyng-memory",
-        instructions="Use these tools to inspect and edit only your durable Fesnyng memory.",
+        instructions="Use these tools for authorized Fesnyng memory, organization collaboration and your own thread workspaces.",
         auth=AuthSettings(
             issuer_url=host_base_url,
             resource_server_url=host_base_url,
@@ -223,4 +227,88 @@ def _owned_source_session(host: HostStore, identity: dict[str, str], session_id:
     except LookupError:
         raise ToolError("Source thread does not belong to the authenticated agent") from None
     except ValueError as error:
+        raise ToolError(str(error)) from None
+
+
+def register_workspace_tools(server: MCPServer, host: HostStore, workspace: Workspace) -> None:
+    """Expose the host lifecycle to the authenticated employee's own mapped threads."""
+
+    @server.tool(
+        description="List your mapped thread workspaces, including archived threads. This does not clean up files or services."
+    )
+    async def workspace_list() -> list[dict[str, Any]]:
+        with _workspace_tool_errors():
+            identity = _authenticated_agent(host)
+            org, agent = identity["organization_id"], identity["agent_id"]
+            return [
+                {
+                    "session_id": row["session_id"],
+                    "title": row["title"],
+                    **await workspace.workspace_inspection(org, agent, row["session_id"]),
+                }
+                for row in host.sessions(org, agent, archived=None)
+            ]
+
+    @server.tool(
+        description="Inspect one of your thread workspaces and its current cleanup safeguards. Retain its workspace_id, generation and safety_digest for an explicit action."
+    )
+    async def workspace_inspect(session_id: NativeID) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            identity = _authenticated_agent(host)
+            return await workspace.workspace_inspection(
+                identity["organization_id"], identity["agent_id"], session_id
+            )
+
+    async def change(
+        session_id: str, expected: WorkspaceExpectation, action: str
+    ) -> dict[str, Any]:
+        with _workspace_tool_errors():
+            identity = _authenticated_agent(host)
+            org, agent = identity["organization_id"], identity["agent_id"]
+            # The token establishes ownership; callers cannot supply another employee or path.
+            host.session(org, agent, session_id)
+            author = Actor(kind="agent", id=UUID(agent), name=identity["name"])
+            if action == "replace":
+                return await workspace.replace_workspace(
+                    org, agent, session_id, expected, author=author
+                )
+            return await workspace.remove_workspace(
+                org, agent, session_id, expected, discard=action == "discard", author=author
+            )
+
+    @server.tool(
+        description="Remove a verified safe workspace using its exact current inspection. Refuses active work, dirty/untracked files, unpushed commits or unverified safety. Retains conversation history; never tears down Docker stacks."
+    )
+    async def workspace_remove(
+        session_id: NativeID, expected: WorkspaceExpectation
+    ) -> dict[str, Any]:
+        return await change(session_id, expected, "remove")
+
+    @server.tool(
+        description="Explicitly discard the known files/changes shown in this exact workspace inspection. Still refuses active work, ownership/history uncertainty and stale evidence. Use only when your workflow authorizes the displayed loss."
+    )
+    async def workspace_discard(
+        session_id: NativeID, expected: WorkspaceExpectation
+    ) -> dict[str, Any]:
+        return await change(session_id, expected, "discard")
+
+    @server.tool(
+        description="Explicitly prepare a removed workspace at its existing path for the same native thread. Does not create a new conversation or unfreeze a permanently frozen thread."
+    )
+    async def workspace_replace(
+        session_id: NativeID, expected: WorkspaceExpectation
+    ) -> dict[str, Any]:
+        return await change(session_id, expected, "replace")
+
+
+@contextmanager
+def _workspace_tool_errors() -> Iterator[None]:
+    """Return useful expected refusals without disclosing another employee's state."""
+    try:
+        yield
+    except LookupError:
+        raise ToolError("Thread workspace not found") from None
+    except PermissionError:
+        raise ToolError("Workspace operation not permitted") from None
+    except (ValueError, RuntimeUnavailable) as error:
         raise ToolError(str(error)) from None

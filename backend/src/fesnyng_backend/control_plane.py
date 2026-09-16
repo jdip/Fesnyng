@@ -16,6 +16,7 @@ from fesnyng_backend.control_thread_acknowledgement_routes import (
     router as thread_acknowledgement_router,
 )
 from fesnyng_backend.control_thread_pin_routes import router as thread_pin_router
+from fesnyng_backend.control_workspace_lifecycle_routes import router as workspace_lifecycle_router
 from fesnyng_backend.control_workspace_preference_routes import (
     router as workspace_preference_router,
 )
@@ -60,6 +61,7 @@ def create_app(
     app.include_router(thread_pin_router)
     app.include_router(thread_acknowledgement_router)
     app.include_router(workspace_preference_router)
+    app.include_router(workspace_lifecycle_router)
     app.include_router(workspace_router)
     app.include_router(codex_workspace_router)
     return app

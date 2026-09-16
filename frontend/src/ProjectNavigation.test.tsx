@@ -141,3 +141,26 @@ test('shows a recoverable Project lookup failure before employee-first thread cr
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
 });
+
+test('keeps Project threads visible while its Workspaces view opens host-owned inspection', async () => {
+  const inspection = { workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'ready', kind: 'ordinary', directory: '/workspaces/org/junior/build', repository: { state: 'absent' }, git: { kind: 'ordinary', state: 'safe', branch: null, dirty: 0, untracked: 0, ignored: 0, ahead: 0, upstream: null }, history: { state: 'verified' }, cleanup: { remove: { available: true }, discard: { available: true }, replace: { available: false, reason: 'Remove first.' } } };
+  const request = vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (input === '/api/organizations/org/projects?include_archived=true') return Response.json([{ id: 'website', organization_id: 'org', name: 'Website', description: '', target_repository_url: null, default_checkout_branch: null, archived: false }]);
+    if (input.endsWith('/thread-projects')) return Response.json({ threads: [{ session_id: 'build', project_id: 'website' }] });
+    if (input.endsWith('/sessions')) return Response.json([{ session_id: 'build', title: 'Build landing page' }]);
+    if (input.endsWith('/sessions/build/workspace') && init.method === 'GET') return Response.json(inspection);
+    throw new Error(`Unexpected ${input}`);
+  });
+  vi.stubGlobal('fetch', request);
+  const detailsTarget = document.body.appendChild(document.createElement('div'));
+  render(<ProjectNavigation organization="org" agents={[agents[0]]} csrf="csrf-example" manager={false} detailsTarget={detailsTarget} onOpenThread={vi.fn()} onNewThread={vi.fn()} />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Website' }));
+  const details = await screen.findByRole('region', { name: 'Website project' });
+  expect(within(details).getByText('Build landing page')).toBeTruthy();
+  fireEvent.click(within(details).getByRole('tab', { name: 'Workspaces' }));
+  expect(await within(details).findByText('/workspaces/org/junior/build')).toBeTruthy();
+  expect((within(details).getByRole('button', { name: 'Remove workspace' }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(within(details).getByRole('tab', { name: 'Threads' }));
+  expect(within(details).getByText('Build landing page')).toBeTruthy();
+});

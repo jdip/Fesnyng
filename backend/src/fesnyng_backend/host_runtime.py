@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -32,6 +33,10 @@ from fesnyng_backend.workspace_preparation import (
 
 class RuntimeUnavailable(RuntimeError):
     pass
+
+
+class WorkspaceSafetyChanged(RuntimeUnavailable):
+    """The runtime rejected cleanup before any filesystem mutation began."""
 
 
 class WorkspaceCreationUncertain(RuntimeUnavailable):
@@ -807,6 +812,271 @@ printf "available\0%s\0available\0%s\0available\0%s\0%s\0%s\0%s\0\0" \
             str(self.employee_workspace_root(organization_id, agent_id)),
         )
         return _workspace_context(result)
+
+    async def workspace_safety(
+        self, organization_id: str, agent_id: str, directory: str
+    ) -> dict[str, Any]:
+        """Read deletion evidence from one host-owned directory without following escapes."""
+        await self.inspect(organization_id, agent_id)
+        script = r'''fail() { exit 1; }
+base="$(realpath -- "$1")" || fail
+employee="$(realpath -- "$2")" || fail
+test "$base" = "$1" && test "$employee" = "$2" && test -d "$base" || fail
+case "$base" in "$employee"/threads/*) ;; *) fail;; esac
+manifest() {
+  find "$base" -path "$base/.git" -prune -o -printf '%y\0%P\0%m\0%s\0%T@\0'
+}
+scratch="$(mktemp)" || fail
+trap 'rm -f "$scratch"' EXIT
+count_records() { awk -v RS='\0' 'END { print NR }' "$1"; }
+digest_records() {
+  value="$(sha256sum "$1")" || return 1
+  set -- $value
+  test "$#" -ge 1 || return 1
+  printf '%s' "$1"
+}
+if ! git -C "$base" rev-parse --show-toplevel >/dev/null 2>&1; then
+  find "$base" -mindepth 1 -print0 > "$scratch" || fail
+  count="$(count_records "$scratch")" || fail
+  manifest > "$scratch" || fail
+  digest="$(digest_records "$scratch")" || fail
+  state=unsafe; test "$count" = 0 && state=safe
+  printf 'ordinary\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest" 0 0 0 0 "$count" '' '' ''
+  exit 0
+fi
+root="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" || fail
+test "$root" = "$base" || fail
+common="$(git -C "$base" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || fail
+common="$(realpath -- "$common")" || fail
+case "$common" in "$employee"/repositories/*|"$base"/.git|"$base"/.git/*) ;; *) fail;; esac
+head="$(git -C "$base" rev-parse --verify HEAD 2>/dev/null)" || fail
+branch="$(git -C "$base" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+git -C "$base" diff --name-only -z HEAD > "$scratch" || fail
+dirty="$(count_records "$scratch")" || fail
+git -C "$base" ls-files --others --exclude-standard -z > "$scratch" || fail
+untracked="$(count_records "$scratch")" || fail
+git -C "$base" ls-files --others -i --exclude-standard -z > "$scratch" || fail
+ignored="$(count_records "$scratch")" || fail
+upstream="$(git -C "$base" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+ahead=0; test -n "$upstream" && ahead="$(git -C "$base" rev-list --count '@{upstream}..HEAD' 2>/dev/null || true)"
+printf '%s\0%s\0%s\0' "$head" "$branch" "$upstream" > "$scratch" || fail
+git -C "$base" status --ignored --porcelain=v1 -z >> "$scratch" || fail
+git -C "$base" diff --binary HEAD >> "$scratch" || fail
+manifest >> "$scratch" || fail
+digest="$(digest_records "$scratch")" || fail
+state=safe
+test "$dirty" = 0 && test "$untracked" = 0 && test "$ignored" = 0 && test -n "$upstream" && test "$ahead" = 0 || state=unsafe
+printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest" "$dirty" "$untracked" "$ignored" "$ahead" 0 "$head" "$branch" "$upstream"'''
+        raw = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "20",
+            "sh",
+            "-c",
+            script,
+            "workspace-safety",
+            directory,
+            str(self.employee_workspace_root(organization_id, agent_id)),
+        )
+        fields = raw.decode(errors="replace").split("\0")
+        if len(fields) < 11 or fields[-1] != "":
+            raise RuntimeUnavailable("Workspace safety receipt is invalid")
+        (
+            kind,
+            state,
+            digest,
+            dirty,
+            untracked,
+            ignored,
+            ahead,
+            entries,
+            revision,
+            branch,
+            upstream,
+        ) = fields[:11]
+        if (
+            kind not in {"ordinary", "repository"}
+            or state not in {"safe", "unsafe"}
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not all(value.isdigit() for value in (dirty, untracked, ignored, ahead, entries))
+        ):
+            raise RuntimeUnavailable("Workspace safety receipt is invalid")
+        return {
+            "kind": kind,
+            "state": state,
+            "digest": digest,
+            "dirty": int(dirty),
+            "untracked": int(untracked),
+            "ignored": int(ignored),
+            "ahead": int(ahead),
+            "entries": int(entries),
+            "revision": revision or None,
+            "branch": branch or None,
+            "upstream": upstream or None,
+        }
+
+    async def remove_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        discard: bool,
+        expected_safety_digest: str,
+    ) -> None:
+        """Remove only a managed thread directory after the caller's safety recheck."""
+        safety = await self.workspace_safety(organization_id, agent_id, directory)
+        if safety["digest"] != expected_safety_digest:
+            raise WorkspaceSafetyChanged("Workspace safety changed; inspect again before cleanup")
+        mode = "discard" if discard else "remove"
+        script = (
+            'base="$(realpath -- "$1")" || exit 1; employee="$(realpath -- "$2")" || exit 1; '
+            'test "$base" = "$1" && test "$employee" = "$2" && test -d "$base" || exit 1; '
+            'case "$base" in "$employee"/threads/*) ;; *) exit 1;; esac; '
+            'if git -C "$base" rev-parse --show-toplevel >/dev/null 2>&1; then '
+            'root="$(git -C "$base" rev-parse --show-toplevel)" || exit 1; '
+            'common="$(git -C "$base" rev-parse --path-format=absolute --git-common-dir)" || exit 1; '
+            'common="$(realpath -- "$common")" || exit 1; test "$root" = "$base" || exit 1; '
+            'case "$common" in "$employee"/repositories/*) ;; *) exit 1;; esac; '
+            'test "$3" = discard || test -z "$(git -C "$base" status --ignored --porcelain=v1)" || exit 1; '
+            'git -C "$common" worktree remove --force -- "$base" || exit 1; '
+            'else test "$3" = discard || test -z "$(find "$base" -mindepth 1 -print -quit)" || exit 1; '
+            'rm -rf --one-file-system -- "$base" || exit 1; fi; test ! -e "$base"'
+        )
+        await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "30",
+            "sh",
+            "-c",
+            script,
+            "workspace-remove",
+            directory,
+            str(self.employee_workspace_root(organization_id, agent_id)),
+            mode,
+        )
+
+    async def workspace_repository_matches(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        repository_url: str,
+        creation_id: str,
+    ) -> bool:
+        """Prove a linked worktree still points to its reservation's bare repository."""
+        paths = workspace_paths(
+            self.workspace_root, organization_id, agent_id, creation_id, repository_url
+        )
+        if paths.bare_repository is None:
+            return False
+        result = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "20",
+            "sh",
+            "-c",
+            'base="$(realpath -- "$1")" || exit 1; test "$base" = "$1" || { printf no; exit 0; }; expected="$(realpath -- "$2")" || exit 1; '
+            'common="$(git -C "$base" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || { printf no; exit 0; }; '
+            'common="$(realpath -- "$common")" || { printf no; exit 0; }; '
+            'if test "$common" = "$expected" && test "$(git -C "$common" remote get-url origin 2>/dev/null)" = "$3"; then printf yes; else printf no; fi',
+            "workspace-repository-match",
+            directory,
+            str(paths.bare_repository),
+            repository_url,
+        )
+        if result == b"yes":
+            return True
+        if result == b"no":
+            return False
+        raise RuntimeUnavailable("Workspace repository provenance receipt is invalid")
+
+    async def workspace_exists(self, organization_id: str, agent_id: str, directory: str) -> bool:
+        """Return a verified managed-path existence receipt for lifecycle reconciliation."""
+        employee = str(self.employee_workspace_root(organization_id, agent_id))
+        result = await self.docker(
+            "exec",
+            self.name(agent_id),
+            "timeout",
+            "20",
+            "sh",
+            "-c",
+            'employee="$(realpath -- "$1")" || exit 1; base="$2"; '
+            'case "$base" in "$employee"/threads/*) ;; *) exit 1;; esac; '
+            'if test -e "$base"; then printf present; else printf absent; fi',
+            "workspace-exists",
+            employee,
+            directory,
+        )
+        if result == b"present":
+            return True
+        if result == b"absent":
+            return False
+        raise RuntimeUnavailable("Workspace existence receipt is invalid")
+
+    async def replace_workspace(
+        self,
+        organization_id: str,
+        agent_id: str,
+        directory: str,
+        *,
+        repository_url: str | None = None,
+        creation_id: str | None = None,
+        working_branch: str | None = None,
+        working_revision: str | None = None,
+    ) -> None:
+        """Recreate a removed managed directory without creating a native thread."""
+        employee = str(self.employee_workspace_root(organization_id, agent_id))
+        if repository_url is not None:
+            if creation_id is None or working_branch is None or working_revision is None:
+                raise RuntimeUnavailable(
+                    "Repository workspace replacement provenance is unavailable"
+                )
+            paths = workspace_paths(
+                self.workspace_root, organization_id, agent_id, creation_id, repository_url
+            )
+            assert paths.bare_repository is not None
+            await self.docker(
+                "exec",
+                self.name(agent_id),
+                "timeout",
+                "30",
+                "sh",
+                "-c",
+                'requested="$1"; bare="$2"; employee="$(realpath -- "$3")" || exit 1; branch="$4"; revision="$5"; origin="$6"; '
+                'parent="$(realpath -- "$(dirname -- "$requested")")" || exit 1; base="$parent/$(basename -- "$requested")"; '
+                'test "$base" = "$requested" && test ! -e "$base" && test -d "$bare" && test ! -L "$bare" || exit 1; '
+                'case "$base" in "$employee"/threads/*) ;; *) exit 1;; esac; '
+                'test "$(git -C "$bare" rev-parse --is-bare-repository 2>/dev/null)" = true || exit 1; '
+                'test "$(git -C "$bare" remote get-url origin 2>/dev/null)" = "$origin" || exit 1; '
+                'test "$(git -C "$bare" rev-parse --verify "refs/heads/$branch" 2>/dev/null)" = "$revision" || exit 1; '
+                'git -C "$bare" worktree add "$base" "$branch" >/dev/null 2>&1',
+                "workspace-replace",
+                directory,
+                str(paths.bare_repository),
+                employee,
+                working_branch,
+                working_revision,
+                repository_url,
+            )
+            return
+        await self.docker(
+            "exec",
+            self.name(agent_id),
+            "sh",
+            "-c",
+            'requested="$1"; employee="$(realpath -- "$2")" || exit 1; '
+            'parent="$(realpath -- "$(dirname -- "$requested")")" || exit 1; base="$parent/$(basename -- "$requested")"; '
+            'test "$base" = "$requested" && test ! -e "$base" || exit 1; '
+            'case "$base" in "$employee"/threads/*) ;; *) exit 1;; esac; mkdir -p -- "$base"',
+            "workspace-replace",
+            directory,
+            employee,
+        )
 
     @asynccontextmanager
     async def workspace_download(

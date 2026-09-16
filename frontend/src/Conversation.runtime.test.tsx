@@ -829,3 +829,21 @@ test('renders a frozen OpenCode history without native mutation controls', async
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => (input instanceof Request ? input.url : input.toString()).endsWith('/question'))).toBe(false);
 });
+
+test('keeps a removed managed OpenCode history mounted without execution or recovery controls', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.endsWith('/question')) throw new Error('Removed workspaces must not request native questions');
+    return new Response(JSON.stringify([]));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Conversation baseUrl="http://localhost/api/organizations/org-one/agents/agent-one/opencode" csrfToken="csrf-example" showThreadList={false} executionBlocked executionBlockedState="removed" />);
+
+  expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Fork conversation' })).toBeNull();
+  expect(screen.queryByText('Investigate outcome')).toBeNull();
+  expect(fetchMock.mock.calls.some(([input]) => (input instanceof Request ? input.url : input.toString()).endsWith('/question'))).toBe(false);
+});

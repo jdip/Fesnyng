@@ -62,6 +62,9 @@ export type ConversationProps = {
   onThreadSelect?: () => void;
   /** A durable historical snapshot. Its original harness remains readable but cannot write. */
   readOnly?: boolean;
+  /** A managed workspace is absent or changing; readable history remains mounted. */
+  executionBlocked?: boolean;
+  executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
 };
 
 type InlineComposerConfiguration = Pick<ConversationProps, 'baseUrl' | 'csrfToken' | 'sessionId'>;
@@ -94,6 +97,8 @@ export function Conversation({
   threadPageSize = 6,
   onThreadSelect,
   readOnly = false,
+  executionBlocked = false,
+  executionBlockedState,
 }: ConversationProps) {
   const [files, setFiles] = useState<ThreadMenuTarget>();
   const [fileFocusRequest, setFileFocusRequest] = useState(0);
@@ -160,16 +165,17 @@ export function Conversation({
       if (inFlightNewThreadRequest.current === newThreadRequest) inFlightNewThreadRequest.current = undefined;
     });
   }, [newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, runtime]);
+  const executionDisabled = readOnly || executionBlocked;
   const components = useMemo(() => ({
-    Composer: readOnly ? FrozenThreadNotice : ConversationComposer,
+    Composer: readOnly ? FrozenThreadNotice : executionBlocked ? () => <WorkspaceUnavailableNotice state={executionBlockedState} /> : ConversationComposer,
     ToolFallback: OpenCodeToolFallback,
     MessageFooter: ConversationMessageFooter,
     ThreadFooter: ConversationDeliveryRecovery,
-    ...(readOnly ? {} : {
+    ...(executionDisabled ? {} : {
       ToolGroup: PendingApprovalToolGroup,
       MessageAction: () => <OpenCodeForkAction runtime={runtime} onError={onError} />,
     }),
-  }), [onError, readOnly, runtime]);
+  }), [executionBlocked, executionBlockedState, executionDisabled, onError, readOnly, runtime]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -177,10 +183,10 @@ export function Conversation({
       <ThreadPinsProvider key={baseUrl} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} onError={onError}>
       <InlineComposerConfigurationContext.Provider value={{ baseUrl, csrfToken, sessionId }}>
         <section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">
-          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={readOnly ? undefined : openFiles} onOpenPermissions={readOnly ? undefined : openPermissions} readOnly={readOnly} /></aside>}
-          <div className="fesnyng-thread-pane">{!readOnly && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={readOnly} />{!readOnly && <PendingQuestions />}</div>
-          {!readOnly && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
-          {!readOnly && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
+          {threadListTarget ? createPortal(<ThreadList showNew={false} pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} />, threadListTarget) : showThreadList && <aside><ThreadList pageSize={threadPageSize} projectLabels={projectLabels} onSelect={onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} onOpenPermissions={executionDisabled ? undefined : openPermissions} readOnly={executionDisabled} /></aside>}
+          <div className="fesnyng-thread-pane">{!executionDisabled && <ActiveThreadInformation runtime={runtime} baseUrl={baseUrl} csrfToken={csrfToken} refreshKey={refreshKey} />}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <PendingQuestions />}</div>
+          {!executionDisabled && files && <ThreadArtifactPanel key={files.id} baseUrl={baseUrl} csrfToken={csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}
+          {!executionDisabled && permissions && <ThreadPolicyDialog key={permissions.id} baseUrl={baseUrl} csrfToken={csrfToken} session={permissions} onClose={() => setPermissions(undefined)} onRestoreFocus={restorePermissionFocus} />}
         </section>
       </InlineComposerConfigurationContext.Provider>
       </ThreadPinsProvider>
@@ -190,6 +196,7 @@ export function Conversation({
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;
+const WorkspaceUnavailableNotice = ({ state }: { state?: ConversationProps['executionBlockedState'] }) => <p className="app-notice" role="status">{state === 'removed' ? 'This workspace was removed. Prepare its replacement before continuing.' : 'This workspace cannot run until its state is resolved. Inspect the workspace before continuing.'}</p>;
 
 function ThreadWorkspaceProvider({ baseUrl, csrfToken, refreshKey, children }: PropsWithChildren<{ baseUrl: string; csrfToken: string; refreshKey: number }>) {
   const revision = useOpenCodeThreadState((state) => [

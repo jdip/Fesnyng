@@ -31,6 +31,8 @@ export type CodexConversationProps = {
   onThreadSelect?: () => void;
   /** A host snapshot of an original Codex thread. No native interaction may be rendered. */
   readOnly?: boolean;
+  executionBlocked?: boolean;
+  executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
 };
 
 const base = (url: string) => url.replace(/\/$/, '');
@@ -259,29 +261,31 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted } = props;
   const [historyNotice, setHistoryNotice] = useState('');
+  const executionDisabled = props.readOnly || props.executionBlocked;
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
-  const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: props.readOnly, onHistoryNotice: setHistoryNotice }); }, [props.baseUrl, props.csrfToken, props.onError, props.readOnly, props.refreshKey]);
+  const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: executionDisabled, onHistoryNotice: setHistoryNotice }); }, [executionDisabled, props.baseUrl, props.csrfToken, props.onError, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
-    if (props.readOnly || newThreadRequest === undefined || completed.current === newThreadRequest) return;
+    if (executionDisabled || newThreadRequest === undefined || completed.current === newThreadRequest) return;
     const request = newThreadRequest;
     void runtime.threads.switchToNewThread().then(() => { completed.current = request; onNewThreadStarted?.(request); }).catch((cause: unknown) => {
       if (onNewThreadFailed) onNewThreadFailed(request, cause);
       else onError?.(cause);
     });
-  }, [newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, props.readOnly, runtime]);
-  const list = <ThreadList showNew={false} allowDelete={false} readOnly={props.readOnly} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
+  }, [executionDisabled, newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, runtime]);
+  const list = <ThreadList showNew={false} allowDelete={false} readOnly={executionDisabled} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
   const components = {
-    ...(props.readOnly ? { Composer: FrozenThreadNotice } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),
+    ...(props.readOnly ? { Composer: FrozenThreadNotice } : props.executionBlocked ? { Composer: () => <WorkspaceUnavailableNotice state={props.executionBlockedState} /> } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),
     ToolFallback: NativeEditToolFallback,
     MessageFooter: ConversationMessageFooter,
     ThreadFooter: ConversationDeliveryRecovery,
   };
-  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={props.readOnly} />{!props.readOnly && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;
+const WorkspaceUnavailableNotice = ({ state }: { state?: CodexConversationProps['executionBlockedState'] }) => <p className="app-notice" role="status">{state === 'removed' ? 'This workspace was removed. Prepare its replacement before continuing.' : 'This workspace cannot run until its state is resolved. Inspect the workspace before continuing.'}</p>;
 
 /** Codex App Server view using maintained assistant-ui thread and list primitives. */
 export function CodexConversation(props: CodexConversationProps) {

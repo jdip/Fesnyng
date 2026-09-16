@@ -16,6 +16,42 @@ export type NativeThreadCreation = {
   checkout_branch?: string;
   creation_id: string;
 };
+export type WorkspaceInspection = {
+  workspace_id?: string;
+  generation?: number;
+  safety_digest?: string;
+  state: 'ready' | 'removed' | 'legacy' | 'unavailable' | 'removing' | 'replacing';
+  kind: 'repository' | 'ordinary' | 'fork' | 'legacy' | 'unavailable';
+  directory: string | null;
+  repository: { url?: string; checkout_branch?: string; starting_revision?: string; working_branch?: string; state: string };
+  git: { kind?: 'repository' | 'ordinary' | null; state: 'safe' | 'unsafe' | 'unavailable'; digest?: string; branch?: string | null; dirty?: number; untracked?: number; ignored?: number; ahead?: number; entries?: number; upstream?: string | null };
+  history: { state: 'verified' | 'unavailable'; captured_at?: number };
+  cleanup: { remove: { available: boolean; reason?: string }; discard: { available: boolean; reason?: string }; replace: { available: boolean; reason?: string } };
+};
+export function workspaceInspection(value: unknown): WorkspaceInspection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Workspace inspection is unavailable.');
+  const row = value as Record<string, unknown>;
+  const states = ['ready', 'removed', 'legacy', 'unavailable', 'removing', 'replacing'];
+  const kinds = ['repository', 'ordinary', 'fork', 'legacy', 'unavailable'];
+  const record = (item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : undefined;
+  const cleanup = record(row.cleanup);
+  const repository = record(row.repository);
+  const git = record(row.git);
+  const history = record(row.history);
+  const remove = cleanup && record(cleanup.remove); const discard = cleanup && record(cleanup.discard); const replace = cleanup && record(cleanup.replace);
+  const fingerprint = typeof row.workspace_id === 'string' && row.workspace_id.length > 0 && Number.isSafeInteger(row.generation) && (row.generation as number) >= 0 && typeof row.safety_digest === 'string' && /^[0-9a-f]{64}$/.test(row.safety_digest);
+  const allCleanupUnavailable = remove?.available === false && discard?.available === false && replace?.available === false;
+  const noMutationEvidence = allCleanupUnavailable
+    && (row.workspace_id === undefined || row.workspace_id === null || (typeof row.workspace_id === 'string' && row.workspace_id.length > 0))
+    && (row.generation === undefined || row.generation === null || (Number.isSafeInteger(row.generation) && (row.generation as number) >= 0))
+    && (row.safety_digest === undefined || row.safety_digest === null);
+  const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+  const optionalCount = (value: unknown) => value === undefined || count(value);
+  const optionalText = (value: unknown) => value === undefined || typeof value === 'string' || value === null;
+  const gitKnown = git && git.state !== 'unavailable';
+  if ((!fingerprint && !noMutationEvidence) || !states.includes(row.state as string) || !kinds.includes(row.kind as string) || !(typeof row.directory === 'string' || row.directory === null) || !cleanup || !repository || !git || !history || typeof remove?.available !== 'boolean' || typeof discard?.available !== 'boolean' || typeof replace?.available !== 'boolean' || typeof repository.state !== 'string' || !['safe', 'unsafe', 'unavailable'].includes(git.state as string) || (gitKnown && !['repository', 'ordinary'].includes(git.kind as string)) || (!gitKnown && git.kind !== undefined && git.kind !== null && !['repository', 'ordinary'].includes(git.kind as string)) || (gitKnown && ![git.dirty, git.untracked, git.ignored].every(count)) || ![git.dirty, git.untracked, git.ignored, git.ahead, git.entries].every(optionalCount) || !optionalText(git.branch) || !optionalText(git.upstream) || !['verified', 'unavailable'].includes(history.state as string)) throw new Error('Workspace inspection is unavailable.');
+  return row as WorkspaceInspection;
+}
 export class WorkspaceCreationUncertain extends Error {
   constructor(message: string, readonly creationId: string) { super(message); }
 }

@@ -44,6 +44,14 @@ class SessionProjectProvenance(Contract):
     project_id: UUID | None = None
 
 
+class WorkspaceExpectation(Contract):
+    """The exact workspace evidence a destructive lifecycle action must recheck."""
+
+    workspace_id: str = Field(min_length=1, max_length=160)
+    generation: int = Field(ge=0)
+    safety_digest: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
 class HarnessSwitch(Contract):
     expected_version: int = Field(ge=1)
     target_runtime_type: Literal["opencode", "codex"]

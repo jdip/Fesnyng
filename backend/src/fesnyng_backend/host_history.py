@@ -21,6 +21,16 @@ async def capture_history(host: Any, runtime: Any, org: str, agent: str) -> dict
     return snapshots
 
 
+async def capture_session_history(
+    host: Any, runtime: Any, org: str, agent: str, root: dict[str, Any]
+) -> dict[str, Any]:
+    """Capture one exact root before a workspace lifecycle operation changes files."""
+    if root["runtime_type"] == "codex":
+        return await _codex(runtime, org, agent, root)
+    mapped = {row["session_id"] for row in host.sessions(org, agent, archived=None)}
+    return await _opencode(runtime, org, agent, root, mapped)
+
+
 async def _opencode(runtime: Any, org: str, agent: str, root: dict, mapped: set[str]) -> dict:
     children: dict[str, Any] = {}
     seen = {root["session_id"]}

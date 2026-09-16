@@ -92,3 +92,43 @@ remain uncertain.
 Workspace removal and replacement have their own authorized lifecycle. Project
 archive, thread archive, and container restart do not clean up files or decide
 when an organization's work should be discarded.
+
+## Inspect and clean up deliberately
+
+Open a thread's Workspace panel, or the Workspaces view for its Project or
+employee, to inspect its location, repository, branch and cleanup eligibility.
+Unavailable evidence is shown explicitly. Legacy directories without a verified
+managed-workspace binding remain usable, but cannot be removed through these
+operations. Inspection does not migrate them or delete their retained volumes.
+
+A failed safety inspection disables cleanup without changing the thread's
+execution state. An uncertain removal or replacement is different: the host
+retains its verified history and blocks execution until the workspace outcome
+can be verified. Do not delete retained state to clear that restriction.
+
+Organization members can use the workspace controls for employees they can
+access. An employee's authenticated MCP tools expose the same host-owned
+operations for its own mapped threads: `workspace_list`, `workspace_inspect`,
+`workspace_remove`, `workspace_discard` and `workspace_replace`. The tools do not
+accept another employee identity or an arbitrary filesystem path.
+
+Ordinary removal requires current evidence that execution is inactive, history
+is safely retained, ownership is verified, and no files or unpushed commits
+would be lost. An ordinary directory must be empty. A clean Git worktree alone
+is insufficient: unpushed commits or an unverifiable upstream prevent ordinary
+removal. The host checks the current filesystem and admission state when it
+executes the request, so an earlier safe inspection cannot authorize later
+changes.
+
+Discard is a separate explicit operation for the loss shown in the current
+inspection. It still refuses active work, stale evidence and unverified
+ownership or history. Neither operation removes the shared repository, another
+workspace, service data or Docker stacks. Organization, department and employee
+workflows decide when cleanup is appropriate; Fesnyng does not schedule it.
+
+After removal, the conversation keeps its native identity, Project association
+and readable captured history. Continuing requires explicit replacement at the
+same directory. Replacement preserves the retained working branch and thread;
+it does not silently start a new conversation or apply a changed Project default.
+Permanently frozen threads stay frozen and cannot be made writable by replacing
+a workspace. Archive and container restart do not trigger cleanup.

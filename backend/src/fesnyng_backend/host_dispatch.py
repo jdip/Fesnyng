@@ -119,6 +119,13 @@ class DispatchStore:
             }:
                 raise RuntimeUnavailable("Agent lifecycle transition is holding new work")
             self.host.require_writable(org, agent, session, connection=connection)
+            binding = connection.execute(
+                """SELECT state FROM host_workspace_bindings
+                WHERE organization_id=? AND agent_id=? AND session_id=?""",
+                (org, agent, session),
+            ).fetchone()
+            if binding is not None and binding["state"] != "ready":
+                raise RuntimeUnavailable("Workspace lifecycle operation is holding new work")
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence),0)+1 FROM host_dispatches WHERE session_id=?",
                 (session,),

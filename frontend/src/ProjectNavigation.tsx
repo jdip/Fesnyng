@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { agentPath, api, errorMessage, type Agent, type Project } from './workspace-api';
+import { WorkspaceInspectionList, type WorkspaceUpdate } from './WorkspaceInspection';
 
 type Thread = { agent: string; session_id: string; title: string; project_id: string | null };
 type ProjectDraft = Pick<Project, 'name' | 'description' | 'target_repository_url' | 'default_checkout_branch'>;
@@ -29,7 +30,7 @@ function threadRows(value: unknown, agent: string, projects: Record<string, stri
   });
 }
 
-export function ProjectNavigation({ organization, agents, csrf, manager, onOpenThread, onNewThread, detailsTarget, onOpenProject, currentThread, projectRevision = 0, onChanged }: {
+export function ProjectNavigation({ organization, agents, csrf, manager, onOpenThread, onNewThread, detailsTarget, onOpenProject, currentThread, projectRevision = 0, onChanged, onWorkspaceOperation }: {
   organization: string;
   agents: Agent[];
   csrf: string;
@@ -41,6 +42,7 @@ export function ProjectNavigation({ organization, agents, csrf, manager, onOpenT
   currentThread?: { agent: string; session: string };
   projectRevision?: number;
   onChanged?: () => void;
+  onWorkspaceOperation?: (update: WorkspaceUpdate) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -106,7 +108,7 @@ export function ProjectNavigation({ organization, agents, csrf, manager, onOpenT
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const details = revealedProject !== undefined ? <ProjectDetails key={revealedProject ?? 'ungrouped'} project={selectedProject} threads={selectedThreads} allProjects={activeProjects} agents={agents} manager={manager} error={error} selectedName={selectedName} onOpenThread={onOpenThread} onMoveThread={moveThread} onNewThread={onNewThread} onSaveProject={saveProject} onLifecycleProject={lifecycleProject} /> : <p className="muted project-empty">Choose a Project to see its threads and settings.</p>;
+  const details = revealedProject !== undefined ? <ProjectDetails key={revealedProject ?? 'ungrouped'} organization={organization} csrf={csrf} project={selectedProject} threads={selectedThreads} allProjects={activeProjects} agents={agents} manager={manager} error={error} selectedName={selectedName} onOpenThread={onOpenThread} onMoveThread={moveThread} onNewThread={onNewThread} onSaveProject={saveProject} onLifecycleProject={lifecycleProject} onWorkspaceOperation={onWorkspaceOperation} /> : <p className="muted project-empty">Choose a Project to see its threads and settings.</p>;
   if (loading) return <p role="status" className="muted">Loading Projects…</p>;
   return <div className="projects-layout">
     <nav className="project-list" aria-label="Projects">
@@ -144,7 +146,9 @@ export function EmployeeNewThreadChooser({ organization, agent, onStart, onCance
   return <section className="app-panel project-thread-creator" aria-label={`New thread for ${agent.name}`}><h3>New thread for {agent.name}</h3><label>Project<select className="app-select" aria-label="Project" value={project} onChange={(event) => { setProject(event.target.value); setCheckoutBranch(''); }}><option value="">Ungrouped</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{selected?.target_repository_url && <><p className="app-notice">This thread will prepare an independent workspace from {selected.default_checkout_branch ? `the Project default checkout ${selected.default_checkout_branch}.` : 'the Project checkout after it is configured.'}</p><label>Starting branch <span className="muted">Optional override</span><input className="app-input" aria-label="Starting branch" value={checkoutBranch} onChange={(event) => setCheckoutBranch(event.target.value)} /></label></>}{repositoryInvalid && <p className="app-error" role="alert">This Project needs an explicit default checkout before a thread can start.</p>}{error && <p className="app-error" role="alert">{error}</p>}<div className="app-actions"><button className="app-button" onClick={onCancel}>Cancel</button><button className="app-button primary" disabled={repositoryInvalid} onClick={() => onStart({ project: project || null, ...(checkoutBranch.trim() ? { checkoutBranch: checkoutBranch.trim() } : {}) })}>Start thread</button></div></section>;
 }
 
-function ProjectDetails({ project, threads, allProjects, agents, manager, error, selectedName, onOpenThread, onMoveThread, onNewThread, onSaveProject, onLifecycleProject }: {
+function ProjectDetails({ organization, csrf, project, threads, allProjects, agents, manager, error, selectedName, onOpenThread, onMoveThread, onNewThread, onSaveProject, onLifecycleProject, onWorkspaceOperation }: {
+  organization: string;
+  csrf: string;
   project?: Project;
   threads: Thread[];
   allProjects: Project[];
@@ -157,23 +161,32 @@ function ProjectDetails({ project, threads, allProjects, agents, manager, error,
   onNewThread: (selection: ProjectThreadStart) => void;
   onSaveProject: (draft: ProjectDraft, project?: Project) => Promise<void>;
   onLifecycleProject: (project: Project, action: 'archive' | 'restore' | 'delete') => Promise<void>;
+  onWorkspaceOperation?: (update: WorkspaceUpdate) => void;
 }) {
   const [search, setSearch] = useState('');
   const [employee, setEmployee] = useState('');
   const [creating, setCreating] = useState(false);
+  const [tab, setTab] = useState<'threads' | 'workspaces'>('threads');
   const filtered = useMemo(() => threads.filter((thread) => thread.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) && (!employee || thread.agent === employee)), [employee, search, threads]);
   const repositoryInvalid = Boolean(project?.target_repository_url && !project.default_checkout_branch);
   return <section className="project-details" aria-label={`${selectedName} project`}>
     <div className="project-details-heading"><div><h2>{selectedName}</h2>{project?.description && <p className="page-intro">{project.description}</p>}{project?.target_repository_url && <p className="muted">Repository: {project.target_repository_url} · default checkout {project.default_checkout_branch}</p>}</div>
       <div className="app-actions">{project && <ProjectEditor trigger="Edit Project" project={project} onSave={onSaveProject} />}{project && manager && (project.archived ? <button className="app-button" onClick={() => { void onLifecycleProject(project, 'restore'); }}>Restore Project</button> : <button className="app-button" onClick={() => { void onLifecycleProject(project, 'archive'); }}>Archive Project</button>)}</div></div>
     {project && manager && <button className="app-button danger" onClick={() => { if (window.confirm(`Delete ${project.name}? Its threads will remain Ungrouped.`)) void onLifecycleProject(project, 'delete'); }}>Delete Project</button>}
-    <div className="project-detail-toolbar"><label className="project-search-label">Search threads<input type="search" className="app-input" aria-label={`Search ${selectedName} threads`} value={search} onChange={(event) => setSearch(event.target.value)} /></label><label>Employee<select className="app-select" aria-label="Filter by employee" value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><button className="app-button primary" disabled={project?.archived || repositoryInvalid} onClick={() => setCreating(true)}>New thread</button></div>
+    <div className="project-detail-tabs" role="tablist" aria-label={`${selectedName} view`}><button className="app-button quiet" role="tab" aria-selected={tab === 'threads'} onClick={() => setTab('threads')}>Threads</button><button className="app-button quiet" role="tab" aria-selected={tab === 'workspaces'} onClick={() => setTab('workspaces')}>Workspaces</button></div>
+    {tab === 'threads' && <><div className="project-detail-toolbar"><label className="project-search-label">Search threads<input type="search" className="app-input" aria-label={`Search ${selectedName} threads`} value={search} onChange={(event) => setSearch(event.target.value)} /></label><label>Employee<select className="app-select" aria-label="Filter by employee" value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><button className="app-button primary" disabled={project?.archived || repositoryInvalid} onClick={() => setCreating(true)}>New thread</button></div>
     {project?.archived && <p className="app-notice">Restore this Project before starting a new thread.</p>}
     {repositoryInvalid && <p className="app-error" role="alert">This Project needs an explicit default checkout before a thread can start.</p>}
     {creating && <NewProjectThread project={project} agents={agents} onClose={() => setCreating(false)} onStart={(agent, checkoutBranch) => { setCreating(false); onNewThread({ agent, project: project?.id ?? null, ...(checkoutBranch ? { checkoutBranch } : {}) }); }} />}
     {error && <p className="app-error" role="alert">{error}</p>}
-    <div className="project-thread-list">{filtered.map((thread) => <div className="project-thread-row" key={`${thread.agent}:${thread.session_id}`}><button className="project-thread-open" onClick={() => onOpenThread(thread.agent, thread.session_id)}>{thread.title}<small>{agents.find((agent) => agent.id === thread.agent)?.name ?? thread.agent}</small></button><select aria-label={`Project for ${thread.title}`} value={thread.project_id ?? ''} onChange={(event) => { void onMoveThread(thread, event.target.value || null); }}><option value="">Ungrouped</option>{(project?.archived ? [project, ...allProjects] : allProjects).map((item) => <option key={item.id} value={item.id} disabled={item.archived}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></div>)}{!filtered.length && <p className="muted">No matching threads.</p>}</div>
+    <div className="project-thread-list">{filtered.map((thread) => <div className="project-thread-row" key={`${thread.agent}:${thread.session_id}`}><button className="project-thread-open" onClick={() => onOpenThread(thread.agent, thread.session_id)}>{thread.title}<small>{agents.find((agent) => agent.id === thread.agent)?.name ?? thread.agent}</small></button><select aria-label={`Project for ${thread.title}`} value={thread.project_id ?? ''} onChange={(event) => { void onMoveThread(thread, event.target.value || null); }}><option value="">Ungrouped</option>{(project?.archived ? [project, ...allProjects] : allProjects).map((item) => <option key={item.id} value={item.id} disabled={item.archived}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></div>)}{!filtered.length && <p className="muted">No matching threads.</p>}</div></>}
+    {tab === 'workspaces' && <ProjectWorkspaces organization={organization} csrf={csrf} threads={threads} onOpenThread={onOpenThread} onOperation={onWorkspaceOperation} />}
   </section>;
+}
+
+function ProjectWorkspaces({ organization, csrf, threads, onOpenThread, onOperation }: { organization: string; csrf: string; threads: Thread[]; onOpenThread: (agent: string, session: string) => void; onOperation?: (update: WorkspaceUpdate) => void }) {
+  const byEmployee = threads.reduce<Record<string, Thread[]>>((groups, thread) => ({ ...groups, [thread.agent]: [...(groups[thread.agent] ?? []), thread] }), {});
+  return <div className="project-workspaces" role="tabpanel">{Object.entries(byEmployee).map(([agent, employeeThreads]) => <WorkspaceInspectionList key={agent} organization={organization} agent={agent} csrf={csrf} sessions={employeeThreads.map((thread) => ({ id: thread.session_id, title: thread.title }))} onOpen={(session) => onOpenThread(agent, session)} onOperation={onOperation} />)}</div>;
 }
 
 function NewProjectThread({ project, agents, onClose, onStart }: { project?: Project; agents: Agent[]; onClose: () => void; onStart: (agent: string, checkoutBranch?: string) => void }) {
