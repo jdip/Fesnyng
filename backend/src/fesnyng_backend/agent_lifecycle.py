@@ -103,6 +103,7 @@ class AgentLifecycle:
     async def perform(
         self, organization_id: str, agent_id: str, request: HostLifecycleRequest
     ) -> dict[str, Any]:
+        self.store.require_maintenance_open()
         async with self.operation_locks.setdefault(agent_id, asyncio.Lock()):
             return await self._perform(organization_id, agent_id, request)
 

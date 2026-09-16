@@ -43,6 +43,10 @@ def profile_status(request: Request, organization_id: UUID, profile_id: UUID):
 
 @router.get("/credential")
 async def credential(request: Request):
+    try:
+        request.app.state.host_store.require_maintenance_open()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(401, "Agent authentication required")
@@ -57,6 +61,10 @@ async def credential(request: Request):
 async def begin_login(request: Request, organization_id: UUID, profile_id: UUID):
     org, profile = str(organization_id), str(profile_id)
     require_binding(request, org)
+    try:
+        request.app.state.host_store.require_maintenance_open()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
     store = request.app.state.credential_store
     operation = store.acquire_operation(
         org,

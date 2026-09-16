@@ -36,6 +36,30 @@ FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN=http://127.0.0.1:5173 \
 
 Secure cookies are the default for HTTPS installations. Configure the actual frontend origin; unsafe browser requests require its exact Origin and the session's CSRF token. `POST /auth/login` takes `login` and `password`; `GET /auth/session` restores the user and CSRF token from the HttpOnly session cookie after a reload. Send `X-CSRF-Token` on mutations. Logout and password changes revoke stored sessions. The frontend organization workspace is delivered in its later approved ticket.
 
+### Serve the compiled browser workspace
+
+The direct `fesnyng_backend.control_plane:create_app` entrypoint remains the API-only
+service. A deployed browser service instead serves the compiled Vite directory and
+mounts that same API below `/api`:
+
+```bash
+FESNYNG_FRONTEND_DIST=/srv/fesnyng/releases/REVISION/frontend/dist \
+FESNYNG_DEPLOYED_REVISION=FULL_LOWERCASE_GIT_SHA \
+FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN=https://fesnyng.example.ts.net \
+  uv run --locked --project backend uvicorn fesnyng_backend.web:create_app \
+  --factory --host 127.0.0.1 --port 8000
+```
+
+`FESNYNG_FRONTEND_DIST` must be an absolute directory containing the built
+`index.html`; the browser entrypoint will not fall back to a source checkout.
+Client-side workspace routes receive that index, while missing `/api` routes and
+missing static assets remain HTTP 404. Session cookies retain their `/` path, so
+the browser sends them to `/api`; the existing secure-cookie and exact-origin CSRF
+rules therefore apply unchanged. `FESNYNG_DEPLOYED_REVISION` is optional for local
+runs. In a deployment it is the lowercase 40-character Git SHA that both `/health`
+and `/api/health` report as `revision`, allowing an updater to verify the activated
+release without reading deployment state from the source tree.
+
 Each service defaults to `./.fesnyng/<service>/fesnyng.sqlite3`. Set `FESNYNG_CONTROL_PLANE_STATE_DIRECTORY` or `FESNYNG_AGENT_HOST_STATE_DIRECTORY` to choose another private directory, and the corresponding `*_DATABASE_PATH` to override the database location. Use the same values for installation commands and server startup. Existing state must have private permissions; the app does not change unrelated directory permissions.
 
 For a two-host local proof, use the installation commands below with separate state directories, host API ports, and container-reachable credential URLs for each host.

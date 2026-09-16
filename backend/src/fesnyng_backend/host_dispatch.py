@@ -292,6 +292,8 @@ class Dispatcher:
                 pass
 
     async def step(self) -> None:
+        if self.store.host.maintenance_status()["state"] == "closed":
+            return
         for delivery_id, task in list(self.tasks.items()):
             if task.done():
                 del self.tasks[delivery_id]

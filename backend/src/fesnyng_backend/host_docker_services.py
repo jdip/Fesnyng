@@ -195,6 +195,9 @@ class DockerServices:
                 threads TEXT NOT NULL, project_ids TEXT NOT NULL, revision INTEGER NOT NULL
             )""")
 
+    def maintenance_lock(self) -> asyncio.Lock:
+        return self._lock
+
     def _validate_added_associations(
         self, org: str, body: ServiceAssociations, existing: dict[str, Any] | None = None
     ) -> tuple[str, str]:
@@ -294,6 +297,7 @@ class DockerServices:
 
     async def register(self, org: str, body: ServiceRegistration) -> dict[str, Any]:
         async with self._lock:
+            self.host.require_maintenance_open()
             await self._validate_target(org, body)
             threads, projects = self._validate_added_associations(org, body)
             service_id = str(uuid4())
@@ -333,6 +337,7 @@ class DockerServices:
 
     async def update(self, org: str, service_id: str, body: ServiceUpdate) -> dict[str, Any]:
         async with self._lock:
+            self.host.require_maintenance_open()
             current = self._record(org, service_id)
             if current["revision"] != body.expected_revision:
                 raise ValueError("Service associations changed; inspect and confirm again")
@@ -364,6 +369,7 @@ class DockerServices:
         self, org: str, service_id: str, expected_revision: int
     ) -> dict[str, bool]:
         async with self._lock:
+            self.host.require_maintenance_open()
             current = self._record(org, service_id)
             if current["revision"] != expected_revision:
                 raise ValueError("Service associations changed; inspect and confirm again")

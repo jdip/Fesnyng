@@ -42,6 +42,11 @@ class HostStore:
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL
                 );
                 INSERT OR IGNORE INTO host_schema VALUES(1,1);
+                CREATE TABLE IF NOT EXISTS host_maintenance_admission (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    state TEXT NOT NULL CHECK(state IN ('open','closed'))
+                );
+                INSERT OR IGNORE INTO host_maintenance_admission VALUES(1,'open');
                 CREATE TABLE IF NOT EXISTS host_bindings (
                     organization_id TEXT PRIMARY KEY, token_digest TEXT NOT NULL UNIQUE
                 );
@@ -242,11 +247,112 @@ class HostStore:
             "name": json.loads(row["desired_envelope"])["name"],
         }
 
+    def maintenance_status(self) -> dict[str, str]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM host_maintenance_admission WHERE singleton=1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Host maintenance admission is not initialized")
+        return {"state": row["state"]}
+
+    def close_maintenance_admission(self) -> bool:
+        """Atomically close new-work admission without assigning a lease or owner."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE host_maintenance_admission SET state='closed' "
+                "WHERE singleton=1 AND state='open'"
+            ).rowcount
+        return changed == 1
+
+    def open_maintenance_admission(self) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE host_maintenance_admission SET state='open' WHERE singleton=1"
+            )
+
+    def require_maintenance_open(self, *, connection: sqlite3.Connection | None = None) -> None:
+        if connection is None:
+            with self.connect() as owned:
+                self.require_maintenance_open(connection=owned)
+            return
+        row = connection.execute(
+            "SELECT state FROM host_maintenance_admission WHERE singleton=1"
+        ).fetchone()
+        if row is None or row["state"] != "open":
+            raise ValueError("Host maintenance is holding new work")
+
+    def maintenance_agents(self) -> list[dict[str, str]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT organization_id,agent_id FROM host_agents ORDER BY agent_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def maintenance_pending_reason(self) -> str | None:
+        """Return one bounded durable reason that makes a host unsafe to restart."""
+        with self.connect() as connection:
+            tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if connection.execute(
+                """SELECT 1 FROM host_agents
+                WHERE lifecycle_state NOT IN ('running','stopped')
+                   OR switch_state IS NOT NULL
+                   OR (desired_state='running' AND (
+                        applied_envelope IS NULL OR desired_envelope != applied_envelope
+                   )) LIMIT 1"""
+            ).fetchone():
+                return "configuration or lifecycle transition"
+            if "host_dispatches" in tables and connection.execute(
+                """SELECT 1 FROM host_dispatches
+                WHERE state NOT IN ('completed','failed','contributed','cancelled') LIMIT 1"""
+            ).fetchone():
+                return "pending delivery"
+            if "host_interaction_operations" in tables and connection.execute(
+                "SELECT 1 FROM host_interaction_operations WHERE state != 'completed' LIMIT 1"
+            ).fetchone():
+                return "pending interaction"
+            if "host_thread_policy" in tables and connection.execute(
+                """SELECT 1 FROM host_thread_policy
+                WHERE desired_revision != applied_revision LIMIT 1"""
+            ).fetchone():
+                return "pending interaction"
+            if "peer_outbox" in tables and connection.execute(
+                """SELECT 1 FROM peer_outbox
+                WHERE state NOT IN ('accepted','rejected') LIMIT 1"""
+            ).fetchone():
+                return "pending peer work"
+            if "peer_inbox" in tables and connection.execute(
+                """SELECT 1 FROM peer_inbox
+                WHERE state NOT IN ('accepted','rejected') LIMIT 1"""
+            ).fetchone():
+                return "pending peer work"
+            if connection.execute(
+                """SELECT 1 FROM host_workspace_creations
+                WHERE state NOT IN ('completed') LIMIT 1"""
+            ).fetchone():
+                return "workspace transition"
+            if connection.execute(
+                """SELECT 1 FROM host_workspace_bindings
+                WHERE state NOT IN ('ready','removed') LIMIT 1"""
+            ).fetchone():
+                return "workspace transition"
+            if "credential_profiles" in tables and connection.execute(
+                """SELECT 1 FROM credential_profiles
+                WHERE state IN ('login_pending','refreshing') LIMIT 1"""
+            ).fetchone():
+                return "credential operation"
+        return None
+
     def stage_agent(self, envelope: HostAgentConfiguration) -> bool:
         if envelope.host_id != self.instance_id:
             raise ValueError("Configuration belongs to another host")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.require_maintenance_open(connection=connection)
             if not connection.execute(
                 "SELECT 1 FROM host_bindings WHERE organization_id=?",
                 (str(envelope.organization_id),),
@@ -1036,6 +1142,7 @@ class HostStore:
             with self.connect() as owned:
                 self.require_writable(organization_id, agent_id, session_id, connection=owned)
             return
+        self.require_maintenance_open(connection=connection)
         if session_id is not None:
             session = connection.execute(
                 """SELECT frozen_at FROM host_sessions

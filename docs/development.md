@@ -162,6 +162,33 @@ Inspect rendered behavior in the browser after visual changes. Verify both backe
 
 ## Delivery and dependency upkeep
 
+### Persistent deployment support
+
+The deployment web entry point, `fesnyng_backend.web:create_app`, serves a built
+frontend from `FESNYNG_FRONTEND_DIST` and mounts the existing control-plane API
+at `/api`. Use an absolute build directory, the actual HTTPS origin in
+`FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN`, and the default secure cookies.
+`FESNYNG_DEPLOYED_REVISION` identifies the running release in service health
+responses. The independent control-plane and host entry points remain available.
+
+Deployment maintenance is a host operation, separate from an employee's
+Start/Stop/Restart controls. The host's `/maintenance` status and
+`/maintenance/acquire` and `/maintenance/release` POST operations require a
+loopback connection and a separate private maintenance token. Configure the
+token with `FESNYNG_MAINTENANCE_TOKEN_FILE`; never put it in browser settings,
+organization bindings, logs or command-line arguments. Run the host without
+trusting proxy headers so network identity cannot be supplied by a caller.
+
+The updater acquires admission immediately before activation. Busy, pending or
+unknown work defers deployment and reopens admission. A successful acquire
+persists across host restarts; release it only after the intended services and
+revision pass health verification. An interrupted update keeps admission closed
+for operator inspection. Inspect the deployed revision and service logs, repair
+the failed operation, verify health, then explicitly release maintenance. Do not
+clear durable state, fabricate settled outcomes or interrupt agents to force an
+update. The installation/updater runbook supplies the concrete operational
+commands and owns its retained services.
+
 Use [the PR-to-test runbook](workflows/pr-to-test.md) and canonical script for review, merge and verification of the committed tree. Application checks now run as part of that script's local gate. Main promotion remains separate.
 
 During normal discovery, use `dependabot-upkeep` to read actionable alerts. Preserve alert-only protection and the operator-confirmed rules; empty alert lists do not prove hosted settings. Dependency changes update the owning manifest and lockfile together.

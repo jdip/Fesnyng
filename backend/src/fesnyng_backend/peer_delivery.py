@@ -384,6 +384,12 @@ class PeerDeliveryService:
     async def _serve(self) -> None:
         while True:
             self.changed.clear()
+            if self.store.maintenance_status()["state"] == "closed":
+                try:
+                    await asyncio.wait_for(self.changed.wait(), timeout=1)
+                except TimeoutError:
+                    pass
+                continue
             for delivery_id, task in list(self.delivery_tasks.items()):
                 if not task.done():
                     continue

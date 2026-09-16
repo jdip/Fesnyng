@@ -67,6 +67,9 @@ class DockerResources:
                 UNIQUE(organization_id,engine_id,container_id)
             )""")
 
+    def maintenance_lock(self) -> asyncio.Lock:
+        return self._lock
+
     def _associations(self, org: str, body: ResourceAssociations) -> tuple[str, str]:
         for thread in body.threads:
             self.host.session(org, str(thread.agent_id), thread.session_id)
@@ -166,6 +169,7 @@ class DockerResources:
 
     async def register(self, org: str, body: ResourceRegistration) -> dict[str, Any]:
         async with self._lock:
+            self.host.require_maintenance_open()
             receipt = await self.engine.require(org)
             threads, projects = self._associations(org, body)
             container = await self._container(org, body.container_id)
@@ -255,6 +259,7 @@ class DockerResources:
 
     async def update(self, org: str, resource_id: str, body: ResourceUpdate) -> dict[str, Any]:
         async with self._lock:
+            self.host.require_maintenance_open()
             item = self._record(org, resource_id)
             if item["revision"] != body.expected_revision:
                 raise ValueError("Resource associations changed; inspect and confirm again")
@@ -274,6 +279,7 @@ class DockerResources:
         action: Literal["start", "stop", "remove", "unregister"],
     ) -> dict[str, Any]:
         async with self._lock:
+            self.host.require_maintenance_open()
             item = self._record(org, resource_id)
             if item["revision"] != expected_revision:
                 raise ValueError("Resource associations changed; inspect and confirm again")

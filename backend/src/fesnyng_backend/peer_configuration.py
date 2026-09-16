@@ -70,6 +70,7 @@ class PeerConfigurationStore:
         encoded = configuration.model_dump_json()
         with self.host.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.host.require_maintenance_open(connection=connection)
             if not connection.execute(
                 "SELECT 1 FROM host_bindings WHERE organization_id=?", (organization_id,)
             ).fetchone():

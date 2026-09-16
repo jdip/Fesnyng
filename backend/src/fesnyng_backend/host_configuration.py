@@ -39,6 +39,7 @@ class HostConfiguration:
         self.dispatch_store = dispatch_store
 
     async def apply(self, envelope: HostAgentConfiguration) -> dict[str, object]:
+        self.host.require_maintenance_open()
         changed = self.host.stage_agent(envelope)
         if not changed:
             return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
@@ -59,6 +60,8 @@ class HostConfiguration:
         return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
 
     async def reconcile_once(self) -> dict[str, str]:
+        if self.host.maintenance_status()["state"] == "closed":
+            return {}
         with self.host.connect() as connection:
             rows = connection.execute(
                 """SELECT desired_envelope FROM host_agents
@@ -168,6 +171,7 @@ class HostConfiguration:
                     organization_id, agent_id, session["session_id"], envelope
                 )
         async with self.runtime.lock(agent_id):
+            self.host.require_maintenance_open()
             current = self.host.agent(organization_id, agent_id)
             if HostAgentConfiguration.model_validate_json(current["desired_envelope"]) != envelope:
                 raise RuntimeUnavailable("Configuration changed during application")

@@ -24,6 +24,8 @@ from fesnyng_backend.host_docker_services import ConfiguredTailscaleServe, Docke
 from fesnyng_backend.host_interaction_routes import router as interaction_router
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_lifecycle import exclusive_host
+from fesnyng_backend.host_maintenance import MaintenanceGuard
+from fesnyng_backend.host_maintenance_routes import router as maintenance_router
 from fesnyng_backend.host_mcp import (
     create_memory_mcp,
     register_collaboration_tools,
@@ -58,6 +60,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     store = HostStore(resolved)
     store.initialize()
     app.state.host_store = store
+    app.state.maintenance_guard = MaintenanceGuard(store)
     app.state.host_memory = MemoryStore(store)
     app.state.host_memory.initialize()
     app.state.host_runtime = DockerRuntime(
@@ -65,6 +68,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         os.environ.get("FESNYNG_AGENT_HOST_CREDENTIAL_URL", "http://host.lima.internal:8001"),
         os.environ.get("FESNYNG_AGENT_HOST_IMAGE", "fesnyng-agent:local"),
     )
+    app.state.maintenance_guard.runtime = app.state.host_runtime
     app.state.dispatch_store = DispatchStore(store)
     app.state.docker_capability = DockerCapability(store, app.state.host_runtime)
     app.state.docker_resources = DockerResources(store, app.state.docker_capability)
@@ -76,12 +80,18 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         ConfiguredTailscaleServe(resolved.tailscale_serve),
     )
     app.state.docker_services.initialize()
+    app.state.maintenance_guard.activity_locks = [
+        app.state.docker_resources.maintenance_lock(),
+        app.state.docker_services.maintenance_lock(),
+    ]
     app.state.dispatch_store.initialize()
     app.state.interactions = Interactions(store, app.state.host_runtime)
     app.state.interactions.initialize()
+    app.state.maintenance_guard.interactions = app.state.interactions
     app.state.dispatcher = Dispatcher(
         app.state.dispatch_store, app.state.host_runtime, app.state.interactions
     )
+    app.state.maintenance_guard.dispatcher = app.state.dispatcher
     app.state.interactions.native_admissions_settled = (
         app.state.dispatcher.policy_admissions_settled
     )
@@ -101,6 +111,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         app.state.dispatcher,
     )
     app.state.peer_delivery.initialize()
+    app.state.maintenance_guard.peer_delivery = app.state.peer_delivery
     mcp_server, mcp_app = create_memory_mcp(
         store, app.state.host_memory, app.state.host_runtime.credential_url
     )
@@ -122,6 +133,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     credentials.initialize()
     app.state.credential_store = credentials
     app.state.login_tasks = set()
+    app.state.maintenance_guard.login_tasks = app.state.login_tasks
     app.state.host_configuration = HostConfiguration(
         store, app.state.host_runtime, credentials, app.state.interactions, app.state.dispatch_store
     )
@@ -134,8 +146,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
 
     async def reconcile_configuration():
         while True:
-            await app.state.host_configuration.reconcile_once()
-            await app.state.interactions.reconcile_once()
+            if app.state.maintenance_guard.store.maintenance_status()["state"] == "open":
+                await app.state.host_configuration.reconcile_once()
+                await app.state.interactions.reconcile_once()
             await asyncio.sleep(1)
 
     @asynccontextmanager
@@ -170,6 +183,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
 
     app.router.lifespan_context = lifespan
     app.include_router(router)
+    app.include_router(maintenance_router)
     app.include_router(docker_router)
     app.include_router(docker_service_router)
     app.include_router(credential_router)

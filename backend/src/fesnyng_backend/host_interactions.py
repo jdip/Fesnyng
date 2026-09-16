@@ -108,6 +108,31 @@ class Interactions:
             raise RuntimeUnavailable("Native pending interactions response is invalid")
         return [entry for entry in result if entry.get("sessionID") == session_id]
 
+    async def maintenance_pending(self, organization_id: str, agent_id: str) -> bool:
+        """Check both native harnesses for a prompt requiring a human response."""
+        for session in self.host.sessions(organization_id, agent_id):
+            if session["frozen_at"] is not None:
+                continue
+            if session["runtime_type"] == "codex":
+                router = getattr(self.runtime, "runtime_router", None)
+                adapter = (
+                    router.for_session(session)
+                    if router is not None
+                    else getattr(self.runtime, "codex", None)
+                )
+                if adapter is None or not hasattr(adapter, "pending"):
+                    raise RuntimeUnavailable("Codex pending interaction status is unavailable")
+                pending = await adapter.pending(organization_id, agent_id, session["session_id"])
+                if not isinstance(pending, list):
+                    raise RuntimeUnavailable("Codex pending interaction status is invalid")
+                if pending:
+                    return True
+            else:
+                for kind in ("question", "permission"):
+                    if await self.pending(organization_id, agent_id, session["session_id"], kind):
+                        return True
+        return False
+
     async def reply(
         self,
         organization_id: str,
@@ -657,6 +682,8 @@ class Interactions:
 
     async def reconcile_once(self) -> dict[str, str]:
         """Retry settled thread-policy changes without replaying a global configuration change."""
+        if self.host.maintenance_status()["state"] == "closed":
+            return {}
         with self.host.connect() as connection:
             rows = connection.execute(
                 """SELECT policy.organization_id, policy.agent_id, policy.session_id
