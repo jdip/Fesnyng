@@ -83,7 +83,11 @@ class MaintenanceGuard:
             raise MaintenanceBusy("credential operation")
         if self.dispatcher is not None and any(
             not task.done()
-            for task in [*self.dispatcher.tasks.values(), *self.dispatcher.probes.values()]
+            for task in [
+                *self.dispatcher.tasks.values(),
+                *self.dispatcher.probes.values(),
+                *getattr(self.dispatcher, "title_tasks", {}).values(),
+            ]
         ):
             raise MaintenanceBusy("pending delivery")
         if self.peer_delivery is not None and any(

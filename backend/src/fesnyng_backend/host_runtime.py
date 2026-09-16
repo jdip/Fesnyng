@@ -1749,6 +1749,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
         checkout_branch: str | None = None,
         project_id: str | None = None,
         requested_checkout_branch: str | None = None,
+        automatic_title: bool = False,
     ) -> dict[str, Any]:
         async with self.lock(agent_id):
             self.store.require_writable(organization_id, agent_id)
@@ -1806,13 +1807,23 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
             if reservation["state"] in {"native_attempted", "uncertain"}:
                 if envelope.configuration.runtime_type == "opencode":
                     recovered = await self._recover_opencode_creation(
-                        organization_id, agent_id, creation_id, selected_directory, title
+                        organization_id,
+                        agent_id,
+                        creation_id,
+                        selected_directory,
+                        title,
+                        automatic_title,
                     )
                     if recovered is not None:
                         return recovered
                 elif envelope.configuration.runtime_type == "codex":
                     recovered = await self._recover_codex_creation(
-                        organization_id, agent_id, creation_id, selected_directory, title
+                        organization_id,
+                        agent_id,
+                        creation_id,
+                        selected_directory,
+                        title,
+                        automatic_title,
                     )
                     if recovered is not None:
                         return recovered
@@ -1853,6 +1864,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
                         agent_id,
                         title,
                         workspace,
+                        automatic_title=automatic_title,
                         directory=selected_directory,
                         metadata=metadata,
                         creation_id=creation_id,
@@ -1888,7 +1900,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
                     "/session",
                     method="POST",
                     body={
-                        "title": title,
+                        **({} if automatic_title else {"title": title}),
                         "permission": permission_rules(envelope),
                         "metadata": {**(metadata or {}), "fesnyng_creation_id": creation_id},
                     },
@@ -1898,11 +1910,21 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
                 if not isinstance(session_id, str) or not session_id:
                     raise RuntimeUnavailable("Native session creation receipt is invalid")
                 self.store.save_session(
-                    organization_id, agent_id, session_id, selected_directory, title
+                    organization_id,
+                    agent_id,
+                    session_id,
+                    selected_directory,
+                    title,
+                    title_generation_state="native_pending" if automatic_title else "manual",
                 )
             except RuntimeUnavailable:
                 recovered = await self._recover_opencode_creation(
-                    organization_id, agent_id, creation_id, selected_directory, title
+                    organization_id,
+                    agent_id,
+                    creation_id,
+                    selected_directory,
+                    title,
+                    automatic_title,
                 )
                 if recovered is not None:
                     return recovered
@@ -2036,6 +2058,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
         creation_id: str,
         directory: str,
         title: str,
+        automatic_title: bool = False,
     ) -> dict[str, Any] | None:
         try:
             sessions = await self.request(
@@ -2072,11 +2095,16 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
         assert isinstance(session_id, str)
         receipt = {
             "id": session_id,
-            "title": entry.get("title") or title,
+            "title": title if automatic_title else entry.get("title") or title,
             "directory": directory,
         }
         self.store.save_session(
-            organization_id, agent_id, session_id, directory, str(receipt["title"])
+            organization_id,
+            agent_id,
+            session_id,
+            directory,
+            title,
+            title_generation_state="native_pending" if automatic_title else "manual",
         )
         self.store.complete_workspace_creation(organization_id, agent_id, creation_id, receipt)
         return receipt
@@ -2088,6 +2116,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
         creation_id: str,
         directory: str,
         title: str,
+        automatic_title: bool = False,
     ) -> dict[str, Any] | None:
         """Adopt one provable lost Codex creation without starting another thread."""
         expected = str(
@@ -2154,8 +2183,9 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
                 agent_id,
                 thread_id,
                 directory,
-                resolved_title,
+                title if automatic_title else resolved_title,
                 runtime_type="codex",
+                title_generation_state="pending" if automatic_title else "manual",
             )
         else:
             if (
@@ -2166,6 +2196,10 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
             ):
                 return None
             resolved_title = existing["title"]
+        if automatic_title and (
+            "existing" not in locals() or existing["title_generation_state"] != "manual"
+        ):
+            resolved_title = title
         agent = self.store.agent(organization_id, agent_id)
         applied = agent.get("applied_envelope")
         if not isinstance(applied, str):
