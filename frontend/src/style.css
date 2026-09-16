@@ -122,7 +122,9 @@ button:disabled { cursor: default; opacity: .5; }
 .project-thread-open small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #75816e; font-size: 11px; line-height: 16px; }
 .project-thread-open small { margin-top: 3px; }
 .project-thread-creator { margin: 12px 0; }
-.project-editor { margin-top: 12px; }
+.project-create-trigger { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; }
+.project-create-trigger svg { width: 16px; height: 16px; }
+.project-editor-modal { max-height: calc(100dvh - 32px); overflow-y: auto; }
 .agent-list { display: flex; flex-direction: column; gap: 4px; }
 .agent-entry { min-width: 0; }
 .agent-card { position: relative; overflow: hidden; border: 1px solid transparent; border-radius: 8px; background: #f8faf6; }
