@@ -32,11 +32,38 @@ host uses a dedicated nftables `inet fesnyng_host_api` input chain at priority
 `-10` with `iifname "tailscale0" tcp dport 8001 counter drop`. Its root-owned
 `fesnyng-host-api-firewall.service` loads only that table from
 `/etc/fesnyng/host-api-firewall.nft`; it never flushes the shared ruleset.
+Its unit uses `DefaultDependencies=no`, `Before=network-pre.target tailscaled.service docker.service shutdown.target`, `After=local-fs.target`, and `Conflicts=shutdown.target` so the narrow deny is installed before network-facing owners and removed only at shutdown.
 Keep the existing Docker guard and the narrow UFW Docker bridge callback allow.
 Verify loopback and Docker bridge access, and tailnet IPv4/IPv6 and LAN denial,
 with actual requests. Inspect the dedicated drop counter to prove which owner
 enforces the boundary. Do not enable a stock nftables service that flushes rules.
 The user service manager must have lingering enabled for unattended startup.
+
+If a first install stops before `deployment.env` exists, no application has been
+started. Verify that the directories and units belong to this attempt. Remove its
+empty `control-plane` and `agent-host` directories with `rmdir`, and remove only
+its generated `fesnyng-test-{control,host,update}.service` and
+`fesnyng-test-update.timer` files from `~/.config/systemd/user`, if present.
+Retain downloaded tooling and the source mirror, then rerun the installer with
+the same arguments. If either state directory is nonempty, stop and inspect it;
+do not delete it to make the preflight pass.
+
+The installer publishes `deployment.env` atomically after the updater, wrappers,
+source mirror and unit files exist. If that configuration exists, retain it and
+finish installation with the following commands. If `current` already exists
+and the updater reports recovery is required, use the health/admission recovery
+below first. Recheck that the Serve configuration is empty before creating the
+route; preserve an existing route and verify it separately.
+
+```bash
+source "$HOME/.config/fesnyng-test/deployment.env"
+systemctl --user daemon-reload
+systemctl --user enable fesnyng-test-control fesnyng-test-host fesnyng-test-update.timer
+"$DEPLOY_BASE/bin/update"
+sudo tailscale serve status
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8000
+systemctl --user start fesnyng-test-update.timer
+```
 
 `systemctl --user status fesnyng-test-control fesnyng-test-host
 fesnyng-test-update.timer` and `journalctl --user -u fesnyng-test-update` show

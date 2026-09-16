@@ -24,6 +24,10 @@ config_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/fesnyng-test
 [[ ! -e $config_dir/deployment.env && ! -e $deploy_base/current && ! -e $state_root/control-plane && ! -e $state_root/agent-host ]] || { echo 'Existing deployment resource retained.' >&2; exit 1; }
 for unit in control host update; do [[ ! -e $HOME/.config/systemd/user/fesnyng-test-$unit.service ]] || { echo 'Existing deployment unit retained.' >&2; exit 1; }; done
 [[ ! -e $HOME/.config/systemd/user/fesnyng-test-update.timer ]] || { echo 'Existing deployment timer retained.' >&2; exit 1; }
+for command in git curl tar sha256sum docker systemctl loginctl python3 ss flock sudo; do command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 1; }; done
+docker info >/dev/null
+systemctl --user show-environment >/dev/null
+[[ $(loginctl show-user "$(id -u)" -p Linger --value) == yes ]] || { echo 'Enable user lingering before installation.' >&2; exit 1; }
 for port in 8000 8001; do
   if ss -ltn "sport = :$port" | grep -q LISTEN; then
     echo "Port $port is already in use." >&2
@@ -32,7 +36,7 @@ for port in 8000 8001; do
 done
 serve_status=$(sudo -n tailscale serve status --json)
 python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if not value.get("Web") and not value.get("TCP") else 1)' <<<"$serve_status" || { echo 'Existing Tailscale Serve configuration is retained.' >&2; exit 1; }
-mkdir -p -m 700 "$deploy_base/bin" "$deploy_base/releases" "$deploy_base/tooling" "$state_root/control-plane" "$state_root/agent-host" "$config_dir" "$HOME/.config/systemd/user"
+mkdir -p "$deploy_base/tooling"
 node_root=$deploy_base/tooling/node-v$node_version
 if [[ ! -x $node_root/bin/node ]]; then
   archive=node-v$node_version-linux-$node_arch.tar.xz; tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
@@ -45,8 +49,31 @@ fi
 curl -fsSL "https://astral.sh/uv/$uv_version/install.sh" | env UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$deploy_base/tooling/uv-bin" sh
 uv_bin=$deploy_base/tooling/uv-bin/uv
 [[ $($node_root/bin/node --version) == v$node_version && $($uv_bin --version | awk '{print $2}') == "$uv_version" ]] || { echo 'Declared tool installation did not verify.' >&2; exit 1; }
+mkdir -p -m 700 "$deploy_base/bin" "$deploy_base/releases" "$state_root/control-plane" "$state_root/agent-host" "$config_dir" "$HOME/.config/systemd/user"
 umask 077; token=$state_root/maintenance.token; [[ -e $token ]] || head -c 32 /dev/urandom | base64 > "$token"
-cat > "$config_dir/deployment.env" <<EOF
+if [[ -d $deploy_base/source.git ]]; then
+  [[ $(git -C "$deploy_base/source.git" rev-parse --is-bare-repository) == true && $(git -C "$deploy_base/source.git" remote get-url origin) == https://github.com/jdip/Fesnyng.git ]] || { echo 'Existing source mirror does not match this installation.' >&2; exit 1; }
+else
+  git clone --mirror https://github.com/jdip/Fesnyng.git "$deploy_base/source.git"
+fi
+install -m 700 "$root/scripts/update-test-deployment.sh" "$deploy_base/bin/update"
+cat > "$deploy_base/bin/run-control" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail; source "${XDG_CONFIG_HOME:-$HOME/.config}/fesnyng-test/deployment.env"; release=$(readlink -f "$DEPLOY_BASE/current")
+export FESNYNG_FRONTEND_DIST="$release/frontend/dist" FESNYNG_DEPLOYED_REVISION="$(<"$release/.fesnyng-revision")" FESNYNG_CONTROL_PLANE_STATE_DIRECTORY="$STATE_ROOT/control-plane" FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN="$DEPLOY_ORIGIN"
+exec "$UV_BIN" run --locked --project "$release/backend" uvicorn fesnyng_backend.web:create_app --factory --host 127.0.0.1 --port "$CONTROL_PORT" --no-proxy-headers
+EOF
+cat > "$deploy_base/bin/run-host" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail; source "${XDG_CONFIG_HOME:-$HOME/.config}/fesnyng-test/deployment.env"; release=$(readlink -f "$DEPLOY_BASE/current")
+export FESNYNG_DEPLOYED_REVISION="$(<"$release/.fesnyng-revision")"
+export FESNYNG_AGENT_HOST_STATE_DIRECTORY="$STATE_ROOT/agent-host" FESNYNG_AGENT_HOST_IMAGE="fesnyng-agent:prepared-$FESNYNG_DEPLOYED_REVISION" FESNYNG_AGENT_HOST_CREDENTIAL_URL="$AGENT_HOST_CREDENTIAL_URL" FESNYNG_MAINTENANCE_TOKEN_FILE="$MAINTENANCE_TOKEN_FILE"
+exec "$UV_BIN" run --locked --project "$release/backend" uvicorn fesnyng_backend.agent_host:create_app --factory --host 0.0.0.0 --port "$HOST_PORT" --no-proxy-headers
+EOF
+chmod 700 "$deploy_base/bin/run-control" "$deploy_base/bin/run-host"
+for unit in control host update; do sed "s|__DEPLOY_BASE__|$deploy_base|g" "$root/deployment/systemd/fesnyng-test-$unit.service" > "$HOME/.config/systemd/user/fesnyng-test-$unit.service"; done
+cp "$root/deployment/systemd/fesnyng-test-update.timer" "$HOME/.config/systemd/user/"
+cat > "$config_dir/deployment.env.next" <<EOF
 DEPLOY_BASE=$(printf '%q' "$deploy_base")
 SOURCE_MIRROR=$(printf '%q' "$deploy_base/source.git")
 UV_BIN=$(printf '%q' "$uv_bin")
@@ -59,23 +86,7 @@ DEPLOY_ORIGIN=$(printf '%q' "$origin")
 AGENT_HOST_CREDENTIAL_URL=$(printf '%q' "$credential_url")
 export PATH=$(printf '%q' "$node_root/bin"):\$PATH
 EOF
-git clone --mirror https://github.com/jdip/Fesnyng.git "$deploy_base/source.git"
-install -m 700 "$root/scripts/update-test-deployment.sh" "$deploy_base/bin/update"
-cat > "$deploy_base/bin/run-control" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail; source "${XDG_CONFIG_HOME:-$HOME/.config}/fesnyng-test/deployment.env"; release=$(readlink -f "$DEPLOY_BASE/current")
-export FESNYNG_FRONTEND_DIST="$release/frontend/dist" FESNYNG_DEPLOYED_REVISION="$(<"$release/.fesnyng-revision")" FESNYNG_CONTROL_PLANE_STATE_DIRECTORY="$STATE_ROOT/control-plane" FESNYNG_CONTROL_PLANE_ALLOWED_ORIGIN="$DEPLOY_ORIGIN"
-exec "$UV_BIN" run --locked --project "$release/backend" uvicorn fesnyng_backend.web:create_app --factory --host 127.0.0.1 --port "$CONTROL_PORT" --no-proxy-headers
-EOF
-cat > "$deploy_base/bin/run-host" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail; source "${XDG_CONFIG_HOME:-$HOME/.config}/fesnyng-test/deployment.env"; release=$(readlink -f "$DEPLOY_BASE/current")
-export FESNYNG_DEPLOYED_REVISION="$(<"$release/.fesnyng-revision")" FESNYNG_AGENT_HOST_STATE_DIRECTORY="$STATE_ROOT/agent-host" FESNYNG_AGENT_HOST_IMAGE=fesnyng-agent:current FESNYNG_AGENT_HOST_CREDENTIAL_URL="$AGENT_HOST_CREDENTIAL_URL" FESNYNG_MAINTENANCE_TOKEN_FILE="$MAINTENANCE_TOKEN_FILE"
-exec "$UV_BIN" run --locked --project "$release/backend" uvicorn fesnyng_backend.agent_host:create_app --factory --host 0.0.0.0 --port "$HOST_PORT" --no-proxy-headers
-EOF
-chmod 700 "$deploy_base/bin/run-control" "$deploy_base/bin/run-host"
-for unit in control host update; do sed "s|__DEPLOY_BASE__|$deploy_base|g" "$root/deployment/systemd/fesnyng-test-$unit.service" > "$HOME/.config/systemd/user/fesnyng-test-$unit.service"; done
-cp "$root/deployment/systemd/fesnyng-test-update.timer" "$HOME/.config/systemd/user/"
+mv "$config_dir/deployment.env.next" "$config_dir/deployment.env"
 systemctl --user daemon-reload; systemctl --user enable fesnyng-test-control.service fesnyng-test-host.service fesnyng-test-update.timer
 "$deploy_base/bin/update"
 sudo -n tailscale serve --bg --https=443 "http://127.0.0.1:8000"
