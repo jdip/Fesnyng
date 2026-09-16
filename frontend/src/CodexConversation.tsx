@@ -2,7 +2,7 @@ import { AssistantRuntimeProvider, useAuiState, useExternalStoreRuntime, useRemo
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Thread } from './components/assistant-ui/elements/thread.aui';
-import { ThreadList } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadList, type ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 import { applyCodexEvent, createFesnyngCodexFetch, projectCodexHistory, type CodexEvent, type CodexHistory } from './lib/codex-client';
 import { errorMessage } from './workspace-api';
 import { type NativeThreadCreation } from './workspace-api';
@@ -11,7 +11,8 @@ import { InlineComposer } from './InlineComposer';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
 import { ThreadInformation, type ThreadWorkspace } from './ThreadInformation';
-import type { ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
+import { ThreadArtifactPanel } from './ThreadArtifact';
+import { useThreadFiles } from './thread-files';
 
 type Session = { id: string; title: string; time?: { updated?: number; archived?: number | null } };
 
@@ -36,7 +37,6 @@ export type CodexConversationProps = {
   executionBlocked?: boolean;
   executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
   workspace?: ThreadWorkspace;
-  onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void;
 };
 
 const base = (url: string) => url.replace(/\/$/, '');
@@ -269,6 +269,11 @@ function CodexConversationView(props: CodexConversationProps) {
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
   const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: executionDisabled, onHistoryNotice: setHistoryNotice }); }, [executionDisabled, props.baseUrl, props.csrfToken, props.onError, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
+  const conversationElement = useRef<HTMLElement>(null);
+  const { files, fileFocusRequest, openFiles, closeFiles } = useThreadFiles({
+    onOpened: props.onThreadSelect,
+    restoreFocus: () => conversationElement.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message input"]')?.focus(),
+  });
   const completed = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (executionDisabled || newThreadRequest === undefined || completed.current === newThreadRequest) return;
@@ -278,14 +283,14 @@ function CodexConversationView(props: CodexConversationProps) {
       else onError?.(cause);
     });
   }, [executionDisabled, newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted, runtime]);
-  const list = <ThreadList showNew={false} allowDelete={false} readOnly={executionDisabled} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} />;
+  const list = <ThreadList showNew={false} allowDelete={false} readOnly={executionDisabled} projectLabels={props.projectLabels} pageSize={props.threadPageSize} onSelect={props.onThreadSelect} onOpenFiles={executionDisabled ? undefined : openFiles} />;
   const components = {
     ...(props.readOnly ? { Composer: FrozenThreadNotice } : props.executionBlocked ? { Composer: () => <WorkspaceUnavailableNotice state={props.executionBlockedState} /> } : { Composer: ({ autoFocus, allowAttachments }: { autoFocus: boolean; allowAttachments: boolean }) => <InlineComposer autoFocus={autoFocus} allowAttachments={allowAttachments} baseUrl={props.baseUrl} csrfToken={props.csrfToken} sessionId={props.sessionId} runtime="codex" /> }),
     ToolFallback: NativeEditToolFallback,
     MessageFooter: ConversationMessageFooter,
     ThreadFooter: ConversationDeliveryRecovery,
   };
-  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane"><ActiveCodexThreadInformation runtime={runtime} csrfToken={props.csrfToken} refreshKey={props.refreshKey ?? 0} workspace={props.workspace} interactionDisabled={executionDisabled} onOpenFiles={props.onOpenFiles} />{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><section ref={conversationElement} className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane"><ActiveCodexThreadInformation runtime={runtime} csrfToken={props.csrfToken} refreshKey={props.refreshKey ?? 0} workspace={props.workspace} interactionDisabled={executionDisabled} onOpenFiles={executionDisabled ? undefined : openFiles} />{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div>{!executionDisabled && files && <ThreadArtifactPanel key={files.id} baseUrl={props.baseUrl} csrfToken={props.csrfToken} session={files} focusRequest={fileFocusRequest} onClose={closeFiles} />}</section></AssistantRuntimeProvider>;
 }
 
 function ActiveCodexThreadInformation({ runtime, csrfToken, refreshKey, workspace, interactionDisabled, onOpenFiles }: { runtime: ReturnType<typeof useRemoteThreadListRuntime>; csrfToken: string; refreshKey: number; workspace?: ThreadWorkspace; interactionDisabled: boolean; onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void }) {

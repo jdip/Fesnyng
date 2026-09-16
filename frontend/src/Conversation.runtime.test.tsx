@@ -57,6 +57,7 @@ test('keeps frozen OpenCode history readable without native action controls', as
   expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/question') || String(input).includes('/permission'))).toBe(false);
 });
@@ -845,5 +846,6 @@ test('keeps a removed managed OpenCode history mounted without execution or reco
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Fork conversation' })).toBeNull();
   expect(screen.queryByText('Investigate outcome')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => (input instanceof Request ? input.url : input.toString()).endsWith('/question'))).toBe(false);
 });

@@ -193,6 +193,7 @@ test('renders frozen Codex snapshot history without native write controls', asyn
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
 });
 
@@ -213,5 +214,28 @@ test('keeps a removed managed Codex history mounted without native write control
   expect(await screen.findByText('This workspace was removed. Prepare its replacement before continuing.')).toBeTruthy();
   expect(screen.queryByRole('textbox', { name: 'Message input' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Stop generating' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Files' })).toBeNull();
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/pending?'))).toBe(false);
+});
+
+test('opens the active Codex workspace files through the shared file facade', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/session')) return Response.json([{ id: 'thread-one', title: 'Codex release review', time: {} }]);
+    if (url.includes('/history')) return Response.json({ thread: { id: 'thread-one' }, turns: [], historyState: 'complete' });
+    if (url.includes('/pending?')) return Response.json([]);
+    if (url.includes('/codex/file/content')) return Response.json({ rootSessionID: 'thread-one', sessionID: 'thread-one', path: 'report.md', type: 'text', encoding: 'utf-8', content: 'Codex workspace evidence', size: 24, truncated: false, contentType: 'text/plain' });
+    if (url.includes('/codex/file')) return Response.json({ rootSessionID: 'thread-one', sessionID: 'thread-one', path: '', entries: [{ name: 'report.md', path: 'report.md', type: 'file', size: 24, modifiedAt: 1 }] });
+    return Response.json({ id: 'thread-one', title: 'Codex release review', time: {} });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="thread-one" showThreadList={false} />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Files' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'report.md' }));
+  expect(await screen.findByText('Codex workspace evidence')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download' }).getAttribute('href')).toBe('http://workspace.test/api/organizations/org/agents/agent/codex/file/download?sessionID=thread-one&path=report.md');
 });
