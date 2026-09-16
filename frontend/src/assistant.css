@@ -29,16 +29,28 @@
 .fesnyng-conversation > aside { border-right: 1px solid #dbe2dc; overflow-y: auto; padding: .75rem; background: #f8faf8; }
 .fesnyng-thread-pane { min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; }
 .fesnyng-thread-pane > .aui-thread-root { flex: 1; min-height: 0; }
-.thread-information { flex: none; padding: .65rem 1rem; border-bottom: 1px solid #dbe2dc; background: #fbfdfb; max-height: 40%; overflow-y: auto; }
-.thread-information-title { display: flex; align-items: center; gap: .5rem; min-width: 0; }
-.thread-information-title h2 { margin: 0; font-size: .95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-information-fields { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin: .35rem 0 0; font-size: .75rem; }
-.thread-information-fields > div { min-width: 0; max-width: 100%; }
-.thread-information-fields dt { color: #627467; }
-.thread-information-fields dd { margin: 0; overflow-wrap: anywhere; }
-.thread-information-fields small { display: block; color: #627467; }
-.thread-title-form { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
+.thread-information { flex: 0 0 auto; max-height: 45%; overflow-y: auto; border-bottom: 1px solid #e1e7df; background: #fff; }
+.thread-information-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 10px 16px; }
+.thread-information-title { display: flex; flex-direction: column; align-items: stretch; gap: 0; min-width: 0; }
+.thread-information-title h2 { overflow: hidden; margin: 0; color: #25332c; font-size: 15px; font-weight: 600; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
+.thread-information-title p { overflow: hidden; margin: 3px 0 0; color: #71806f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.thread-information-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
+.thread-information-actions .app-button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; }
+.thread-information-actions .app-button svg { width: 15px; height: 15px; }
+.thread-information-actions .sidebar-icon-button { width: 30px; height: 30px; }
+.thread-information-actions .sidebar-icon-button svg { width: 15px; height: 15px; }
+.thread-title-form { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0; padding: 0 16px 10px; }
 .thread-title-form input { flex: 1; min-width: 8rem; }
+.thread-information-details { border-top: 1px solid #edf0eb; }
+.thread-information-details > summary { padding: 8px 16px; color: #526052; cursor: pointer; font-size: 12px; font-weight: 550; user-select: none; }
+.thread-information-details[open] > summary { border-bottom: 1px solid #edf0eb; }
+.thread-information-details > .thread-information-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px 16px; margin: 0; padding: 12px 16px 0; font-size: 12px; }
+.thread-information-fields div { min-width: 0; }
+.thread-information-fields dt { color: #627467; }
+.thread-information-fields dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.thread-information-fields dd small { display: block; margin-top: 2px; color: #73806e; }
+.thread-information-details > .muted { margin: 0; padding: 12px 16px; font-size: 12px; }
+.thread-information-details > .workspace-inspection { margin: 0; border-width: 0; border-radius: 0; background: #fbfdfb; }
 .fesnyng-questions { position: absolute; z-index: 2; right: 1rem; bottom: 1rem; width: min(34rem, calc(100% - 2rem)); max-height: calc(100% - 2rem); display: grid; gap: .75rem; overflow-y: auto; padding: .25rem; }
 .fesnyng-question { border: 1px solid #9ab49f; border-radius: .8rem; padding: .9rem; background: #fff; box-shadow: 0 14px 34px rgba(29, 52, 38, .16); }
 .fesnyng-question fieldset { border: 0; margin: 0 0 .8rem; padding: 0; display: grid; gap: .35rem; }
@@ -60,3 +72,4 @@
 .fesnyng-native-edit-diff del { display: block; background: #f8e8e8; color: #7a2430; text-decoration: none; }
 .fesnyng-native-edit-diff ins { display: block; background: #e6f2e8; color: #255a34; text-decoration: none; }
 @media (max-width: 720px) { .fesnyng-conversation { grid-template-columns: minmax(0, 1fr); height: 100%; } .fesnyng-conversation > aside { border-right: 0; border-bottom: 1px solid #dbe2dc; max-height: 10rem; } }
+@media (max-width: 640px) { .thread-information-summary { min-height: 54px; padding: 8px 12px; } .thread-title-form { padding-inline: 12px; } .thread-information-details > summary { padding-inline: 12px; } .thread-information-details > .thread-information-fields { padding-inline: 12px; } }

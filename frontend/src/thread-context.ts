@@ -31,16 +31,17 @@ function parseContext(value: unknown): ThreadContext {
 }
 
 /** One scoped source for both the information block and repository subtitles. */
-export function useThreadContext(baseUrl: string, csrfToken: string, session: string, refreshKey: string | number) {
+export function useThreadContext(baseUrl: string | undefined, csrfToken: string, session: string, refreshKey: string | number) {
   const request = useMemo(() => createFesnyngOpenCodeFetch(csrfToken), [csrfToken]);
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(session)}/context`;
-  const [loaded, setLoaded] = useState<{ endpoint: string; data?: ThreadContext; failed: boolean }>({ endpoint, failed: false });
+  const endpoint = baseUrl && `${baseUrl.replace(/\/$/, '')}/session/${encodeURIComponent(session)}/context`;
+  const [loaded, setLoaded] = useState<{ endpoint: string; data?: ThreadContext; failed: boolean }>({ endpoint: endpoint ?? '', failed: false });
   useEffect(() => {
+    if (!endpoint) return;
     const controller = new AbortController();
     void request(endpoint, { signal: controller.signal }).then((response) => response.json()).then(parseContext)
       .then((data) => { if (!controller.signal.aborted) setLoaded({ endpoint, data, failed: false }); })
       .catch(() => { if (!controller.signal.aborted) setLoaded({ endpoint, failed: true }); });
     return () => controller.abort();
   }, [endpoint, request, refreshKey]);
-  return loaded.endpoint === endpoint ? loaded : { endpoint, failed: false };
+  return endpoint && loaded.endpoint === endpoint ? loaded : { endpoint: endpoint ?? '', failed: false };
 }

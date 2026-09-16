@@ -10,6 +10,8 @@ import { publishProjectGroupingWarning } from './project-grouping-warning';
 import { InlineComposer } from './InlineComposer';
 import { ConversationDeliveryRecovery, ConversationMessageFooter } from './ConversationDelivery';
 import { NativeEditToolFallback } from './components/assistant-ui/elements/native-edit-tool';
+import { ThreadInformation, type ThreadWorkspace } from './ThreadInformation';
+import type { ThreadMenuTarget } from './components/assistant-ui/elements/thread-list.aui';
 
 type Session = { id: string; title: string; time?: { updated?: number; archived?: number | null } };
 
@@ -33,6 +35,8 @@ export type CodexConversationProps = {
   readOnly?: boolean;
   executionBlocked?: boolean;
   executionBlockedState?: 'removed' | 'unavailable' | 'removing' | 'replacing';
+  workspace?: ThreadWorkspace;
+  onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void;
 };
 
 const base = (url: string) => url.replace(/\/$/, '');
@@ -261,7 +265,7 @@ function CodexPendingRequests({ baseUrl, csrfToken }: Pick<CodexConversationProp
 function CodexConversationView(props: CodexConversationProps) {
   const { newThreadRequest, onError, onNewThreadFailed, onNewThreadStarted } = props;
   const [historyNotice, setHistoryNotice] = useState('');
-  const executionDisabled = props.readOnly || props.executionBlocked;
+  const executionDisabled = Boolean(props.readOnly || props.executionBlocked);
   const adapter = useMemo(() => createCodexThreadListAdapter(props.baseUrl, props.csrfToken, props.creation), [props.baseUrl, props.csrfToken, props.creation]);
   const runtimeHook = useCallback(function useCodexRemoteThreadRuntime() { return useCodexThreadRuntime({ baseUrl: props.baseUrl, csrfToken: props.csrfToken, refreshKey: props.refreshKey, onError: props.onError, readOnly: executionDisabled, onHistoryNotice: setHistoryNotice }); }, [executionDisabled, props.baseUrl, props.csrfToken, props.onError, props.refreshKey]);
   const runtime = useRemoteThreadListRuntime({ adapter, threadId: props.sessionId, onThreadIdChange: props.onSessionChange, runtimeHook });
@@ -281,7 +285,14 @@ function CodexConversationView(props: CodexConversationProps) {
     MessageFooter: ConversationMessageFooter,
     ThreadFooter: ConversationDeliveryRecovery,
   };
-  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane">{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><section className="fesnyng-conversation" aria-label="Agent conversation">{props.threadListTarget ? createPortal(list, props.threadListTarget) : props.showThreadList !== false && <aside>{list}</aside>}<div className="fesnyng-thread-pane"><ActiveCodexThreadInformation runtime={runtime} csrfToken={props.csrfToken} refreshKey={props.refreshKey ?? 0} workspace={props.workspace} interactionDisabled={executionDisabled} onOpenFiles={props.onOpenFiles} />{historyNotice && <p className="app-notice" role="status">{historyNotice}</p>}<Thread allowAttachments={false} components={components} readOnly={executionDisabled} />{!executionDisabled && <CodexPendingRequests baseUrl={props.baseUrl} csrfToken={props.csrfToken} />}</div></section></AssistantRuntimeProvider>;
+}
+
+function ActiveCodexThreadInformation({ runtime, csrfToken, refreshKey, workspace, interactionDisabled, onOpenFiles }: { runtime: ReturnType<typeof useRemoteThreadListRuntime>; csrfToken: string; refreshKey: number; workspace?: ThreadWorkspace; interactionDisabled: boolean; onOpenFiles?: (target: ThreadMenuTarget, trigger: HTMLButtonElement | null) => void }) {
+  const item = useAuiState((state) => state.threads.threadItems.find((entry) => entry.id === state.threads.mainThreadId));
+  const session = item?.externalId ?? item?.remoteId;
+  if (!item || !session) return null;
+  return <ThreadInformation key={session} csrfToken={csrfToken} session={{ id: session, title: item.title ?? 'New thread' }} refreshKey={refreshKey} workspace={workspace} interactionDisabled={interactionDisabled} onOpenFiles={onOpenFiles ? (trigger) => onOpenFiles({ id: session, title: item.title ?? 'New thread' }, trigger) : undefined} onRename={(title) => runtime.threads.getItemById(item.id).rename(title)} />;
 }
 
 const FrozenThreadNotice = () => <p className="app-notice" role="status">This thread is permanently frozen and read-only.</p>;
