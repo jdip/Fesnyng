@@ -93,6 +93,7 @@ test('opens shared Resources for the selected employee without discarding its co
       : input.endsWith('/agents/agent-one/sessions/thread-one/workspace') ? { workspace_id: 'workspace-one', generation: 1, safety_digest: 'a'.repeat(64), state: 'ready', kind: 'ordinary', directory: '/workspaces/one/agent-one/thread-one', repository: { state: 'absent' }, git: { kind: 'ordinary', state: 'safe', dirty: 0, untracked: 0, ignored: 0, ahead: 0 }, history: { state: 'verified' }, cleanup: { remove: { available: true }, discard: { available: true }, replace: { available: false } } }
       : input.endsWith('/agents/agent-one/sessions') ? [{ session_id: 'thread-one', title: 'Implementation task' }]
       : input.includes('/hosts/host-one/docker/capability') ? { enabled: false, available: false, reason: 'Docker resources are disabled for this organization host.' }
+      : input.endsWith('/hosts/host-one/docker/services') ? { services: [{ id: 'service-one', name: 'Preview', endpoint_url: 'https://preview.example.test', route: 'custom', revision: 1, target: { kind: 'employee', id: 'agent-one', status: 'available', running: true }, threads: [], project_ids: [], route_status: { status: 'configured', network_reachability: 'unverified' } }] }
       : input.endsWith('/hosts/host-one/docker') ? { capability: { enabled: false, available: false }, resources: [] }
       : input.endsWith('/projects?include_archived=true') ? []
       : input.endsWith('/thread-projects') ? { threads: [] }
@@ -105,6 +106,8 @@ test('opens shared Resources for the selected employee without discarding its co
   fireEvent.change(draft, { target: { value: 'Keep this implementation note' } });
   fireEvent.click(screen.getByRole('button', { name: 'Resources' }));
   expect(await screen.findByRole('heading', { name: 'Developer resources', level: 1 })).toBeTruthy();
+  expect(await screen.findByText('Preview')).toBeTruthy();
+  expect(screen.getByText('Docker capability is not required to register or view services.')).toBeTruthy();
   expect(await screen.findByText('Docker resources are disabled for this organization host.')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Workspaces' }));
   fireEvent.click(screen.getByRole('button', { name: /Developer/, pressed: true }));

@@ -31,6 +31,21 @@ class DockerCapabilitySettings(BaseModel):
         return self
 
 
+class TailscaleServeSettings(BaseModel):
+    """An administrator-owned, read-only view of one organization's Serve state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: UUID
+    command: tuple[str, ...] = ("tailscale", "serve", "status", "--json")
+
+    @model_validator(mode="after")
+    def require_command(self) -> TailscaleServeSettings:
+        if not self.command or any(not item.strip() for item in self.command):
+            raise ValueError("Tailscale Serve status command must not be empty")
+        return self
+
+
 class ServiceSettings(BaseModel):
     """Filesystem and identity inputs for one durable service instance."""
 
@@ -42,6 +57,7 @@ class ServiceSettings(BaseModel):
     workspace_root: Path | None = None
     requested_instance_id: UUID | None = Field(default=None, alias="instance_id")
     docker_capability: DockerCapabilitySettings | None = None
+    tailscale_serve: TailscaleServeSettings | None = None
 
     @model_validator(mode="after")
     def reject_state_directory_as_database_path(self) -> ServiceSettings:
@@ -51,6 +67,8 @@ class ServiceSettings(BaseModel):
             raise ValueError("workspace root must be an absolute path")
         if self.docker_capability is not None and self.service != "agent-host":
             raise ValueError("Only an agent host may configure Docker capability")
+        if self.tailscale_serve is not None and self.service != "agent-host":
+            raise ValueError("Only an agent host may configure Tailscale Serve status")
         return self
 
     @property
@@ -83,6 +101,7 @@ def settings_from_environment(service: ServiceName) -> ServiceSettings:
     instance_id = os.environ.get(f"{prefix}_INSTANCE_ID")
     workspace_root = os.environ.get(f"{prefix}_WORKSPACE_ROOT")
     docker_capability = os.environ.get(f"{prefix}_DOCKER_CAPABILITY")
+    tailscale_serve = os.environ.get(f"{prefix}_TAILSCALE_SERVE")
     return ServiceSettings(
         service=service,
         database_path=database_path,
@@ -93,6 +112,9 @@ def settings_from_environment(service: ServiceName) -> ServiceSettings:
             DockerCapabilitySettings.model_validate_json(docker_capability)
             if docker_capability
             else None
+        ),
+        tailscale_serve=(
+            TailscaleServeSettings.model_validate_json(tailscale_serve) if tailscale_serve else None
         ),
     )
 

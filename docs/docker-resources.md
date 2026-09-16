@@ -96,6 +96,15 @@ neither force nor volume deletion; bind-mounted host files are retained.
 inspection and remain manageable through ordinary Docker/Compose; this facade
 does not provide automatic stack teardown.
 
-Published ports are discovery evidence, not a promise of network access. Service
-registration, optional Tailscale routing and deployment guards belong to the next
-approved slice. UFW incoming defaults alone do not protect Docker-forwarded traffic.
+Published ports are discovery evidence, not a promise of network access. Use
+**Services** to register application links for an employee or a registered
+container, with optional shared Project/thread associations. Service registration
+does not require giving an employee raw Docker access. Removing the registration
+does not stop the application or change its route.
+
+The service view separates target state from route configuration. It does not
+probe arbitrary URLs or claim that the current user can reach the application.
+The deployment owner chooses custom routes or optional host Tailscale Serve;
+Fesnyng membership does not grant network access. See the
+[private service deployment guide](private-services.md) for routing, firewall
+ownership and the required IPv4/IPv6 restart matrix.
