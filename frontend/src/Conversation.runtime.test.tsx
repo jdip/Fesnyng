@@ -140,7 +140,10 @@ test('forks an assistant message through native extras and selects the returned 
       cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       time: { created: 1 }, finish: 'stop',
     },
-    parts: [{ id: 'text-one', sessionID: 'session-one', messageID: 'assistant-one', type: 'text', text: 'Ready.' }],
+    parts: [{
+      id: 'tool-one', callID: 'tool-one', sessionID: 'session-one', messageID: 'assistant-one',
+      type: 'tool', tool: 'read', state: { status: 'completed', input: { description: 'Read the workspace' }, output: {} },
+    }],
   }];
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : undefined;
@@ -174,7 +177,21 @@ test('forks an assistant message through native extras and selects the returned 
     />,
   );
 
-  fireEvent.click(await screen.findByRole('button', { name: 'Fork conversation' }));
+  const fork = await screen.findByRole('button', { name: 'Fork conversation' });
+  const activity = fork.closest('[data-slot="aui_assistant-message-root"]');
+  const footer = activity?.querySelector('[data-slot="aui_assistant-message-footer"]');
+  expect(activity?.getAttribute('data-activity-only')).toBe('true');
+  expect(footer).not.toBeNull();
+  expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('top-0');
+  expect(footer?.getAttribute('class')).toContain('end-10');
+  expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+  expect(footer?.getAttribute('class')).toContain('bg-background');
+  expect(footer?.getAttribute('class')).toContain('opacity-0');
+
+  fork.focus();
+  expect(document.activeElement).toBe(fork);
+  fireEvent.click(fork);
 
   await waitFor(() => {
     expect(fetchMock.mock.calls.some(([input]) => {
@@ -231,10 +248,16 @@ test('renders native question controls without generic Allow or Deny actions', a
     />,
   );
 
-  expect(await screen.findByRole('button', { name: 'Answer' })).toBeTruthy();
+  const answer = await screen.findByRole('button', { name: 'Answer' });
+  expect(answer).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
+
+  const message = document.querySelector('[data-slot="aui_assistant-message-root"]');
+  expect(message).not.toBeNull();
+  expect(message?.getAttribute('data-activity-only')).toBeNull();
+  expect(message?.querySelector('[data-slot="aui_assistant-message-footer"]')).not.toBeNull();
 });
 
 test('uses the latest ordered thought and tool description in collapsed group previews', async () => {
@@ -282,8 +305,17 @@ test('uses the latest ordered thought and tool description in collapsed group pr
   const tools = screen.getByRole('button', {
     name: '2 tool calls: Run the latest migration',
   });
+  const activity = reasoning.closest('[data-slot="aui_assistant-message-root"]');
   expect(reasoning.getAttribute('aria-expanded')).toBe('false');
   expect(tools.getAttribute('aria-expanded')).toBe('false');
+  expect(activity?.getAttribute('data-activity-only')).toBe('true');
+  const footer = activity?.querySelector('[data-slot="aui_assistant-message-footer"]');
+  expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('top-0');
+  expect(footer?.getAttribute('class')).toContain('end-10');
+  expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+  expect(footer?.getAttribute('class')).toContain('bg-background');
+  expect(footer?.getAttribute('class')).toContain('opacity-0');
   fireEvent.click(reasoning);
   fireEvent.click(tools);
   expect(screen.getByText('First thought.')).toBeTruthy();

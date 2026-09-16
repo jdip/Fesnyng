@@ -482,6 +482,20 @@ const AssistantMessage: FC = () => {
     MessageFooter,
   } = useContext(ThreadComponentsContext);
 
+  const isActivityOnly = useAuiState((state) => (
+    state.message.status?.type === "complete"
+    && state.message.parts.length > 0
+    && state.message.parts.every((part) => (
+      part.type === "reasoning"
+        ? part.status.type === "complete"
+        : part.type === "tool-call"
+          && part.status.type === "complete"
+          && !part.isError
+          && !part.approval
+          && !part.interrupt
+    ))
+  ));
+
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
@@ -490,7 +504,11 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      data-activity-only={isActivityOnly || undefined}
+      className={cn(
+        "group/assistant-message fade-in slide-in-from-bottom-1 animate-in relative duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        isActivityOnly ? "aui-activity-only-message" : "-mb-7.5 pb-7.5",
+      )}
     >
       <div
         data-slot="aui_assistant-message-content"
@@ -561,7 +579,12 @@ const AssistantMessage: FC = () => {
 
       <div
         data-slot="aui_assistant-message-footer"
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        className={cn(
+          "ms-2 flex items-center",
+          isActivityOnly
+            ? "pointer-events-none absolute end-10 top-0 z-10 max-w-[calc(100%-2.5rem)] overflow-x-auto rounded-md bg-background p-0.5 opacity-0 shadow-sm transition-opacity group-hover/assistant-message:pointer-events-auto group-hover/assistant-message:opacity-100 group-focus-within/assistant-message:pointer-events-auto group-focus-within/assistant-message:opacity-100"
+            : ACTION_BAR_HEIGHT,
+        )}
       >
         <BranchPicker />
         <AssistantActionBar MessageAction={MessageAction} />

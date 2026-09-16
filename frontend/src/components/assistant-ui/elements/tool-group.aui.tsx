@@ -115,7 +115,7 @@ function ToolGroupTrigger({
       data-slot="tool-group-trigger"
       className={cn(
         "aui-tool-group-trigger",
-        "group-data-[variant=ghost]/tool-group-root:text-muted-foreground group-data-[variant=ghost]/tool-group-root:hover:text-foreground group-data-[variant=ghost]/tool-group-root:py-1.5",
+        "group-data-[variant=ghost]/tool-group-root:text-muted-foreground group-data-[variant=ghost]/tool-group-root:hover:text-foreground group-data-[variant=ghost]/tool-group-root:py-1",
         "group-data-[variant=outline]/tool-group-root:px-4",
         "group-data-[variant=muted]/tool-group-root:px-4",
         className,

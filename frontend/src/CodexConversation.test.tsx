@@ -163,6 +163,43 @@ test('clears a transient pending-request reload error after the host recovers', 
   expect(screen.queryByText('Agent host is unreachable')).toBeNull();
 });
 
+test('compacts completed Codex reasoning and tool activity while retaining the final reply spacing', async () => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  HTMLElement.prototype.scrollTo ??= () => {};
+  vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/session')) return new Response(JSON.stringify([{ id: 'thread-one', title: 'Inspect', time: {} }]));
+    if (url.includes('/history')) return new Response(JSON.stringify({
+      thread: { id: 'thread-one' }, historyState: 'complete', turns: [{ id: 'turn-one', status: 'completed', items: [
+        { id: 'reasoning-one', type: 'reasoning', summary: ['Inspect the workspace.'] },
+        { id: 'command-one', type: 'commandExecution', command: 'git status', status: 'completed', aggregatedOutput: 'clean', exitCode: 0 },
+        { id: 'answer-one', type: 'agentMessage', text: 'The workspace is clean.' },
+      ] }],
+    }));
+    if (url.includes('/pending?')) return new Response(JSON.stringify([]));
+    return new Response(JSON.stringify({ id: 'thread-one', title: 'Inspect', time: {} }));
+  }));
+
+  const { container } = render(<CodexConversation baseUrl="http://workspace.test/api/organizations/org/agents/agent/codex" csrfToken="csrf" sessionId="thread-one" showThreadList={false} />);
+
+  expect(await screen.findByText('The workspace is clean.')).toBeTruthy();
+  const activity = container.querySelectorAll('[data-activity-only="true"]');
+  expect(activity).toHaveLength(2);
+  for (const item of activity) {
+    const footer = item.querySelector('[data-slot="aui_assistant-message-footer"]');
+    expect(footer?.getAttribute('class')).toContain('absolute');
+    expect(footer?.getAttribute('class')).toContain('top-0');
+    expect(footer?.getAttribute('class')).toContain('end-10');
+    expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+    expect(footer?.getAttribute('class')).toContain('bg-background');
+    expect(footer?.getAttribute('class')).toContain('opacity-0');
+  }
+  const reply = screen.getByText('The workspace is clean.').closest('[data-slot="aui_assistant-message-root"]');
+  expect(reply?.getAttribute('data-activity-only')).toBeNull();
+  expect(reply?.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeTruthy();
+});
+
 test('renders frozen Codex snapshot history without native write controls', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
