@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useThreadPins } from "@/ThreadPins";
 import { ThreadNotificationBadge } from "@/ThreadNotificationBadge";
 import { repositoryLabel, useThreadContext, useThreadWorkspace } from "@/thread-context";
+import { ThreadCard, ThreadCardActions, ThreadCardContent, threadCardTriggerClassName } from "@/components/ThreadCard";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -192,11 +193,11 @@ export const ThreadListItem: FC = () => {
     triggerRef.current?.focus();
   }, [isRenaming]);
 
+  const project = session && projectLabels?.[session];
+  const subtitle = project ?? (session && workspace ? <ThreadRepositorySubtitle session={session} {...workspace} /> : undefined);
+
   return (
-    <ThreadListItemPrimitive.Root
-      data-slot="aui_thread-list-item"
-      className="group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex min-h-11 items-center rounded-md transition-colors focus-visible:outline-none"
-    >
+    <ThreadCard as={ThreadListItemPrimitive.Root} data-slot="aui_thread-list-item">
       {isRenaming ? (
         <ThreadListItemRename
           onDone={(restoreFocus) => {
@@ -207,10 +208,10 @@ export const ThreadListItem: FC = () => {
       ) : (
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
-          aria-describedby={session && workspace ? subtitleId : undefined}
+          aria-describedby={subtitle !== undefined ? subtitleId : undefined}
           onClick={onSelect}
           data-slot="aui_thread-list-item-trigger"
-          className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-1"
+          className={threadCardTriggerClassName()}
         >
           {pinned && <PinIcon role="img" aria-label="Pinned" className="me-1.5 size-3.5 shrink-0" />}
           {isRunning && (
@@ -220,31 +221,29 @@ export const ThreadListItem: FC = () => {
               className="text-muted-foreground me-1.5 size-3.5 shrink-0 animate-spin"
             />
           )}
-          <span
-            data-slot="aui_thread-list-item-title"
-            className="min-w-0 flex-1 py-1"
-          >
-            <span className="block truncate"><ThreadListItemPrimitive.Title fallback="New Chat" /></span>
-            {session && projectLabels?.[session] && <small className="block truncate text-xs text-muted-foreground" aria-label={`Project: ${projectLabels[session]}`}>{projectLabels[session]}</small>}
-            {session && workspace && <ThreadRepositorySubtitle id={subtitleId} session={session} {...workspace} />}
-          </span>
+          <ThreadCardContent
+            title={<ThreadListItemPrimitive.Title fallback="New Chat" />}
+            subtitle={subtitle}
+            subtitleId={subtitleId}
+            subtitleAriaHidden
+          />
           {session && <ThreadNotificationBadge session={session} />}
           {isRunning && <span className="sr-only">Running</span>}
         </ThreadListItemPrimitive.Trigger>
       )}
-      {!readOnly && <ThreadListItemMore
+      {!readOnly && <ThreadCardActions><ThreadListItemMore
         archived={isArchived}
         onRename={() => setIsRenaming(true)}
         allowDelete={allowDelete}
-      />}
-    </ThreadListItemPrimitive.Root>
+      /></ThreadCardActions>}
+    </ThreadCard>
   );
 };
 
-function ThreadRepositorySubtitle({ id, session, baseUrl, csrfToken, refreshKey }: { id: string; session: string; baseUrl: string; csrfToken: string; refreshKey: string | number }) {
+function ThreadRepositorySubtitle({ session, baseUrl, csrfToken, refreshKey }: { session: string; baseUrl: string; csrfToken: string; refreshKey: string | number }) {
   const { data, failed } = useThreadContext(baseUrl, csrfToken, session, refreshKey);
   const label = !data && !failed ? 'Loading repository…' : repositoryLabel(data?.repository);
-  return <small id={id} aria-hidden="true" className="block truncate text-xs text-muted-foreground" title={label}>{label}</small>;
+  return <span title={label}>{label}</span>;
 }
 
 const ThreadListItemRename: FC<{
@@ -331,7 +330,7 @@ const ThreadListItemMore: FC<{
           variant="ghost"
           size="icon"
           data-slot="aui_thread-list-item-more"
-          className="data-[state=open]:bg-accent absolute end-1.5 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 group-data-active:opacity-100 data-[state=open]:opacity-100"
+          className="data-[state=open]:bg-accent size-6 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 group-data-active:opacity-100 data-[state=open]:opacity-100"
         >
           <MoreHorizontalIcon className="size-3.5" />
           <span className="sr-only">More options</span>

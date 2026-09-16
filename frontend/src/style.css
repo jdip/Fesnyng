@@ -115,17 +115,12 @@ button:disabled { cursor: default; opacity: .5; }
 .service-confirmation p { margin-top: 0; }
 .project-detail-toolbar > label:not(.sr-only) { display: grid; gap: 6px; color: #526052; font-size: 12px; font-weight: 550; }
 .project-thread-list { border-top: 1px solid #e4e9e0; }
-.project-thread-row { display: flex; align-items: center; gap: 12px; padding: 11px 6px; border-bottom: 1px solid #e8ece4; }
 .project-thread-open { flex: 1; min-width: 0; border: 0; background: transparent; text-align: left; color: #2d422f; }
 .project-sidebar-threads { display: grid; gap: 3px; min-width: 0; }
-.project-sidebar-thread { display: grid; gap: 2px; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; text-align: left; color: #2d422f; }
-.project-sidebar-thread:hover { background: #e9ede5; }
-.project-sidebar-thread[aria-current=page] { background: #e1e9dc; border-color: #cedcc8; }
-.project-sidebar-thread:focus-visible,.project-thread-open:focus-visible { outline: 2px solid #537a5f; outline-offset: -2px; }
-.project-sidebar-thread > span,.project-thread-open > span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.project-sidebar-thread small,.project-thread-open small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #75816e; font-size: 11px; line-height: 16px; }
+.project-thread-open:focus-visible { outline: 2px solid #537a5f; outline-offset: -2px; }
+.project-thread-open > span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.project-thread-open small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #75816e; font-size: 11px; line-height: 16px; }
 .project-thread-open small { margin-top: 3px; }
-.project-thread-row select { max-width: 170px; padding: 6px; border: 1px solid #d8dfd5; border-radius: 6px; background: #fff; color: #394b38; }
 .project-thread-creator { margin: 12px 0; }
 .project-create-trigger { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; }
 .project-create-trigger svg { width: 16px; height: 16px; }
@@ -199,7 +194,7 @@ button.agent-choice:focus-visible { outline-offset: -2px; }
 .mobile-menu { display: none; }
 @media(max-width:900px) { .app-sidebar { width: 205px; padding: 20px 12px; }.workspace-header { padding: 16px; }.workspace-page { padding: 20px; }.form-grid { grid-template-columns: 1fr; } }
 @media(max-width:640px) { .app-sidebar { display: none; position: absolute; z-index: 30; inset: 0 auto 0 0; width: 245px; box-shadow: 10px 0 50px #0002; }.app-sidebar.is-open { display: flex; }.mobile-menu { display: inline-block; }.workspace-header { gap: 8px; flex-wrap: wrap; }.workspace-header h1 { font-size: 16px; }.workspace-page { padding: 16px; }.memory-layout { grid-template-columns: 1fr; }.app-table { display: block; overflow: auto; } }
-@media(max-width:640px) { .project-detail-toolbar { grid-template-columns: 1fr; }.project-thread-row { align-items: flex-start; flex-direction: column; }.project-thread-row select { max-width: 100%; width: 100%; } }
+@media(max-width:640px) { .project-detail-toolbar { grid-template-columns: 1fr; } }
 
 .thread-notifications { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-inline: 4px; }
 .thread-notifications:empty { display: none; }
