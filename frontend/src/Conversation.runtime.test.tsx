@@ -183,6 +183,10 @@ test('forks an assistant message through native extras and selects the returned 
   expect(activity?.getAttribute('data-activity-only')).toBe('true');
   expect(footer).not.toBeNull();
   expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('top-0');
+  expect(footer?.getAttribute('class')).toContain('end-10');
+  expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+  expect(footer?.getAttribute('class')).toContain('bg-background');
   expect(footer?.getAttribute('class')).toContain('opacity-0');
 
   fork.focus();
@@ -307,6 +311,10 @@ test('uses the latest ordered thought and tool description in collapsed group pr
   expect(activity?.getAttribute('data-activity-only')).toBe('true');
   const footer = activity?.querySelector('[data-slot="aui_assistant-message-footer"]');
   expect(footer?.getAttribute('class')).toContain('absolute');
+  expect(footer?.getAttribute('class')).toContain('top-0');
+  expect(footer?.getAttribute('class')).toContain('end-10');
+  expect(footer?.getAttribute('class')).toContain('max-w-[calc(100%-2.5rem)]');
+  expect(footer?.getAttribute('class')).toContain('bg-background');
   expect(footer?.getAttribute('class')).toContain('opacity-0');
   fireEvent.click(reasoning);
   fireEvent.click(tools);

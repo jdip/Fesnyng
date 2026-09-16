@@ -582,7 +582,7 @@ const AssistantMessage: FC = () => {
         className={cn(
           "ms-2 flex items-center",
           isActivityOnly
-            ? "pointer-events-none absolute end-2 top-full z-10 -mt-1 opacity-0 transition-opacity group-hover/assistant-message:pointer-events-auto group-hover/assistant-message:opacity-100 group-focus-within/assistant-message:pointer-events-auto group-focus-within/assistant-message:opacity-100"
+            ? "pointer-events-none absolute end-10 top-0 z-10 max-w-[calc(100%-2.5rem)] overflow-x-auto rounded-md bg-background p-0.5 opacity-0 shadow-sm transition-opacity group-hover/assistant-message:pointer-events-auto group-hover/assistant-message:opacity-100 group-focus-within/assistant-message:pointer-events-auto group-focus-within/assistant-message:opacity-100"
             : ACTION_BAR_HEIGHT,
         )}
       >
