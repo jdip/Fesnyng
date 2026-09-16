@@ -1,0 +1,11 @@
+[Unit]
+Description=Fesnyng test agent host
+After=network-online.target docker.service
+
+[Service]
+ExecStart=__DEPLOY_BASE__/bin/run-host
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

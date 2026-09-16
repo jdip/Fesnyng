@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Fesnyng test updates every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=fesnyng-test-update.service
+
+[Install]
+WantedBy=timers.target
