@@ -171,7 +171,7 @@ test('clears a transient pending-request reload error after the host recovers', 
   expect(screen.queryByText('Agent host is unreachable')).toBeNull();
 });
 
-test('compacts completed Codex reasoning and tool activity while retaining the final reply spacing', async () => {
+test('compacts terminal Codex reasoning and tool activity while retaining the final reply spacing', async () => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   HTMLElement.prototype.scrollTo ??= () => {};
   vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
@@ -182,6 +182,7 @@ test('compacts completed Codex reasoning and tool activity while retaining the f
       thread: { id: 'thread-one' }, historyState: 'complete', turns: [{ id: 'turn-one', status: 'completed', items: [
         { id: 'reasoning-one', type: 'reasoning', summary: ['Inspect the workspace.'] },
         { id: 'command-one', type: 'commandExecution', command: 'git status', status: 'completed', aggregatedOutput: 'clean', exitCode: 0 },
+        { id: 'command-failed', type: 'commandExecution', command: 'git diff', status: 'failed', aggregatedOutput: 'permission denied', exitCode: 1 },
         { id: 'answer-one', type: 'agentMessage', text: 'The workspace is clean.' },
       ] }],
     }));
@@ -193,7 +194,7 @@ test('compacts completed Codex reasoning and tool activity while retaining the f
 
   expect(await screen.findByText('The workspace is clean.')).toBeTruthy();
   const activity = container.querySelectorAll('[data-activity-only="true"]');
-  expect(activity).toHaveLength(2);
+  expect(activity).toHaveLength(3);
   for (const item of activity) {
     const footer = item.querySelector('[data-slot="aui_assistant-message-footer"]');
     expect(footer?.getAttribute('class')).toContain('absolute');
