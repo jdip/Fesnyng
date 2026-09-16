@@ -490,7 +490,6 @@ const AssistantMessage: FC = () => {
         ? part.status.type === "complete"
         : part.type === "tool-call"
           && part.status.type === "complete"
-          && !part.isError
           && !part.approval
           && !part.interrupt
     ))
