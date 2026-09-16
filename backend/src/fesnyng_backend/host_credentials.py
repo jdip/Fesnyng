@@ -142,6 +142,16 @@ class CredentialStore:
             parameters += (expected_generation,)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "host_maintenance_admission" in tables:
+                admission = connection.execute(
+                    "SELECT state FROM host_maintenance_admission WHERE singleton=1"
+                ).fetchone()
+                if admission is None or admission["state"] != "open":
+                    return None
             updated = connection.execute(
                 "UPDATE credential_profiles SET state=?,operation=? "
                 f"WHERE organization_id=? AND profile_id=? AND state IN ({placeholders}){generation_condition}",

@@ -39,6 +39,7 @@ class HostConfiguration:
         self.dispatch_store = dispatch_store
 
     async def apply(self, envelope: HostAgentConfiguration) -> dict[str, object]:
+        self.host.require_maintenance_open()
         changed = self.host.stage_agent(envelope)
         if not changed:
             return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
@@ -59,6 +60,8 @@ class HostConfiguration:
         return self.host.agent_status(str(envelope.organization_id), str(envelope.agent_id))
 
     async def reconcile_once(self) -> dict[str, str]:
+        if self.host.maintenance_status()["state"] == "closed":
+            return {}
         with self.host.connect() as connection:
             rows = connection.execute(
                 """SELECT desired_envelope FROM host_agents
@@ -87,6 +90,7 @@ class HostConfiguration:
         self, organization_id: str, agent_id: str, expected_version: int, target_runtime: str
     ) -> dict[str, object]:
         """Capture old native provenance, then atomically freeze every mapped root."""
+        self.host.require_maintenance_open()
         source = self.host.agent(organization_id, agent_id)
         if not isinstance(source.get("applied_envelope"), str):
             raise RuntimeUnavailable("Harness switch source configuration is not applied")
@@ -103,6 +107,7 @@ class HostConfiguration:
         self.host.begin_harness_switch(organization_id, agent_id, expected_version, target_runtime)
         try:
             async with self.runtime.lock(agent_id):
+                self.host.require_maintenance_open()
                 state = self.host.agent(organization_id, agent_id)
                 if state["switch_state"] == "frozen":
                     return self.host.agent_status(organization_id, agent_id)
@@ -168,6 +173,7 @@ class HostConfiguration:
                     organization_id, agent_id, session["session_id"], envelope
                 )
         async with self.runtime.lock(agent_id):
+            self.host.require_maintenance_open()
             current = self.host.agent(organization_id, agent_id)
             if HostAgentConfiguration.model_validate_json(current["desired_envelope"]) != envelope:
                 raise RuntimeUnavailable("Configuration changed during application")

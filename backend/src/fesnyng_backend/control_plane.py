@@ -37,13 +37,14 @@ from fesnyng_backend.settings import (
 def create_app(
     settings: ServiceSettings | None = None,
     session_settings: ControlPlaneSessionSettings | None = None,
+    deployed_revision: str | None = None,
 ) -> FastAPI:
     """Create the control plane without coupling it to an agent host."""
 
     resolved = settings or settings_from_environment("control-plane")
     if resolved.service != "control-plane":
         raise ValueError("Control-plane factory requires control-plane settings.")
-    app = create_service_app(resolved)
+    app = create_service_app(resolved, deployed_revision)
     store = ControlPlaneStore(resolved.database_path)
     store.initialize()
     app.state.control_store = store

@@ -1537,7 +1537,14 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
             statuses = await self.request(
                 organization_id, agent_id, "/session/status", directory=directory
             )
-            if any(status.get("type") != "idle" for status in statuses.values()):
+            if not isinstance(statuses, Mapping) or any(
+                not isinstance(status, Mapping)
+                or not isinstance(status.get("type"), str)
+                or status["type"] not in {"idle", "busy", "retry"}
+                for status in statuses.values()
+            ):
+                raise RuntimeUnavailable("Native session status response is invalid")
+            if any(status["type"] != "idle" for status in statuses.values()):
                 raise RuntimeUnavailable("Configuration pending: native work is active")
 
     async def codex_thread_statuses(
@@ -1698,6 +1705,7 @@ printf 'repository\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$state" "$digest"
 
     async def replace(self, organization_id: str, agent_id: str) -> None:
         async with self.lock(agent_id):
+            self.store.require_maintenance_open()
             agent = self.store.agent(organization_id, agent_id)
             if agent["desired_state"] != "running" or agent["lifecycle_state"] != "running":
                 raise RuntimeUnavailable(
