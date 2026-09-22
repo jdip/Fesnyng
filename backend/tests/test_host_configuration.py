@@ -417,6 +417,45 @@ def test_apply_rechecks_desired_envelope_after_thread_policy_work(tmp_path):
     assert state["desired_version"] == 3 and state["applied_version"] == 1
 
 
+def test_failed_codex_catalog_validation_preserves_the_previous_profile_assignment(tmp_path):
+    host, configuration, runtime, organization_id, agent_id = _configuration(tmp_path)
+    first_profile, rejected_profile = str(uuid4()), str(uuid4())
+    configuration.credentials.ensure_profile(organization_id, first_profile, "First")
+    configuration.credentials.ensure_profile(organization_id, rejected_profile, "Rejected")
+
+    class Codex:
+        async def validate_configuration(self, envelope):
+            if envelope.version == 2:
+                raise RuntimeUnavailable(
+                    "Selected Codex model is unavailable for this credential profile"
+                )
+
+    runtime.codex = Codex()
+    baseline = HostAgentConfiguration(
+        host_id=host.instance_id,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        version=1,
+        name="Codex agent",
+        configuration=AgentConfiguration(runtime_type="codex", profile_id=first_profile),
+    )
+    asyncio.run(configuration.apply(baseline))
+    key = host.agent(organization_id, agent_id)["agent_token"]
+    candidate = baseline.model_copy(
+        update={
+            "version": 2,
+            "configuration": AgentConfiguration(runtime_type="codex", profile_id=rejected_profile),
+        }
+    )
+
+    with pytest.raises(RuntimeUnavailable, match="model is unavailable"):
+        asyncio.run(configuration.apply(candidate))
+
+    assignment = configuration.credentials.assigned_credential(key)
+    assert assignment is not None and assignment["profile_id"] == first_profile
+    assert "switch_harness" not in runtime.events
+
+
 def test_reconcile_does_not_delay_another_agent_while_one_configuration_blocks(tmp_path):
     host, configuration, runtime, organization_id, first_agent = _configuration(tmp_path)
     second_agent = str(uuid4())

@@ -32,6 +32,14 @@ preparation is configured; the UI does not create an empty substitute workspace.
 ## Harnesses and frozen history
 
 New employees choose **OpenCode** (the default) or **Codex** in Agent settings.
+For Codex, selecting a home host and authenticated credential profile loads the
+account’s complete native model catalog. Discovery errors remain visible and can
+be retried. The saved model is retained while discovery is unavailable.
+**Default thinking level** offers the selected model’s supported efforts and
+**Model default**. Saved changes apply to subsequent turns in new and existing
+conversations after the usual safe configuration boundary; active turns continue
+with their existing settings. Changing the model resets an incompatible effort
+to Model default.
 An organization can use both, but every thread retains the immutable harness
 binding it received when created. The workspace selects that original renderer
 and facade URL from the thread inventory, rather than from the employee's

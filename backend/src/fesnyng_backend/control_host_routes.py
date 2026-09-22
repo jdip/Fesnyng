@@ -155,6 +155,18 @@ async def profile_status(request: Request, organization_id: UUID, host_id: UUID,
         return await client.request(org, host, f"/profiles/{profile}")
 
 
+@router.get("/hosts/{host_id}/profiles/{profile_id}/codex/models")
+async def codex_models(request: Request, organization_id: UUID, host_id: UUID, profile_id: UUID):
+    """Return the selected profile's complete native Codex model inventory."""
+    org, host, profile = str(organization_id), str(host_id), str(profile_id)
+    client, metadata = managed_profile(request, org, profile)
+    with host_errors():
+        await client.request(
+            org, host, f"/profiles/{profile}", method="PUT", body={"name": metadata["name"]}
+        )
+        return await client.request(org, host, f"/profiles/{profile}/codex/models")
+
+
 @router.post("/hosts/{host_id}/profiles/{profile_id}/login")
 async def profile_login(request: Request, organization_id: UUID, host_id: UUID, profile_id: UUID):
     org, host, profile = str(organization_id), str(host_id), str(profile_id)

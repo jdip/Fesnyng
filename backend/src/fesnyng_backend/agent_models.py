@@ -30,6 +30,10 @@ class AgentConfiguration(Contract):
     runtime_type: Literal["opencode", "codex"] = "opencode"
     provider: Literal["openai"] = "openai"
     model: str = Field(default="gpt-6-astra", min_length=1, max_length=120)
+    # None deliberately means the selected native model chooses its own default.
+    # The host verifies non-default values against the authenticated model inventory
+    # before it applies a Codex configuration.
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
     profile_id: UUID | None = None
     instructions: str = Field(default="", max_length=200_000)
     workspace: Slug = "default"

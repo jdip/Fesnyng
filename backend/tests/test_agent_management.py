@@ -146,6 +146,7 @@ def test_agent_defaults_and_configuration_input_limits(organization):
     assert agent["configuration"]["execution_type"] == "docker"
     assert agent["configuration"]["runtime_type"] == "opencode"
     assert agent["configuration"]["model"] == "gpt-6-astra"
+    assert agent["configuration"]["reasoning_effort"] is None
     with pytest.raises(ValueError):
         agents.create_agent(
             org.id,
@@ -156,6 +157,21 @@ def test_agent_defaults_and_configuration_input_limits(organization):
                 "configuration": {"workspace": "../../other"},
             },
         )
+
+
+def test_agent_configuration_retains_the_optional_reasoning_effort(organization):
+    _, _, owner, org, agents, host_id = organization
+    agent = agents.create_agent(
+        org.id,
+        owner.id,
+        {
+            "name": "Engineer",
+            "host_id": host_id,
+            "configuration": {"runtime_type": "codex", "reasoning_effort": "high"},
+        },
+    )
+
+    assert agent["configuration"]["reasoning_effort"] == "high"
     with pytest.raises(ValueError):
         agents.update_agent(
             org.id, agent["id"], owner.id, {"expected_version": 1, "applied_version": 1}

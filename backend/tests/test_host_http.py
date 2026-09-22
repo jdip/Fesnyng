@@ -157,6 +157,53 @@ def test_profile_management_and_agent_credentials_have_separate_authority(tmp_pa
     asyncio.run(check())
 
 
+def test_host_discovers_profile_models_without_an_agent_or_browser_credential(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    org, profile = str(uuid4()), str(uuid4())
+    binding = secrets.token_urlsafe(32)
+    app.state.host_store.bind_organization(org, binding)
+    app.state.credential_store.ensure_profile(org, profile, "Account")
+    calls: list[tuple[str, str]] = []
+
+    async def discover(actual_org, actual_profile):
+        calls.append((actual_org, actual_profile))
+        return {
+            "data": [
+                {
+                    "model": "gpt-6-astra",
+                    "displayName": "GPT-6 Astra",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Fast"}
+                    ],
+                    "defaultReasoningEffort": "low",
+                }
+            ],
+            "nextCursor": None,
+        }
+
+    monkeypatch.setattr(app.state.host_runtime.codex, "discover_models", discover)
+
+    async def check():
+        path = f"/organizations/{org}/profiles/{profile}/codex/models"
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://host") as client:
+            assert (await client.get(path)).status_code == 401
+            client.headers["Authorization"] = f"Bearer {binding}"
+            response = await client.get(path)
+        assert response.status_code == 200
+        assert response.json()["data"][0]["model"] == "gpt-6-astra"
+
+    asyncio.run(check())
+    assert calls == [(org, profile)]
+
+
 def test_host_completes_device_authorization_without_control_plane_polling(tmp_path):
     import base64
     import json
