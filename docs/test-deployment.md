@@ -14,9 +14,40 @@ The installer reads the exact Node version from
 checksum, creates a private XDG deployment/state split, and installs user
 services plus a five-minute `OnCalendar=*:0/5` timer. It prepares locked backend,
 frontend, and agent-runtime dependencies before atomically activating a release.
-The stable updater lives outside `current`, so an installation started from a
-candidate can first activate the existing `test` revision and later update to the
-merged candidate.
+The stable scheduled wrapper, [`update-test-deployment.sh`](../scripts/update-test-deployment.sh),
+lives at `bin/update` outside `current`. It locks the update, fetches `origin/test`,
+and prepares a detached source checkout at that exact commit. It then runs
+[`deploy-test-release.sh`](../scripts/deploy-test-release.sh) from that checkout,
+so new deployment logic applies to the same revision that introduced it.
+The selected revision must contain that deploy script; missing or modified tracked
+source fails clearly without falling back to an older installed deployer.
+The deploy script does not fetch again or replace the scheduled wrapper.
+
+### Upgrade an existing updater
+
+Use a clean, reviewed checkout after this change is delivered to `test`. Preserve
+the existing private configuration and state; do not rerun the fresh installer.
+Pause only the timer during the transition, then acquire the same update lock to
+wait for any scheduled or manual update already running. Replace the wrapper
+atomically and restart the timer:
+
+```bash
+source "$HOME/.config/fesnyng-test/deployment.env"
+systemctl --user stop fesnyng-test-update.timer
+(
+  flock 9 &&
+  install -m 700 scripts/update-test-deployment.sh "$DEPLOY_BASE/bin/update.next" &&
+  mv -f "$DEPLOY_BASE/bin/update.next" "$DEPLOY_BASE/bin/update"
+) 9>"$DEPLOY_BASE/update.lock"
+systemctl --user start fesnyng-test-update.timer
+systemctl --user start fesnyng-test-update.service
+```
+
+Check the command results and journal. If replacement fails, retain the existing
+wrapper and restore the timer; do not leave scheduling disabled. `bin/update` is
+also the manual update entry point. The release deployer is internal and requires
+the wrapper's inherited lock descriptor; invoking it directly fails before
+preparation or service changes. Ordinary future updates need no wrapper replacement.
 
 The browser/control service listens on loopback and is served by one private
 Tailscale HTTPS route. The host listens on port 8001 for Docker bridge clients;
@@ -67,8 +98,11 @@ systemctl --user start fesnyng-test-update.timer
 
 `systemctl --user status fesnyng-test-control fesnyng-test-host
 fesnyng-test-update.timer` and `journalctl --user -u fesnyng-test-update` show
-service and update state. The updater serializes scheduled and manual runs with
-`flock`, logs unchanged revisions as no-ops, builds a non-live release, then uses
+service and update state. The wrapper serializes scheduled and manual runs with
+`flock`, including fetch and execution of the selected deployer. When the source
+is unchanged it invokes only the deployer's health/admission check, without builds
+or restarts. An unhealthy current release still reports recovery required.
+For a changed revision, the deployer builds a non-live release, then uses
 the host-local maintenance token file to acquire admission immediately before the
 symlink swap. It restarts both services, requires their health revisions to match,
 and only then releases admission. Busy or unavailable maintenance defers without

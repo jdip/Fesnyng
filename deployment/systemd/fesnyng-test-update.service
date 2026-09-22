@@ -1,5 +1,5 @@
 [Unit]
-Description=Prepare and activate a quiet Fesnyng test update
+Description=Fetch Fesnyng test and run its selected deployment script
 
 [Service]
 Type=oneshot

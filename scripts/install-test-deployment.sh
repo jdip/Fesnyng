@@ -56,6 +56,7 @@ if [[ -d $deploy_base/source.git ]]; then
 else
   git clone --mirror https://github.com/jdip/Fesnyng.git "$deploy_base/source.git"
 fi
+# Install only the stable selector; each selected release supplies its deployer.
 install -m 700 "$root/scripts/update-test-deployment.sh" "$deploy_base/bin/update"
 cat > "$deploy_base/bin/run-control" <<'EOF'
 #!/usr/bin/env bash
