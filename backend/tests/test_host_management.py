@@ -125,7 +125,11 @@ def test_management_tools_bind_caller_and_hide_grant_fields(tmp_path):
                         "agent_id": target,
                         "update": {
                             "expected_version": 1,
-                            "configuration": {"instructions": "Updated core instructions"},
+                            "configuration": {
+                                "runtime_type": "codex",
+                                "instructions": "Updated core instructions",
+                                "reasoning_effort": "high",
+                            },
                         },
                     },
                 },
@@ -136,6 +140,7 @@ def test_management_tools_bind_caller_and_hide_grant_fields(tmp_path):
                 == f"/api/agent-api/organizations/{org}/agents/{agent}/agents/{target}"
             )
             assert requests[-1].headers["Authorization"] == f"Bearer {token}"
+            assert json.loads(requests[-1].content)["configuration"]["reasoning_effort"] == "high"
             assert (
                 json.loads(requests[-1].content)["configuration"]["instructions"]
                 == "Updated core instructions"
