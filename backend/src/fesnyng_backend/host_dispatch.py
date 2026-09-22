@@ -648,18 +648,23 @@ class Dispatcher:
                     )
                     turn_id = reply.get("turnId") if isinstance(reply, Mapping) else None
                 else:
+                    configuration = HostAgentConfiguration.model_validate_json(
+                        self.store.host.agent(org, agent)["applied_envelope"]
+                    ).configuration
+                    turn = {
+                        "threadId": session_id,
+                        "input": input_,
+                        "clientUserMessageId": row["id"],
+                        "model": configuration.model,
+                    }
+                    # Null clears an earlier App Server override so a changed
+                    # agent setting returns existing threads to model default.
+                    turn["effort"] = configuration.reasoning_effort
                     reply = await adapter.call(
                         org,
                         agent,
                         "turn/start",
-                        {
-                            "threadId": session_id,
-                            "input": input_,
-                            "clientUserMessageId": row["id"],
-                            "model": HostAgentConfiguration.model_validate_json(
-                                self.store.host.agent(org, agent)["applied_envelope"]
-                            ).configuration.model,
-                        },
+                        turn,
                     )
                     turn = reply.get("turn") if isinstance(reply, Mapping) else None
                     turn_id = turn.get("id") if isinstance(turn, Mapping) else None

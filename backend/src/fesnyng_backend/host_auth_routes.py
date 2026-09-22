@@ -41,6 +41,17 @@ def profile_status(request: Request, organization_id: UUID, profile_id: UUID):
     return status
 
 
+@router.get("/organizations/{organization_id}/profiles/{profile_id}/codex/models")
+async def codex_models(request: Request, organization_id: UUID, profile_id: UUID):
+    """Discover a profile's native model catalog in an isolated App Server process."""
+    org, profile = str(organization_id), str(profile_id)
+    require_binding(request, org)
+    if request.app.state.credential_store.profile_status(org, profile) is None:
+        raise HTTPException(404, "Host profile not found")
+    with host_errors():
+        return await request.app.state.host_runtime.codex.discover_models(org, profile)
+
+
 @router.get("/credential")
 async def credential(request: Request):
     try:

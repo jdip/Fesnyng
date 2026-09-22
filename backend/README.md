@@ -83,6 +83,18 @@ The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/
 
 Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
+For a Codex agent with a selected, authenticated profile, the settings picker reads
+`GET /organizations/{organization}/hosts/{host}/profiles/{profile}/codex/models`.
+The host starts a short-lived, named `--rm` App Server container from its pinned
+agent image, authenticates it over JSON-RPC stdin using that host-local profile,
+requests every `model/list` page with `includeHidden: true`, and removes the exact
+container on completion or failure. It does not reuse an employee container, mount
+employee state, or return access credentials. Native discovery failure is returned
+to the settings caller; there is no static model fallback. The nullable
+`configuration.reasoning_effort` uses the selected model default when null. Every
+new Codex turn sends that null explicitly, which clears an earlier App Server
+turn-level override on existing threads at the next safe turn boundary.
+
 New thread directories are prepared under the host's organization/employee-scoped
 workspace root. Projects can select a repository and explicit checkout branch;
 browser callers cannot select an arbitrary directory or inject a repository into

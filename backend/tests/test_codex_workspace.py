@@ -2,6 +2,7 @@ import asyncio
 import json
 import secrets
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -374,10 +375,128 @@ def test_dispatcher_starts_a_codex_turn_and_records_its_native_turn_receipt(tmp_
             "input": [{"type": "text", "text": "continue"}],
             "clientUserMessageId": receipt["id"],
             "model": "gpt-6-astra",
+            "effort": None,
         },
     ) in codex.calls
     assert stored["state"] == "active"
     assert stored["native_message_id"] == "turn_started"
+
+
+def test_dispatcher_starts_codex_turn_at_the_configured_reasoning_effort(tmp_path):
+    app, org, agent, _token, codex = _app(tmp_path)
+    current = app.state.host_store.agent(org, agent)
+    envelope = HostAgentConfiguration.model_validate_json(current["applied_envelope"]).model_copy(
+        update={
+            "version": 2,
+            "configuration": AgentConfiguration(runtime_type="codex", reasoning_effort="high"),
+        }
+    )
+    app.state.host_store.stage_agent(envelope)
+    app.state.host_store.mark_applied(envelope)
+    receipt = app.state.dispatch_store.enqueue(
+        org,
+        agent,
+        "thr_codex",
+        Submission(id=uuid4(), text="Think carefully"),
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+    dispatcher = Dispatcher(app.state.dispatch_store, app.state.host_runtime)
+
+    async def submit():
+        await dispatcher._thread((org, agent, "thr_codex"), [receipt])
+        await asyncio.gather(*dispatcher.tasks.values())
+        app.state.dispatch_store.change(
+            app.state.dispatch_store.get(org, agent, receipt["id"]), "completed"
+        )
+        default = envelope.model_copy(
+            update={
+                "version": 3,
+                "configuration": AgentConfiguration(runtime_type="codex", reasoning_effort=None),
+            }
+        )
+        app.state.host_store.stage_agent(default)
+        app.state.host_store.mark_applied(default)
+        reset = app.state.dispatch_store.enqueue(
+            org,
+            agent,
+            "thr_codex",
+            Submission(id=uuid4(), text="Use the model default"),
+            Actor(kind="human", id=uuid4(), name="Owner"),
+        )
+        await dispatcher._thread((org, agent, "thr_codex"), [reset])
+        await asyncio.gather(*dispatcher.tasks.values())
+
+    asyncio.run(submit())
+    turns = [call[3] for call in codex.calls if call[2] == "turn/start"]
+    assert [turn["effort"] for turn in turns] == ["high", None]
+
+
+def test_codex_model_inventory_uses_authenticated_native_pagination(tmp_path):
+    _app_instance, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        async def running_port(self, actual_org, actual_agent):
+            assert (actual_org, actual_agent) == (org, agent)
+
+    class Transport:
+        async def call(self, actual_org, actual_agent, method, params):
+            assert (actual_org, actual_agent, method) == (org, agent, "model/list")
+            calls.append((method, dict(params)))
+            if "cursor" not in params:
+                return {
+                    "data": [
+                        {
+                            "id": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "low", "description": "Fast"}
+                            ],
+                            "defaultReasoningEffort": "low",
+                        }
+                    ],
+                    "nextCursor": "page-two",
+                }
+            assert params["cursor"] == "page-two"
+            return {
+                "data": [
+                    {
+                        "model": "gpt-6-sol",
+                        "displayName": "GPT-6 Sol",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Fast"}
+                        ],
+                        "defaultReasoningEffort": "low",
+                    }
+                ],
+                "nextCursor": None,
+            }
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+
+    assert asyncio.run(runtime.list_models(org, agent)) == {
+        "data": [
+            {
+                "model": "gpt-6-astra",
+                "displayName": "GPT-6 Astra",
+                "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast"}],
+                "defaultReasoningEffort": "low",
+            },
+            {
+                "model": "gpt-6-sol",
+                "displayName": "GPT-6 Sol",
+                "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast"}],
+                "defaultReasoningEffort": "low",
+            },
+        ],
+        "nextCursor": None,
+    }
+    assert calls == [
+        ("model/list", {"includeHidden": True}),
+        ("model/list", {"includeHidden": True, "cursor": "page-two"}),
+    ]
 
 
 def test_dispatcher_applies_a_new_codex_thread_policy_without_reentering_agent_lock(tmp_path):

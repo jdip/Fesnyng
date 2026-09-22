@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from fesnyng_backend.codex_models import CodexModelDiscovery, model_inventory
 from fesnyng_backend.codex_transport import CodexTransport, CredentialAccess
 from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -47,11 +48,15 @@ class CodexRuntime:
     def __init__(self, runtime: DockerRuntime) -> None:
         self.runtime = runtime
         self.transport = CodexTransport(endpoint=self._endpoint)
+        self.profile_credential_access: CredentialAccess | None = None
         self.resumed_connections: dict[tuple[str, str, str], str] = {}
         self.started_policies: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
 
     def set_credential_access(self, credential_access: CredentialAccess) -> None:
         self.transport.set_credential_access(credential_access)
+
+    def set_profile_credential_access(self, credential_access: CredentialAccess) -> None:
+        self.profile_credential_access = credential_access
 
     async def call(
         self, organization_id: str, agent_id: str, method: str, params: Mapping[str, object]
@@ -118,6 +123,7 @@ class CodexRuntime:
                         "threadId": ephemeral,
                         "input": [{"type": "text", "text": prompt}],
                         "model": envelope.configuration.model,
+                        **_reasoning_effort(envelope),
                         "outputSchema": {
                             "type": "object",
                             "properties": {
@@ -210,6 +216,54 @@ class CodexRuntime:
                 await self._resume(organization_id, agent_id, session["session_id"])
         async for event in self.transport.events(organization_id, agent_id):
             yield event
+
+    async def list_models(self, organization_id: str, agent_id: str) -> dict[str, object]:
+        """Read the complete authenticated App Server model inventory for one agent."""
+        await self.runtime.running_port(organization_id, agent_id)
+        return await model_inventory(
+            lambda params: self.transport.call(organization_id, agent_id, "model/list", params)
+        )
+
+    async def discover_models(self, organization_id: str, profile_id: str) -> dict[str, object]:
+        if self.profile_credential_access is None:
+            raise RuntimeUnavailable("Codex profile credentials are unavailable")
+        return await CodexModelDiscovery(
+            self.runtime.image, self.profile_credential_access
+        ).list_models(organization_id, profile_id)
+
+    async def validate_configuration(self, envelope: HostAgentConfiguration) -> None:
+        """Reject unavailable model/effort combinations before marking Codex applied."""
+        profile_id = envelope.configuration.profile_id
+        if profile_id is None:
+            return
+        inventory = await self.discover_models(str(envelope.organization_id), str(profile_id))
+        rows = inventory["data"]
+        if not isinstance(rows, list):
+            raise RuntimeUnavailable("Codex model inventory receipt is invalid")
+        selected = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, Mapping) and row.get("model") == envelope.configuration.model
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeUnavailable(
+                "Selected Codex model is unavailable for this credential profile"
+            )
+        effort = envelope.configuration.reasoning_effort
+        supported = selected.get("supportedReasoningEfforts")
+        if effort is not None and (
+            not isinstance(supported, list)
+            or effort
+            not in {
+                option.get("reasoningEffort") for option in supported if isinstance(option, Mapping)
+            }
+        ):
+            raise RuntimeUnavailable(
+                "Selected Codex reasoning effort is unavailable for this model"
+            )
 
     async def configure(self, envelope: HostAgentConfiguration) -> None:
         """Write Fesnyng-owned instructions and skills without creating an execution loop."""
@@ -460,6 +514,13 @@ def _verify_policy(receipt: Mapping[str, Any], expected: Mapping[str, Any]) -> N
         or sandbox.get("type") != "dangerFullAccess"
     ):
         raise RuntimeUnavailable("Codex did not acknowledge the required native policy")
+
+
+def _reasoning_effort(envelope: HostAgentConfiguration) -> dict[str, str | None]:
+    # App Server applies a turn override to later turns. Sending an explicit
+    # null is therefore required to clear an earlier agent-selected effort and
+    # restore the selected model's native default.
+    return {"effort": envelope.configuration.reasoning_effort}
 
 
 def _verify_workspace_receipt(

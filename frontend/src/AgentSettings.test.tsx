@@ -160,3 +160,22 @@ test('retries a frozen switch whose control-plane acknowledgement was lost', asy
   await waitFor(() => expect(request.mock.calls.some(([url, options]) => String(url).endsWith('/harness-switch') && options?.method === 'POST')).toBe(true));
   expect(screen.queryByRole('button', { name: 'Apply selected harness' })).toBeNull();
 });
+
+test('saves the authenticated account model and per-agent thinking choice together', async () => {
+  const codexAgent: Agent = { ...agent, configuration: { ...agent.configuration, runtime_type: 'codex' } };
+  const request = vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (options.method === 'PATCH') return new Response(JSON.stringify({ detail: 'Save observed' }), { status: 409 });
+    if (url.endsWith('/codex/models')) return new Response(JSON.stringify({ data: [
+      { model: 'account-model', displayName: 'Account model', defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Thorough' }, { reasoningEffort: 'low', description: 'Quick' }] },
+    ], nextCursor: null }));
+    return new Response(JSON.stringify(url.endsWith('/hosts') ? [{ id: 'host', name: 'Local host' }] : url.endsWith('/profiles') ? [{ id: 'profile', name: 'Subscription' }] : []));
+  });
+  vi.stubGlobal('fetch', request);
+  render(<AgentSettings organization="org" agent={codexAgent} agents={[codexAgent]} csrf="csrf" onSaved={vi.fn()} />);
+  await screen.findByRole('option', { name: 'Account model' });
+  fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'account-model' } });
+  fireEvent.change(screen.getByLabelText('Default thinking level'), { target: { value: 'high' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save and apply' }));
+  await screen.findByText('Save observed');
+  expect(JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'PATCH')![1]!.body as string)).toMatchObject({ expected_version: 4, configuration: { model: 'account-model', reasoning_effort: 'high', instructions: 'Investigate carefully.' } });
+});
