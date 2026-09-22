@@ -26,6 +26,7 @@ from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_lifecycle import exclusive_host
 from fesnyng_backend.host_maintenance import MaintenanceGuard
 from fesnyng_backend.host_maintenance_routes import router as maintenance_router
+from fesnyng_backend.host_management import OrganizationManagement, register_management_tools
 from fesnyng_backend.host_mcp import (
     create_memory_mcp,
     register_collaboration_tools,
@@ -128,6 +129,11 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         mcp_server, store, app.state.docker_capability, app.state.docker_resources
     )
     register_service_tools(mcp_server, store, app.state.docker_services)
+    app.state.organization_management = OrganizationManagement(
+        store,
+        os.environ.get("FESNYNG_AGENT_HOST_CONTROL_PLANE_URL", "http://127.0.0.1:8000/api"),
+    )
+    register_management_tools(mcp_server, app.state.organization_management)
     app.mount("/mcp", mcp_app)
     credentials = CredentialStore(resolved.database_path)
     credentials.initialize()

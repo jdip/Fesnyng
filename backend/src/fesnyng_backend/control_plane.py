@@ -2,6 +2,8 @@
 
 from fastapi import FastAPI
 
+from fesnyng_backend.agent_management import agent_router as agent_management_router
+from fesnyng_backend.agent_management import human_router as agent_management_human_router
 from fesnyng_backend.agents import router as agents_router
 from fesnyng_backend.application import create_service_app
 from fesnyng_backend.auth import router as auth_router
@@ -55,6 +57,8 @@ def create_app(
     app.include_router(organizations_router)
     app.include_router(projects_router)
     app.include_router(agents_router)
+    app.include_router(agent_management_human_router)
+    app.include_router(agent_management_router)
     app.include_router(departments_router)
     app.include_router(host_router)
     app.include_router(docker_router)

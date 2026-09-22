@@ -347,3 +347,34 @@ FESNYNG_CODEX_DOCKER_TESTS=true FESNYNG_CODEX_TEST_IMAGE=fesnyng-agent:local \
 These checks prove native protocol and retained-volume behavior without an
 authenticated provider response. A real ChatGPT account request still requires a
 host-local profile login and its separate operator evidence.
+
+## Agent organization management
+
+Human organization owners and administrators can enable **Allow organization
+management** in an existing agent's settings. Access starts disabled and is stored
+separately from agent configuration. Only the human API exposes the grant:
+`GET` or `PUT /organizations/{organization_id}/agents/{agent_id}/management`, with
+`{"enabled": true}` on updates. Updates require the usual human session and CSRF
+protection. Revocation blocks subsequent agent operations without restarting its
+runtime.
+
+Both harnesses use the shared authenticated host MCP tools named
+`organization_*` to list organization resources, create/edit agents and
+departments, assign department heads and reporting relationships, and retry
+configuration application. Agent edits include core instructions, model, thinking
+defaults, and skills. Read the current desired version before editing; when
+supplying `configuration`, preserve its other fields because it replaces the
+complete configuration. Saved changes can remain pending until the host reaches
+a safe boundary. The tools cannot read or write management grants, delete
+resources, manage human membership, register hosts, or access credential secrets.
+
+The host calls the control plane using the authenticated agent's existing host
+identity. Set `FESNYNG_AGENT_HOST_CONTROL_PLANE_URL` to the control-plane API base
+reachable from the host process. It defaults to `http://127.0.0.1:8000/api` for the
+colocated compiled browser service; for the standalone API example above, use
+`http://127.0.0.1:8000`. Remote hosts need the corresponding reachable service
+address. The URL is installation configuration, never an agent-supplied tool
+argument. The control plane verifies the token with the agent's assigned host on
+every operation and checks current organization authorization. Host unavailability
+fails authentication closed. Agent-authored desired versions and organization
+changes retain the acting agent's identity.

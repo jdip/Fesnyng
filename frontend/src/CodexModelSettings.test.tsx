@@ -53,7 +53,7 @@ test('requires an explicit supported choice when a saved thinking level is incom
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(models))));
   render(<CodexModelSettings organization="org" host="host" configuration={{ ...configuration, reasoning_effort: 'high' }} onChange={vi.fn()} />);
   await screen.findByRole('option', { name: 'Current model' });
-  expect(screen.getByLabelText('Default thinking level')).toHaveProperty('validationMessage', 'Choose a supported thinking level or Model default.');
+  await waitFor(() => expect(screen.getByLabelText('Default thinking level')).toHaveProperty('validationMessage', 'Choose a supported thinking level or Model default.'));
   expect(screen.getByLabelText('Default thinking level')).toHaveProperty('value', 'high');
 });
 

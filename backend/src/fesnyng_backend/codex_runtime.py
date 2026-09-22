@@ -300,6 +300,7 @@ class CodexRuntime:
     async def configure(self, envelope: HostAgentConfiguration) -> None:
         """Write Fesnyng-owned instructions and skills without creating an execution loop."""
         org, agent = str(envelope.organization_id), str(envelope.agent_id)
+        restart_for_instructions = _core_instructions_changed(self.runtime, org, agent, envelope)
         # A persisted Codex home may still hold the prior account.  Never let
         # a changed or revoked Fesnyng assignment reuse that connection.
         await self.transport.close_agent(org, agent)
@@ -335,6 +336,14 @@ class CodexRuntime:
                     f"{root}/agents/openai.yaml",
                     "policy:\n  allow_implicit_invocation: false\n",
                 )
+        if restart_for_instructions:
+            # App Server's loaded core sessions retain their AGENTS.md selection.
+            # The pinned protocol has no immediate refresh/unload operation:
+            # thread/unsubscribe only removes a subscription and native unload is
+            # delayed. HostConfiguration already proved every thread quiet before
+            # calling configure, so restart the existing container to cold-load
+            # the same persisted native threads and their updated instructions.
+            await self.runtime.restart(org, agent)
         # Establish the authenticated connection now.  It performs initialize and
         # the externally managed ChatGPT login when the host has an assignment.
         await self.call(org, agent, "account/read", {"refreshToken": False})
@@ -553,6 +562,19 @@ def _reasoning_effort(envelope: HostAgentConfiguration) -> dict[str, str | None]
     # Server treats public null as no change, so forwarding it would leave a
     # prior turn-level effort override active on an existing thread.
     return {"effort": envelope.configuration.reasoning_effort}
+
+
+def _core_instructions_changed(
+    runtime: DockerRuntime, organization_id: str, agent_id: str, envelope: HostAgentConfiguration
+) -> bool:
+    applied = runtime.store.agent(organization_id, agent_id).get("applied_envelope")
+    if not isinstance(applied, str):
+        return False
+    previous = HostAgentConfiguration.model_validate_json(applied)
+    return (
+        previous.configuration.runtime_type == "codex"
+        and previous.configuration.instructions != envelope.configuration.instructions
+    )
 
 
 def _verify_workspace_receipt(
