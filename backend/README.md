@@ -83,6 +83,19 @@ The organization API exposes `agents`, `profiles`, `hosts` and `policy` under `/
 
 Agent workspaces are logical names, not arbitrary filesystem paths. New agents default to `gpt-6-astra`, verified for fork continuations; an agent configuration can still select another model. Reusable skills and explicit-only commands have distinct assignments. Organization policy defaults to `allow`, with separately represented mandatory permissions and authorized thread overrides; enforcement belongs to host configuration application.
 
+For a Codex agent with a selected, authenticated profile, the settings picker reads
+`GET /organizations/{organization}/hosts/{host}/profiles/{profile}/codex/models`.
+The host starts a short-lived, named `--rm` App Server container from its pinned
+agent image, authenticates it over JSON-RPC stdin using that host-local profile,
+requests every `model/list` page with `includeHidden: true`, and removes the exact
+container on completion or failure. It does not reuse an employee container, mount
+employee state, or return access credentials. A fresh in-memory home and a native remote-cache receipt establish that the
+catalog came from the selected account; bundled-only fallback is rejected.
+Native discovery failure is returned to the settings caller. The nullable
+`configuration.reasoning_effort` uses the selected model default when null. Before each new Codex turn, the adapter resolves that setting through the
+applied profile to an explicit native default effort. This replaces any earlier
+turn-level override on existing threads at the next safe turn boundary.
+
 New thread directories are prepared under the host's organization/employee-scoped
 workspace root. Projects can select a repository and explicit checkout branch;
 browser callers cannot select an arbitrary directory or inject a repository into
@@ -334,3 +347,34 @@ FESNYNG_CODEX_DOCKER_TESTS=true FESNYNG_CODEX_TEST_IMAGE=fesnyng-agent:local \
 These checks prove native protocol and retained-volume behavior without an
 authenticated provider response. A real ChatGPT account request still requires a
 host-local profile login and its separate operator evidence.
+
+## Agent organization management
+
+Human organization owners and administrators can enable **Allow organization
+management** in an existing agent's settings. Access starts disabled and is stored
+separately from agent configuration. Only the human API exposes the grant:
+`GET` or `PUT /organizations/{organization_id}/agents/{agent_id}/management`, with
+`{"enabled": true}` on updates. Updates require the usual human session and CSRF
+protection. Revocation blocks subsequent agent operations without restarting its
+runtime.
+
+Both harnesses use the shared authenticated host MCP tools named
+`organization_*` to list organization resources, create/edit agents and
+departments, assign department heads and reporting relationships, and retry
+configuration application. Agent edits include core instructions, model, thinking
+defaults, and skills. Read the current desired version before editing; when
+supplying `configuration`, preserve its other fields because it replaces the
+complete configuration. Saved changes can remain pending until the host reaches
+a safe boundary. The tools cannot read or write management grants, delete
+resources, manage human membership, register hosts, or access credential secrets.
+
+The host calls the control plane using the authenticated agent's existing host
+identity. Set `FESNYNG_AGENT_HOST_CONTROL_PLANE_URL` to the control-plane API base
+reachable from the host process. It defaults to `http://127.0.0.1:8000/api` for the
+colocated compiled browser service; for the standalone API example above, use
+`http://127.0.0.1:8000`. Remote hosts need the corresponding reachable service
+address. The URL is installation configuration, never an agent-supplied tool
+argument. The control plane verifies the token with the agent's assigned host on
+every operation and checks current organization authorization. Host unavailability
+fails authentication closed. Agent-authored desired versions and organization
+changes retain the acting agent's identity.

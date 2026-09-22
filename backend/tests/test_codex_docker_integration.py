@@ -20,6 +20,8 @@ from fesnyng_backend.host_runtime import DockerRuntime, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.settings import ServiceSettings
 
+_REVISED_CORE_INSTRUCTIONS = "CORE-INSTRUCTION-REVISION-TWO"
+
 
 @pytest.mark.skipif(
     os.environ.get("FESNYNG_CODEX_DOCKER_TESTS") != "true",
@@ -45,6 +47,7 @@ def test_codex_dispatch_interrupt_and_reconnect_preserve_native_history():
         name="Codex integration agent",
         configuration=AgentConfiguration(
             runtime_type="codex",
+            reasoning_effort="high",
             instructions="Use only the assigned thread directory.",
             skills=[NativeSkill(name="proof", content="Report the current directory.")],
         ),
@@ -124,13 +127,143 @@ def test_codex_dispatch_interrupt_and_reconnect_preserve_native_history():
             )
             turns = history["thread"]["turns"]
             assert turns and turns[0]["status"] in {"interrupted", "failed", "completed"}
+            assert history["thread"]["reasoningEffort"] == "high"
             assert any(
                 item.get("clientId") == delivery["id"]
                 for turn in turns
                 for item in turn["items"]
                 if item["type"] == "userMessage"
             )
+            default = envelope.model_copy(
+                update={
+                    "version": 2,
+                    "configuration": envelope.configuration.model_copy(
+                        update={"reasoning_effort": None}
+                    ),
+                }
+            )
+            store.stage_agent(default)
+            await runtime.configure(default)
+            store.mark_applied(default)
+            reset = dispatches.enqueue(
+                org,
+                agent,
+                session_id,
+                Submission(id=uuid4(), text="Use the model default."),
+                author,
+            )
+            await reconcile(session_id)
+            assert dispatches.get(org, agent, reset["id"])["state"] == "active"
+            default_history = {}
+            for _ in range(30):
+                default_history = await runtime.codex.call(
+                    org, agent, "thread/read", {"threadId": session_id, "includeTurns": True}
+                )
+                if any(
+                    item.get("clientId") == reset["id"]
+                    for turn in default_history["thread"]["turns"]
+                    for item in turn["items"]
+                    if item["type"] == "userMessage"
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            assert default_history["thread"]["reasoningEffort"] == "low"
+            assert any(
+                item.get("clientId") == reset["id"]
+                for turn in default_history["thread"]["turns"]
+                for item in turn["items"]
+                if item["type"] == "userMessage"
+            )
+            reset_stop = dispatches.enqueue(
+                org,
+                agent,
+                session_id,
+                Submission(id=uuid4(), mode="stop", cancel_queued=True),
+                author,
+            )
+            for _ in range(30):
+                await reconcile(session_id)
+                if dispatches.get(org, agent, reset_stop["id"])["state"] == "completed":
+                    break
+                await asyncio.sleep(0.1)
+            assert dispatches.get(org, agent, reset_stop["id"])["state"] == "completed"
             await runtime.assert_quiet(org, agent)
+            revised = default.model_copy(
+                update={
+                    "version": 3,
+                    "configuration": default.configuration.model_copy(
+                        update={
+                            "instructions": "Use only the assigned thread directory. "
+                            + _REVISED_CORE_INSTRUCTIONS
+                            + "."
+                        }
+                    ),
+                }
+            )
+            store.stage_agent(revised)
+            await runtime.configure(revised)
+            store.mark_applied(revised)
+            revised_delivery = dispatches.enqueue(
+                org,
+                agent,
+                session_id,
+                Submission(id=uuid4(), text="Use the revised core instructions."),
+                author,
+            )
+            await reconcile(session_id)
+            assert dispatches.get(org, agent, revised_delivery["id"])["state"] == "active"
+            revised_history = {}
+            for _ in range(30):
+                revised_history = await runtime.codex.call(
+                    org, agent, "thread/read", {"threadId": session_id, "includeTurns": True}
+                )
+                if any(
+                    item.get("clientId") == revised_delivery["id"]
+                    for turn in revised_history["thread"]["turns"]
+                    for item in turn["items"]
+                    if item["type"] == "userMessage"
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            assert any(
+                item.get("clientId") == revised_delivery["id"]
+                for turn in revised_history["thread"]["turns"]
+                for item in turn["items"]
+                if item["type"] == "userMessage"
+            )
+            rollout = await runtime.docker(
+                "exec",
+                runtime.name(agent),
+                "cat",
+                revised_history["thread"]["path"],
+            )
+            assert _REVISED_CORE_INSTRUCTIONS.encode() in rollout
+            revised_stop = dispatches.enqueue(
+                org,
+                agent,
+                session_id,
+                Submission(id=uuid4(), mode="stop", cancel_queued=True),
+                author,
+            )
+            for _ in range(30):
+                await reconcile(session_id)
+                if dispatches.get(org, agent, revised_stop["id"])["state"] == "completed":
+                    break
+                await asyncio.sleep(0.1)
+            assert dispatches.get(org, agent, revised_stop["id"])["state"] == "completed"
+            await runtime.assert_quiet(org, agent)
+            # Native session creation owns root-created children in the employee
+            # bind. Empty only this proof's bind through that running owner so
+            # the shared fixture teardown can remove its temporary host state.
+            await runtime.docker(
+                "exec",
+                runtime.name(agent),
+                "sh",
+                "-ceu",
+                'find "$1" -mindepth 1 -depth -delete',
+                "codex-integration-proof",
+                str(runtime.employee_workspace_root(org, agent)),
+            )
             await runtime.stop(org, agent)
             with pytest.raises(RuntimeUnavailable, match="not running"):
                 await runtime.codex.call(

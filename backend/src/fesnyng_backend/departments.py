@@ -12,6 +12,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from fesnyng_backend import auth
 from fesnyng_backend.agent_models import DepartmentCreate, DepartmentResponse, DepartmentUpdate
+from fesnyng_backend.agent_storage import (
+    _record_management_event,
+    _require_management_enabled,
+)
 
 if TYPE_CHECKING:
     from fesnyng_backend.control_store import ControlPlaneStore
@@ -56,6 +60,31 @@ class DepartmentStore:
             )
         return self.get_department(organization_id, department_id)
 
+    def create_department_as_agent(
+        self, organization_id: str, actor_agent_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        department = DepartmentCreate.model_validate(values).model_dump(mode="json")
+        department_id = str(uuid4())
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _require_management_enabled(connection, organization_id, actor_agent_id)
+            _validate_parent(connection, organization_id, department_id, department["parent_id"])
+            _validate_head(connection, organization_id, department["head_agent_id"])
+            connection.execute(
+                "INSERT INTO departments(id,organization_id,name,parent_id,head_agent_id) VALUES(?,?,?,?,?)",
+                (
+                    department_id,
+                    organization_id,
+                    department["name"],
+                    department["parent_id"],
+                    department["head_agent_id"],
+                ),
+            )
+            _record_management_event(
+                connection, organization_id, actor_agent_id, "department.created", department_id
+            )
+        return self.get_department(organization_id, department_id)
+
     def update_department(
         self, organization_id: str, department_id: str, values: dict[str, Any]
     ) -> dict[str, Any]:
@@ -81,6 +110,36 @@ class DepartmentStore:
                     department_id,
                 ),
             )
+        return self.get_department(organization_id, department_id)
+
+    def update_department_as_agent(
+        self, organization_id: str, department_id: str, actor_agent_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        values = DepartmentUpdate.model_validate(values).model_dump(mode="json", exclude_unset=True)
+        if values.get("name", "present") is None:
+            raise ValueError("Department name cannot be null")
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _require_management_enabled(connection, organization_id, actor_agent_id)
+            current = _department_row(connection, organization_id, department_id)
+            if values:
+                parent_id = values.get("parent_id", current["parent_id"])
+                head_agent_id = values.get("head_agent_id", current["head_agent_id"])
+                _validate_parent(connection, organization_id, department_id, parent_id)
+                _validate_head(connection, organization_id, head_agent_id)
+                connection.execute(
+                    "UPDATE departments SET name=?,parent_id=?,head_agent_id=? WHERE organization_id=? AND id=?",
+                    (
+                        values.get("name", current["name"]),
+                        parent_id,
+                        head_agent_id,
+                        organization_id,
+                        department_id,
+                    ),
+                )
+                _record_management_event(
+                    connection, organization_id, actor_agent_id, "department.updated", department_id
+                )
         return self.get_department(organization_id, department_id)
 
     def delete_department(self, organization_id: str, department_id: str) -> None:

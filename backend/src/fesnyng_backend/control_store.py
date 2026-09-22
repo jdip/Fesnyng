@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from fesnyng_backend.agent_storage import AGENT_SCHEMA
 
-CONTROL_PLANE_SCHEMA_VERSION = 4
+CONTROL_PLANE_SCHEMA_VERSION = 5
 PASSWORD_MAX_BYTES = 256
 PASSWORD_MIN_BYTES = 12
 SCRYPT_N = 2**17
@@ -31,6 +31,32 @@ _PASSWORD_HASH_SLOTS = BoundedSemaphore(2)
 LOGIN_MAX_FAILURES = 5
 LOGIN_BLOCK_SECONDS = 60
 _LOGIN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{2,63}")
+
+
+def _migrate_agent_configuration_provenance(connection: sqlite3.Connection) -> None:
+    """Allow agent-authored desired versions without rewriting human history."""
+    columns = {
+        row["name"]: row for row in connection.execute("PRAGMA table_info(agent_configurations)")
+    }
+    if "created_by_agent" in columns and not columns["created_by"]["notnull"]:
+        return
+    connection.execute(
+        """CREATE TABLE agent_configurations_migrating (
+        agent_id TEXT NOT NULL REFERENCES agents(id),
+        version INTEGER NOT NULL,
+        configuration TEXT NOT NULL,
+        created_by TEXT REFERENCES users(id),
+        created_by_agent TEXT REFERENCES agents(id),
+        CHECK ((created_by IS NULL) != (created_by_agent IS NULL)),
+        PRIMARY KEY (agent_id, version)
+        )"""
+    )
+    connection.execute(
+        """INSERT INTO agent_configurations_migrating(agent_id,version,configuration,created_by)
+        SELECT agent_id,version,configuration,created_by FROM agent_configurations"""
+    )
+    connection.execute("DROP TABLE agent_configurations")
+    connection.execute("ALTER TABLE agent_configurations_migrating RENAME TO agent_configurations")
 
 
 class BootstrapAlreadyComplete(RuntimeError):
@@ -124,7 +150,7 @@ class ControlPlaneStore:
             schema_version = connection.execute(
                 "SELECT schema_version FROM control_plane_schema WHERE singleton = 1"
             ).fetchone()[0]
-            if schema_version not in {1, 2, 3, CONTROL_PLANE_SCHEMA_VERSION}:
+            if schema_version not in {1, 2, 3, 4, CONTROL_PLANE_SCHEMA_VERSION}:
                 raise RuntimeError(
                     "Unsupported control-plane schema version "
                     f"{schema_version}; expected {CONTROL_PLANE_SCHEMA_VERSION}."
@@ -234,6 +260,7 @@ class ControlPlaneStore:
             for statement in AGENT_SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
+            _migrate_agent_configuration_provenance(connection)
             agent_columns = {row["name"] for row in connection.execute("PRAGMA table_info(agents)")}
             if "department_id" not in agent_columns:
                 connection.execute("ALTER TABLE agents ADD COLUMN department_id TEXT")

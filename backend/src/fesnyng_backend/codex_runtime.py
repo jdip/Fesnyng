@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from fesnyng_backend.codex_models import CodexModelDiscovery, model_inventory
 from fesnyng_backend.codex_transport import CodexTransport, CredentialAccess
 from fesnyng_backend.host_models import HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -47,20 +48,29 @@ class CodexRuntime:
     def __init__(self, runtime: DockerRuntime) -> None:
         self.runtime = runtime
         self.transport = CodexTransport(endpoint=self._endpoint)
+        self.profile_credential_access: CredentialAccess | None = None
         self.resumed_connections: dict[tuple[str, str, str], str] = {}
         self.started_policies: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
 
     def set_credential_access(self, credential_access: CredentialAccess) -> None:
         self.transport.set_credential_access(credential_access)
 
+    def set_profile_credential_access(self, credential_access: CredentialAccess) -> None:
+        self.profile_credential_access = credential_access
+
     async def call(
         self, organization_id: str, agent_id: str, method: str, params: Mapping[str, object]
     ) -> dict[str, Any]:
         await self.runtime.running_port(organization_id, agent_id)
-        thread_id = params.get("threadId")
+        native_params = dict(params)
+        if method == "turn/start" and native_params.get("effort") is None:
+            native_params["effort"] = await self._model_default_reasoning_effort(
+                organization_id, agent_id, native_params
+            )
+        thread_id = native_params.get("threadId")
         if isinstance(thread_id, str) and method not in {"thread/start", "thread/resume"}:
             await self._resume(organization_id, agent_id, thread_id)
-        receipt = await self.transport.call(organization_id, agent_id, method, params)
+        receipt = await self.transport.call(organization_id, agent_id, method, native_params)
         if method == "thread/start":
             thread = receipt.get("thread")
             if isinstance(thread, Mapping) and isinstance(thread.get("id"), str):
@@ -74,6 +84,33 @@ class CodexRuntime:
                 (organization_id, agent_id, thread_id)
             ] = await self.transport.connection_id(organization_id, agent_id)
         return receipt
+
+    async def _model_default_reasoning_effort(
+        self, organization_id: str, agent_id: str, params: Mapping[str, object]
+    ) -> str:
+        model = params.get("model")
+        if not isinstance(model, str) or not model:
+            raise RuntimeUnavailable("Codex turn model is unavailable")
+        applied = self.runtime.store.agent(organization_id, agent_id)["applied_envelope"]
+        configuration = HostAgentConfiguration.model_validate_json(applied).configuration
+        # A persistent App Server cache is not keyed by account. Re-discover
+        # through the applied profile before resolving its default.
+        inventory = (
+            await self.discover_models(organization_id, str(configuration.profile_id))
+            if configuration.profile_id is not None
+            else await self.list_models(organization_id, agent_id)
+        )
+        data = inventory.get("data")
+        if not isinstance(data, list):
+            raise RuntimeUnavailable("Codex model inventory receipt is invalid")
+        selected = next(
+            (entry for entry in data if isinstance(entry, Mapping) and entry.get("model") == model),
+            None,
+        )
+        effort = selected.get("defaultReasoningEffort") if isinstance(selected, Mapping) else None
+        if not isinstance(effort, str) or not effort:
+            raise RuntimeUnavailable("Selected Codex model has no default reasoning effort")
+        return effort
 
     async def pending(
         self, organization_id: str, agent_id: str, thread_id: str
@@ -118,6 +155,7 @@ class CodexRuntime:
                         "threadId": ephemeral,
                         "input": [{"type": "text", "text": prompt}],
                         "model": envelope.configuration.model,
+                        **_reasoning_effort(envelope),
                         "outputSchema": {
                             "type": "object",
                             "properties": {
@@ -211,9 +249,58 @@ class CodexRuntime:
         async for event in self.transport.events(organization_id, agent_id):
             yield event
 
+    async def list_models(self, organization_id: str, agent_id: str) -> dict[str, object]:
+        """Read the complete authenticated App Server model inventory for one agent."""
+        await self.runtime.running_port(organization_id, agent_id)
+        return await model_inventory(
+            lambda params: self.transport.call(organization_id, agent_id, "model/list", params)
+        )
+
+    async def discover_models(self, organization_id: str, profile_id: str) -> dict[str, object]:
+        if self.profile_credential_access is None:
+            raise RuntimeUnavailable("Codex profile credentials are unavailable")
+        return await CodexModelDiscovery(
+            self.runtime.image, self.profile_credential_access
+        ).list_models(organization_id, profile_id)
+
+    async def validate_configuration(self, envelope: HostAgentConfiguration) -> None:
+        """Reject unavailable model/effort combinations before marking Codex applied."""
+        profile_id = envelope.configuration.profile_id
+        if profile_id is None:
+            return
+        inventory = await self.discover_models(str(envelope.organization_id), str(profile_id))
+        rows = inventory["data"]
+        if not isinstance(rows, list):
+            raise RuntimeUnavailable("Codex model inventory receipt is invalid")
+        selected = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, Mapping) and row.get("model") == envelope.configuration.model
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeUnavailable(
+                "Selected Codex model is unavailable for this credential profile"
+            )
+        effort = envelope.configuration.reasoning_effort
+        supported = selected.get("supportedReasoningEfforts")
+        if effort is not None and (
+            not isinstance(supported, list)
+            or effort
+            not in {
+                option.get("reasoningEffort") for option in supported if isinstance(option, Mapping)
+            }
+        ):
+            raise RuntimeUnavailable(
+                "Selected Codex reasoning effort is unavailable for this model"
+            )
+
     async def configure(self, envelope: HostAgentConfiguration) -> None:
         """Write Fesnyng-owned instructions and skills without creating an execution loop."""
         org, agent = str(envelope.organization_id), str(envelope.agent_id)
+        restart_for_instructions = _core_instructions_changed(self.runtime, org, agent, envelope)
         # A persisted Codex home may still hold the prior account.  Never let
         # a changed or revoked Fesnyng assignment reuse that connection.
         await self.transport.close_agent(org, agent)
@@ -249,6 +336,14 @@ class CodexRuntime:
                     f"{root}/agents/openai.yaml",
                     "policy:\n  allow_implicit_invocation: false\n",
                 )
+        if restart_for_instructions:
+            # App Server's loaded core sessions retain their AGENTS.md selection.
+            # The pinned protocol has no immediate refresh/unload operation:
+            # thread/unsubscribe only removes a subscription and native unload is
+            # delayed. HostConfiguration already proved every thread quiet before
+            # calling configure, so restart the existing container to cold-load
+            # the same persisted native threads and their updated instructions.
+            await self.runtime.restart(org, agent)
         # Establish the authenticated connection now.  It performs initialize and
         # the externally managed ChatGPT login when the host has an assignment.
         await self.call(org, agent, "account/read", {"refreshToken": False})
@@ -460,6 +555,26 @@ def _verify_policy(receipt: Mapping[str, Any], expected: Mapping[str, Any]) -> N
         or sandbox.get("type") != "dangerFullAccess"
     ):
         raise RuntimeUnavailable("Codex did not acknowledge the required native policy")
+
+
+def _reasoning_effort(envelope: HostAgentConfiguration) -> dict[str, str | None]:
+    # The runtime resolves null to the authenticated native model default. App
+    # Server treats public null as no change, so forwarding it would leave a
+    # prior turn-level effort override active on an existing thread.
+    return {"effort": envelope.configuration.reasoning_effort}
+
+
+def _core_instructions_changed(
+    runtime: DockerRuntime, organization_id: str, agent_id: str, envelope: HostAgentConfiguration
+) -> bool:
+    applied = runtime.store.agent(organization_id, agent_id).get("applied_envelope")
+    if not isinstance(applied, str):
+        return False
+    previous = HostAgentConfiguration.model_validate_json(applied)
+    return (
+        previous.configuration.runtime_type == "codex"
+        and previous.configuration.instructions != envelope.configuration.instructions
+    )
 
 
 def _verify_workspace_receipt(

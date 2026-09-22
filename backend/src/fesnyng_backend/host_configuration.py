@@ -197,6 +197,14 @@ class HostConfiguration:
             if not lifecycle_allowed:
                 raise RuntimeUnavailable("Configuration is waiting for the lifecycle transition")
             self._require_safe_delivery_effects(organization_id, agent_id)
+            await self.runtime.assert_quiet(organization_id, agent_id)
+            if envelope.configuration.runtime_type == "codex":
+                codex = getattr(self.runtime, "codex", None)
+                validate = getattr(codex, "validate_configuration", None)
+                if validate is not None:
+                    # Discovery has no agent-side effects. Validate before an
+                    # assignment change or harness replacement can persist.
+                    await validate(envelope)
             if previous is not None and (
                 previous.configuration.runtime_type != envelope.configuration.runtime_type
             ):
@@ -204,7 +212,6 @@ class HostConfiguration:
                 if switch is None:
                     raise RuntimeUnavailable("Host runtime cannot replace the selected harness")
                 await switch(organization_id, agent_id)
-            await self.runtime.assert_quiet(organization_id, agent_id)
             profile_id = envelope.configuration.profile_id
             if profile_id is None:
                 self.credentials.unassign_agent(organization_id, agent_id)

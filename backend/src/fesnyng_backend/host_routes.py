@@ -52,6 +52,19 @@ def host_errors() -> Iterator[None]:
         raise HTTPException(503, str(error)) from None
 
 
+@router.post("/agents/{agent_id}/agent-authenticate")
+async def authenticate_agent(request: Request, organization_id: UUID, agent_id: UUID):
+    require_binding(request, str(organization_id))
+    identity = request.app.state.host_store.authenticate_agent(
+        request.headers.get("X-Fesnyng-Agent-Token", "")
+    )
+    if identity is None or (
+        identity["organization_id"] != str(organization_id) or identity["agent_id"] != str(agent_id)
+    ):
+        raise HTTPException(403, "Agent authentication required")
+    return {"authenticated": True}
+
+
 @router.get("/agents/{agent_id}")
 async def agent_status(request: Request, organization_id: UUID, agent_id: UUID):
     require_binding(request, str(organization_id))
