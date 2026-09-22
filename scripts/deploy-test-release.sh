@@ -13,7 +13,7 @@ target_revision=$1
 # The wrapper holds this descriptor throughout selection and deployment.
 [[ /proc/$$/fd/9 -ef $DEPLOY_BASE/update.lock ]] && flock -n 9 || { log failed "$target_revision" 'reason=missing-update-lock'; exit 1; }
 release=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-[[ $release == "$DEPLOY_BASE/releases/$target_revision" && $(git -C "$release" rev-parse HEAD) == "$target_revision" ]] || { log failed "$target_revision" 'reason=release-revision-mismatch'; exit 1; }
+[[ $release -ef "$DEPLOY_BASE/releases/$target_revision" && $(git -C "$release" rev-parse HEAD) == "$target_revision" ]] || { log failed "$target_revision" 'reason=release-revision-mismatch'; exit 1; }
 read_revision() { [[ -r $1/.fesnyng-revision ]] && cat "$1/.fesnyng-revision"; }
 write_curl_config() { umask 077; printf 'header = "Authorization: Bearer %s"\n' "$(<"$MAINTENANCE_TOKEN_FILE")" > "$MAINTENANCE_CURL_CONFIG"; }
 maintenance() {
