@@ -177,6 +177,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
                 application.state.host_runtime.codex.set_credential_access(
                     application.state.credential_service.access_for_agent
                 )
+                application.state.host_runtime.codex.set_profile_credential_access(
+                    application.state.credential_service.access_for_profile
+                )
                 reconciliation = background.create_task(reconcile_configuration())
                 try:
                     yield

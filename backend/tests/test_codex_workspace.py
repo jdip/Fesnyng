@@ -2,7 +2,8 @@ import asyncio
 import json
 import secrets
 from types import SimpleNamespace
-from uuid import uuid4
+from typing import Any, cast
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -374,10 +375,250 @@ def test_dispatcher_starts_a_codex_turn_and_records_its_native_turn_receipt(tmp_
             "input": [{"type": "text", "text": "continue"}],
             "clientUserMessageId": receipt["id"],
             "model": "gpt-6-astra",
+            "effort": None,
         },
     ) in codex.calls
     assert stored["state"] == "active"
     assert stored["native_message_id"] == "turn_started"
+
+
+def test_dispatcher_starts_codex_turn_at_the_configured_reasoning_effort(tmp_path):
+    app, org, agent, _token, codex = _app(tmp_path)
+    current = app.state.host_store.agent(org, agent)
+    envelope = HostAgentConfiguration.model_validate_json(current["applied_envelope"]).model_copy(
+        update={
+            "version": 2,
+            "configuration": AgentConfiguration(runtime_type="codex", reasoning_effort="high"),
+        }
+    )
+    app.state.host_store.stage_agent(envelope)
+    app.state.host_store.mark_applied(envelope)
+    receipt = app.state.dispatch_store.enqueue(
+        org,
+        agent,
+        "thr_codex",
+        Submission(id=uuid4(), text="Think carefully"),
+        Actor(kind="human", id=uuid4(), name="Owner"),
+    )
+    dispatcher = Dispatcher(app.state.dispatch_store, app.state.host_runtime)
+
+    async def submit():
+        await dispatcher._thread((org, agent, "thr_codex"), [receipt])
+        await asyncio.gather(*dispatcher.tasks.values())
+        app.state.dispatch_store.change(
+            app.state.dispatch_store.get(org, agent, receipt["id"]), "completed"
+        )
+        default = envelope.model_copy(
+            update={
+                "version": 3,
+                "configuration": AgentConfiguration(runtime_type="codex", reasoning_effort=None),
+            }
+        )
+        app.state.host_store.stage_agent(default)
+        app.state.host_store.mark_applied(default)
+        reset = app.state.dispatch_store.enqueue(
+            org,
+            agent,
+            "thr_codex",
+            Submission(id=uuid4(), text="Use the model default"),
+            Actor(kind="human", id=uuid4(), name="Owner"),
+        )
+        await dispatcher._thread((org, agent, "thr_codex"), [reset])
+        await asyncio.gather(*dispatcher.tasks.values())
+
+    asyncio.run(submit())
+    turns = [call[3] for call in codex.calls if call[2] == "turn/start"]
+    assert [turn["effort"] for turn in turns] == ["high", None]
+
+
+def test_codex_model_inventory_uses_authenticated_native_pagination(tmp_path):
+    _app_instance, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        async def running_port(self, actual_org, actual_agent):
+            assert (actual_org, actual_agent) == (org, agent)
+
+    class Transport:
+        async def call(self, actual_org, actual_agent, method, params):
+            assert (actual_org, actual_agent, method) == (org, agent, "model/list")
+            calls.append((method, dict(params)))
+            if "cursor" not in params:
+                return {
+                    "data": [
+                        {
+                            "id": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "low", "description": "Fast"}
+                            ],
+                            "defaultReasoningEffort": "low",
+                        }
+                    ],
+                    "nextCursor": "page-two",
+                }
+            assert params["cursor"] == "page-two"
+            return {
+                "data": [
+                    {
+                        "model": "gpt-6-sol",
+                        "displayName": "GPT-6 Sol",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Fast"}
+                        ],
+                        "defaultReasoningEffort": "low",
+                    }
+                ],
+                "nextCursor": None,
+            }
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+
+    assert asyncio.run(runtime.list_models(org, agent)) == {
+        "data": [
+            {
+                "model": "gpt-6-astra",
+                "displayName": "GPT-6 Astra",
+                "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast"}],
+                "defaultReasoningEffort": "low",
+            },
+            {
+                "model": "gpt-6-sol",
+                "displayName": "GPT-6 Sol",
+                "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast"}],
+                "defaultReasoningEffort": "low",
+            },
+        ],
+        "nextCursor": None,
+    }
+    assert calls == [
+        ("model/list", {"includeHidden": True, "limit": 20}),
+        ("model/list", {"includeHidden": True, "limit": 20, "cursor": "page-two"}),
+    ]
+
+
+def test_codex_turn_resolves_model_default_after_an_explicit_effort(tmp_path):
+    _app_instance, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        store = _app_instance.state.host_store
+
+        async def running_port(self, actual_org, actual_agent):
+            assert (actual_org, actual_agent) == (org, agent)
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            sent.append((method, dict(params)))
+            if method == "model/list":
+                return {
+                    "data": [
+                        {
+                            "model": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "high", "description": "Deep"},
+                                {"reasoningEffort": "medium", "description": "Balanced"},
+                            ],
+                            "defaultReasoningEffort": "medium",
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+            assert method == "turn/start"
+            return {"turn": {"id": "turn"}}
+
+    async def resume(_org, _agent, _thread):
+        return None
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+    cast(Any, runtime)._resume = resume
+
+    async def start():
+        await runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": "high", "input": []},
+        )
+        await runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": None, "input": []},
+        )
+
+    asyncio.run(start())
+    turns = [params for method, params in sent if method == "turn/start"]
+    assert [turn["effort"] for turn in turns] == ["high", "medium"]
+
+
+def test_codex_title_turn_resolves_the_model_default_reasoning_effort(tmp_path):
+    app, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        store = app.state.host_store
+
+        async def running_port(self, _org, _agent):
+            return None
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            sent.append((method, dict(params)))
+            if method == "thread/start":
+                return {"thread": {"id": "title-thread"}}
+            if method == "model/list":
+                return {
+                    "data": [
+                        {
+                            "model": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "low", "description": "Fast"}
+                            ],
+                            "defaultReasoningEffort": "low",
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+            if method == "turn/start":
+                return {"turn": {"id": "title-turn"}}
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "turns": [
+                            {
+                                "id": "title-turn",
+                                "status": "completed",
+                                "items": [{"type": "agentMessage", "text": '{"title":"Title"}'}],
+                            }
+                        ]
+                    }
+                }
+            if method == "thread/archive":
+                return {}
+            raise AssertionError(method)
+
+        async def connection_id(self, _org, _agent):
+            return "connection"
+
+    async def resume(_org, _agent, _thread):
+        return None
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+    cast(Any, runtime)._resume = resume
+    runtime.resumed_connections = {}
+
+    assert asyncio.run(runtime.generate_thread_title(org, agent, "A request")) == "Title"
+    title_turn = next(params for method, params in sent if method == "turn/start")
+    assert title_turn["effort"] == "low"
 
 
 def test_dispatcher_applies_a_new_codex_thread_policy_without_reentering_agent_lock(tmp_path):
@@ -1011,3 +1252,66 @@ def test_workspace_creation_lookup_requires_the_bound_organization(tmp_path):
         "state": "reserved",
         "native_receipt": None,
     }
+
+
+def test_model_default_uses_applied_profile_instead_of_persistent_native_catalog(
+    tmp_path, monkeypatch
+):
+    app, org, agent, _token, _codex = _app(tmp_path)
+    host = app.state.host_store
+    previous = HostAgentConfiguration.model_validate_json(
+        host.agent(org, agent)["applied_envelope"]
+    )
+    profile = str(uuid4())
+    changed = previous.model_copy(
+        update={
+            "version": 2,
+            "configuration": previous.configuration.model_copy(
+                update={"profile_id": UUID(profile)}
+            ),
+        }
+    )
+    host.stage_agent(changed)
+    host.mark_applied(changed)
+    received = []
+
+    class NativeRuntime:
+        store = host
+        image = "fesnyng-agent:pinned"
+
+        async def running_port(self, _org, _agent):
+            return None
+
+    class Discovery:
+        def __init__(self, image, credentials):
+            assert image == "fesnyng-agent:pinned"
+
+        async def list_models(self, actual_org, actual_profile):
+            assert (actual_org, actual_profile) == (org, profile)
+            return {"data": [{"model": "gpt-6-astra", "defaultReasoningEffort": "low"}]}
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            assert method == "turn/start", (
+                "Persistent native inventory may belong to the previous profile"
+            )
+            received.append(params)
+            return {"turn": {"id": "turn"}}
+
+    async def resume(*_args):
+        return None
+
+    monkeypatch.setattr("fesnyng_backend.codex_runtime.CodexModelDiscovery", Discovery)
+    runtime = CodexRuntime(cast(Any, NativeRuntime()))
+    runtime.transport = cast(Any, Transport())
+    runtime.profile_credential_access = cast(Any, object())
+    cast(Any, runtime)._resume = resume
+    asyncio.run(
+        runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": None, "input": []},
+        )
+    )
+    assert received[0]["effort"] == "low"

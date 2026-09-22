@@ -269,6 +269,16 @@ class CredentialStore:
                 (_digest(key),),
             ).fetchone()
 
+    def profile_credential(self, organization_id: str, profile_id: str) -> sqlite3.Row | None:
+        """Read a host-owned profile for a short-lived native discovery process."""
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT organization_id,profile_id,access,account_id,expires,residency,"
+                "generation,state FROM credential_profiles "
+                "WHERE organization_id=? AND profile_id=?",
+                (organization_id, profile_id),
+            ).fetchone()
+
     def refresh_credential(self, organization_id: str, profile_id: str) -> sqlite3.Row | None:
         """Read private refresh state for the host service only."""
         with self.connect() as connection:
@@ -336,6 +346,58 @@ class CredentialService:
             or credential["state"] != _READY
             or credential["expires"] <= time.time()
             or (credential["organization_id"], credential["profile_id"]) != assignment
+            or (previous_account_id is not None and credential["account_id"] != previous_account_id)
+        ):
+            raise PermissionError("Credential unavailable")
+        return {
+            "profile_id": credential["profile_id"],
+            "access": credential["access"],
+            "account_id": credential["account_id"],
+            "expires": credential["expires"],
+            "residency": credential["residency"],
+            "generation": credential["generation"],
+        }
+
+    async def access_for_profile(
+        self,
+        organization_id: str,
+        profile_id: str,
+        *,
+        rejected_generation: int | None = None,
+        previous_account_id: str | None = None,
+    ) -> dict[str, object]:
+        """Broker one profile to an isolated host-owned App Server process."""
+        credential = self.store.profile_credential(organization_id, profile_id)
+        if credential is None:
+            raise PermissionError("Credential unavailable")
+        if previous_account_id is not None and credential["account_id"] != previous_account_id:
+            raise PermissionError("Credential account mismatch")
+        if rejected_generation is not None and (
+            type(rejected_generation) is not int
+            or rejected_generation < 0
+            or rejected_generation > credential["generation"]
+        ):
+            raise PermissionError("Credential generation mismatch")
+        needs_refresh = credential["state"] == _REFRESHING or (
+            credential["state"] == _READY
+            and (
+                credential["expires"] <= time.time() + 30
+                or rejected_generation == credential["generation"]
+            )
+        )
+        if needs_refresh:
+            await self.refresh_profile(
+                organization_id, profile_id, rejected_generation=rejected_generation
+            )
+            credential = self.store.profile_credential(organization_id, profile_id)
+        elif credential["state"] != _READY:
+            raise PermissionError("Credential unavailable")
+        if (
+            credential is None
+            or credential["state"] != _READY
+            or credential["expires"] <= time.time()
+            or credential["organization_id"] != organization_id
+            or credential["profile_id"] != profile_id
             or (previous_account_id is not None and credential["account_id"] != previous_account_id)
         ):
             raise PermissionError("Credential unavailable")
