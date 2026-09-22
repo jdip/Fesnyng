@@ -62,10 +62,15 @@ class CodexRuntime:
         self, organization_id: str, agent_id: str, method: str, params: Mapping[str, object]
     ) -> dict[str, Any]:
         await self.runtime.running_port(organization_id, agent_id)
-        thread_id = params.get("threadId")
+        native_params = dict(params)
+        if method == "turn/start" and native_params.get("effort") is None:
+            native_params["effort"] = await self._model_default_reasoning_effort(
+                organization_id, agent_id, native_params
+            )
+        thread_id = native_params.get("threadId")
         if isinstance(thread_id, str) and method not in {"thread/start", "thread/resume"}:
             await self._resume(organization_id, agent_id, thread_id)
-        receipt = await self.transport.call(organization_id, agent_id, method, params)
+        receipt = await self.transport.call(organization_id, agent_id, method, native_params)
         if method == "thread/start":
             thread = receipt.get("thread")
             if isinstance(thread, Mapping) and isinstance(thread.get("id"), str):
@@ -79,6 +84,25 @@ class CodexRuntime:
                 (organization_id, agent_id, thread_id)
             ] = await self.transport.connection_id(organization_id, agent_id)
         return receipt
+
+    async def _model_default_reasoning_effort(
+        self, organization_id: str, agent_id: str, params: Mapping[str, object]
+    ) -> str:
+        model = params.get("model")
+        if not isinstance(model, str) or not model:
+            raise RuntimeUnavailable("Codex turn model is unavailable")
+        inventory = await self.list_models(organization_id, agent_id)
+        data = inventory.get("data")
+        if not isinstance(data, list):
+            raise RuntimeUnavailable("Codex model inventory receipt is invalid")
+        selected = next(
+            (entry for entry in data if isinstance(entry, Mapping) and entry.get("model") == model),
+            None,
+        )
+        effort = selected.get("defaultReasoningEffort") if isinstance(selected, Mapping) else None
+        if not isinstance(effort, str) or not effort:
+            raise RuntimeUnavailable("Selected Codex model has no default reasoning effort")
+        return effort
 
     async def pending(
         self, organization_id: str, agent_id: str, thread_id: str
@@ -517,9 +541,9 @@ def _verify_policy(receipt: Mapping[str, Any], expected: Mapping[str, Any]) -> N
 
 
 def _reasoning_effort(envelope: HostAgentConfiguration) -> dict[str, str | None]:
-    # App Server applies a turn override to later turns. Sending an explicit
-    # null is therefore required to clear an earlier agent-selected effort and
-    # restore the selected model's native default.
+    # The runtime resolves null to the authenticated native model default. App
+    # Server treats public null as no change, so forwarding it would leave a
+    # prior turn-level effort override active on an existing thread.
     return {"effort": envelope.configuration.reasoning_effort}
 
 

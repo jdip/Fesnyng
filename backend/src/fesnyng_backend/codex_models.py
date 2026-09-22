@@ -24,6 +24,8 @@ class _Stream(Protocol):
 class _Reader(Protocol):
     async def readline(self) -> bytes: ...
 
+    async def read(self) -> bytes: ...
+
 
 class _Process(Protocol):
     @property
@@ -61,6 +63,8 @@ class CodexModelDiscovery:
                 "--name",
                 name,
                 "-i",
+                "--tmpfs",
+                "/home/agent",
                 "--entrypoint",
                 "/opt/fesnyng/node_modules/.bin/codex",
                 self.image,
@@ -96,7 +100,16 @@ class CodexModelDiscovery:
                         "chatgptAccountId": credential["account_id"],
                     },
                 )
-                return await model_inventory(lambda params: rpc.request("model/list", params))
+                inventory = await model_inventory(lambda params: rpc.request("model/list", params))
+                slugs = await _cached_model_slugs(name)
+                # The profile cannot move accounts during a discovery. Check it
+                # again before returning the remote-provenanced catalog.
+                await self.credential_access(
+                    organization_id,
+                    profile_id,
+                    previous_account_id=credential["account_id"],
+                )
+                return _remote_inventory(inventory, slugs)
         except (PermissionError, KeyError, TypeError, ValueError, TimeoutError) as error:
             raise RuntimeUnavailable("Codex model discovery failed") from error
         finally:
@@ -189,7 +202,9 @@ async def model_inventory(
     seen_models: set[str] = set()
     models: list[dict[str, object]] = []
     while True:
-        params: dict[str, object] = {"includeHidden": True}
+        # Bound each JSON-RPC line well below asyncio's reader limit while still
+        # traversing every opaque native page.
+        params: dict[str, object] = {"includeHidden": True, "limit": 20}
         if cursor is not None:
             params["cursor"] = cursor
         receipt = await call(params)
@@ -251,6 +266,78 @@ def model_record(value: object) -> dict[str, object]:
         "displayName": display_name,
         "supportedReasoningEfforts": supported,
         "defaultReasoningEffort": default_effort,
+    }
+
+
+async def _cached_model_slugs(name: str) -> set[str]:
+    """Require the fresh native remote cache, never App Server's bundled fallback."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            name,
+            "cat",
+            "/home/agent/.codex/models_cache.json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        raise RuntimeUnavailable("Codex model discovery cache is unavailable") from None
+    stdout = process.stdout
+    if stdout is None:
+        raise RuntimeUnavailable("Codex model discovery cache is unavailable")
+    try:
+        async with asyncio.timeout(5):
+            raw = await stdout.read()
+            status = await process.wait()
+    except TimeoutError:
+        await _stop(process)
+        raise RuntimeUnavailable("Codex model discovery cache timed out") from None
+    if status != 0:
+        raise RuntimeUnavailable("Codex model discovery did not receive a remote model catalog")
+    try:
+        cache = json.loads(raw)
+    except (TypeError, ValueError):
+        raise RuntimeUnavailable("Codex model discovery cache is invalid") from None
+    if not isinstance(cache, Mapping):
+        raise RuntimeUnavailable("Codex model discovery cache is invalid")
+    fetched_at, client_version, models = (
+        cache.get("fetched_at"),
+        cache.get("client_version"),
+        cache.get("models"),
+    )
+    if (
+        not isinstance(fetched_at, (int, float, str))
+        or isinstance(fetched_at, str)
+        and not fetched_at
+        or not isinstance(client_version, str)
+        or not client_version
+        or not isinstance(models, list)
+    ):
+        raise RuntimeUnavailable("Codex model discovery cache is invalid")
+    slugs = {
+        entry.get("slug")
+        for entry in models
+        if isinstance(entry, Mapping) and isinstance(entry.get("slug"), str) and entry["slug"]
+    }
+    if len(slugs) != len(models):
+        raise RuntimeUnavailable("Codex model discovery cache is invalid")
+    return slugs
+
+
+def _remote_inventory(inventory: Mapping[str, object], slugs: set[str]) -> dict[str, object]:
+    data = inventory.get("data")
+    if not isinstance(data, list):
+        raise RuntimeUnavailable("Codex model inventory receipt is invalid")
+    return {
+        "data": [
+            model
+            for model in data
+            if isinstance(model, Mapping)
+            and isinstance(model.get("model"), str)
+            and model["model"] in slugs
+        ],
+        "nextCursor": None,
     }
 
 

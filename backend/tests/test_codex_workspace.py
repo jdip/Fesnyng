@@ -494,9 +494,129 @@ def test_codex_model_inventory_uses_authenticated_native_pagination(tmp_path):
         "nextCursor": None,
     }
     assert calls == [
-        ("model/list", {"includeHidden": True}),
-        ("model/list", {"includeHidden": True, "cursor": "page-two"}),
+        ("model/list", {"includeHidden": True, "limit": 20}),
+        ("model/list", {"includeHidden": True, "limit": 20, "cursor": "page-two"}),
     ]
+
+
+def test_codex_turn_resolves_model_default_after_an_explicit_effort(tmp_path):
+    _app_instance, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        async def running_port(self, actual_org, actual_agent):
+            assert (actual_org, actual_agent) == (org, agent)
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            sent.append((method, dict(params)))
+            if method == "model/list":
+                return {
+                    "data": [
+                        {
+                            "model": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "high", "description": "Deep"},
+                                {"reasoningEffort": "medium", "description": "Balanced"},
+                            ],
+                            "defaultReasoningEffort": "medium",
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+            assert method == "turn/start"
+            return {"turn": {"id": "turn"}}
+
+    async def resume(_org, _agent, _thread):
+        return None
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+    cast(Any, runtime)._resume = resume
+
+    async def start():
+        await runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": "high", "input": []},
+        )
+        await runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": None, "input": []},
+        )
+
+    asyncio.run(start())
+    turns = [params for method, params in sent if method == "turn/start"]
+    assert [turn["effort"] for turn in turns] == ["high", "medium"]
+
+
+def test_codex_title_turn_resolves_the_model_default_reasoning_effort(tmp_path):
+    app, org, agent, _token, _codex = _app(tmp_path)
+    runtime = CodexRuntime.__new__(CodexRuntime)
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class NativeRuntime:
+        store = app.state.host_store
+
+        async def running_port(self, _org, _agent):
+            return None
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            sent.append((method, dict(params)))
+            if method == "thread/start":
+                return {"thread": {"id": "title-thread"}}
+            if method == "model/list":
+                return {
+                    "data": [
+                        {
+                            "model": "gpt-6-astra",
+                            "displayName": "GPT-6 Astra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "low", "description": "Fast"}
+                            ],
+                            "defaultReasoningEffort": "low",
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+            if method == "turn/start":
+                return {"turn": {"id": "title-turn"}}
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "turns": [
+                            {
+                                "id": "title-turn",
+                                "status": "completed",
+                                "items": [{"type": "agentMessage", "text": '{"title":"Title"}'}],
+                            }
+                        ]
+                    }
+                }
+            if method == "thread/archive":
+                return {}
+            raise AssertionError(method)
+
+        async def connection_id(self, _org, _agent):
+            return "connection"
+
+    async def resume(_org, _agent, _thread):
+        return None
+
+    runtime.runtime = cast(Any, NativeRuntime())
+    runtime.transport = cast(Any, Transport())
+    cast(Any, runtime)._resume = resume
+    runtime.resumed_connections = {}
+
+    assert asyncio.run(runtime.generate_thread_title(org, agent, "A request")) == "Title"
+    title_turn = next(params for method, params in sent if method == "turn/start")
+    assert title_turn["effort"] == "low"
 
 
 def test_dispatcher_applies_a_new_codex_thread_policy_without_reentering_agent_lock(tmp_path):
