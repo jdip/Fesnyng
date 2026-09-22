@@ -16,19 +16,10 @@ def peer_store(request: Request) -> ControlPeerConfigurationStore:
     return ControlPeerConfigurationStore(auth.get_store(request))
 
 
-@router.get("/peers")
-def status(request: Request, organization_id: UUID):
-    organization = str(organization_id)
-    auth.require_member(request, organization)
-    return peer_store(request).status(organization)
-
-
-@router.post("/peers/apply")
-async def apply(request: Request, organization_id: UUID):
-    organization = str(organization_id)
-    auth.require_unsafe_request(request)
-    auth.require_manager(request, organization)
-    configurations = peer_store(request)
+async def apply_peer_configuration(
+    organization: str, configurations: ControlPeerConfigurationStore, client
+) -> dict[str, object]:
+    """Apply one frozen organization topology and retain truthful host status."""
     desired = configurations.desired(organization)
     envelopes = [
         (
@@ -37,7 +28,6 @@ async def apply(request: Request, organization_id: UUID):
         )
         for host in desired["hosts"]
     ]
-    client = host_client(request)
     for host_id, configuration in envelopes:
         try:
             response = await client.request(
@@ -57,3 +47,19 @@ async def apply(request: Request, organization_id: UUID):
             applied = False
         configurations.record_application(organization, host_id, configuration.version, applied)
     return configurations.status(organization)
+
+
+@router.get("/peers")
+def status(request: Request, organization_id: UUID):
+    organization = str(organization_id)
+    auth.require_member(request, organization)
+    return peer_store(request).status(organization)
+
+
+@router.post("/peers/apply")
+async def apply(request: Request, organization_id: UUID):
+    organization = str(organization_id)
+    auth.require_unsafe_request(request)
+    auth.require_manager(request, organization)
+    configurations = peer_store(request)
+    return await apply_peer_configuration(organization, configurations, host_client(request))

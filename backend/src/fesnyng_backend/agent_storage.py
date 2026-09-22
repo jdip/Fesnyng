@@ -119,8 +119,24 @@ CREATE TABLE IF NOT EXISTS agent_configurations (
     agent_id TEXT NOT NULL REFERENCES agents(id),
     version INTEGER NOT NULL,
     configuration TEXT NOT NULL,
-    created_by TEXT NOT NULL REFERENCES users(id),
+    created_by TEXT REFERENCES users(id),
+    created_by_agent TEXT REFERENCES agents(id),
+    CHECK ((created_by IS NULL) != (created_by_agent IS NULL)),
     PRIMARY KEY (agent_id, version)
+);
+CREATE TABLE IF NOT EXISTS agent_management_grants (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS agent_management_events (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id),
+    actor_agent_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    FOREIGN KEY (organization_id, actor_agent_id)
+        REFERENCES agents(organization_id, id)
 );
 CREATE TABLE IF NOT EXISTS agent_harness_switches (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
@@ -232,6 +248,66 @@ class AgentStore:
             )
         return self.get_agent(organization_id, agent_id)
 
+    def management_enabled(self, organization_id: str, agent_id: str) -> bool:
+        with self.control.connect() as connection:
+            return _management_enabled(connection, organization_id, agent_id)
+
+    def set_management_enabled(self, organization_id: str, agent_id: str, enabled: bool) -> bool:
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute(
+                "SELECT 1 FROM agents WHERE organization_id=? AND id=?",
+                (organization_id, agent_id),
+            ).fetchone():
+                raise LookupError("Agent not found")
+            connection.execute(
+                "INSERT INTO agent_management_grants(agent_id,enabled) VALUES(?,?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled",
+                (agent_id, enabled),
+            )
+        return enabled
+
+    def create_agent_as_agent(
+        self, organization_id: str, actor_agent_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        values = AgentCreate.model_validate(values).model_dump(mode="json")
+        agent_id = str(uuid4())
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _require_management_enabled(connection, organization_id, actor_agent_id)
+            if not connection.execute(
+                "SELECT 1 FROM organization_hosts WHERE organization_id=? AND host_id=?",
+                (organization_id, values["host_id"]),
+            ).fetchone():
+                raise ValueError("Host is not allocated to this organization")
+            _validate_profile(connection, organization_id, values["configuration"])
+            reporting = values.get("reports_to_agent_id")
+            _validate_reporting(connection, organization_id, agent_id, reporting)
+            department = values.get("department_id")
+            _validate_department(connection, organization_id, department)
+            connection.execute(
+                "INSERT INTO agents(id,organization_id,name,title,host_id,reports_to_agent_id,department_id,desired_version) "
+                "VALUES(?,?,?,?,?,?,?,1)",
+                (
+                    agent_id,
+                    organization_id,
+                    values["name"],
+                    values.get("title", ""),
+                    values["host_id"],
+                    reporting,
+                    department,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO agent_configurations(agent_id,version,configuration,created_by_agent) "
+                "VALUES(?,1,?,?)",
+                (agent_id, json.dumps(values.get("configuration", {})), actor_agent_id),
+            )
+            _record_management_event(
+                connection, organization_id, actor_agent_id, "agent.created", agent_id
+            )
+        return self.get_agent(organization_id, agent_id)
+
     def get_agent(self, organization_id: str, agent_id: str) -> dict[str, Any]:
         with self.control.connect() as connection:
             row = connection.execute(
@@ -300,6 +376,62 @@ class AgentStore:
                 "INSERT INTO agent_configurations(agent_id,version,configuration,created_by) "
                 "VALUES(?,?,?,?)",
                 (agent_id, version, json.dumps(configuration), actor_id),
+            )
+        return self.get_agent(organization_id, agent_id)
+
+    def update_agent_as_agent(
+        self, organization_id: str, agent_id: str, actor_agent_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        values = AgentUpdate.model_validate(values).model_dump(mode="json", exclude_unset=True)
+        if any(values.get(key, "present") is None for key in ("name", "title", "configuration")):
+            raise ValueError("Name, title and configuration cannot be null")
+        with self.control.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _require_management_enabled(connection, organization_id, actor_agent_id)
+            current = connection.execute(
+                "SELECT a.*,c.configuration FROM agents a JOIN agent_configurations c "
+                "ON c.agent_id=a.id AND c.version=a.desired_version "
+                "WHERE a.organization_id=? AND a.id=?",
+                (organization_id, agent_id),
+            ).fetchone()
+            if current is None:
+                raise LookupError("Agent not found")
+            if connection.execute(
+                "SELECT 1 FROM agent_harness_switches WHERE agent_id=?", (agent_id,)
+            ).fetchone():
+                raise ValueError("Harness switch is in progress")
+            if values["expected_version"] != current["desired_version"]:
+                raise ConfigurationConflict("Agent configuration version conflict")
+            version = current["desired_version"] + 1
+            configuration = values.get("configuration", json.loads(current["configuration"]))
+            original_runtime = AgentConfiguration.model_validate_json(
+                current["configuration"]
+            ).runtime_type
+            if AgentConfiguration.model_validate(configuration).runtime_type != original_runtime:
+                raise ValueError("Use the dedicated harness switch operation to change a harness")
+            _validate_profile(connection, organization_id, configuration)
+            reporting = values.get("reports_to_agent_id", current["reports_to_agent_id"])
+            _validate_reporting(connection, organization_id, agent_id, reporting)
+            department = values.get("department_id", current["department_id"])
+            _validate_department(connection, organization_id, department)
+            connection.execute(
+                "UPDATE agents SET name=?,title=?,reports_to_agent_id=?,department_id=?,desired_version=? WHERE id=?",
+                (
+                    values.get("name", current["name"]),
+                    values.get("title", current["title"]),
+                    reporting,
+                    department,
+                    version,
+                    agent_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO agent_configurations(agent_id,version,configuration,created_by_agent) "
+                "VALUES(?,?,?,?)",
+                (agent_id, version, json.dumps(configuration), actor_agent_id),
+            )
+            _record_management_event(
+                connection, organization_id, actor_agent_id, "agent.updated", agent_id
             )
         return self.get_agent(organization_id, agent_id)
 
@@ -540,6 +672,39 @@ class AgentStore:
                 (organization_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+def _management_enabled(
+    connection: sqlite3.Connection, organization_id: str, agent_id: str
+) -> bool:
+    row = connection.execute(
+        """SELECT grants.enabled FROM agent_management_grants AS grants
+        JOIN agents AS agent ON agent.id=grants.agent_id
+        WHERE agent.organization_id=? AND agent.id=?""",
+        (organization_id, agent_id),
+    ).fetchone()
+    return row is not None and bool(row[0])
+
+
+def _require_management_enabled(
+    connection: sqlite3.Connection, organization_id: str, agent_id: str
+) -> None:
+    if not _management_enabled(connection, organization_id, agent_id):
+        raise PermissionError("Organization operation is not permitted")
+
+
+def _record_management_event(
+    connection: sqlite3.Connection,
+    organization_id: str,
+    actor_agent_id: str,
+    action: str,
+    subject_id: str,
+) -> None:
+    connection.execute(
+        "INSERT INTO agent_management_events(id,organization_id,actor_agent_id,action,subject_id) "
+        "VALUES(?,?,?,?,?)",
+        (str(uuid4()), organization_id, actor_agent_id, action, subject_id),
+    )
 
 
 def _validate_reporting(

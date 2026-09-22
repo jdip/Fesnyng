@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AgentManagementSettings } from './AgentManagementSettings';
 import type { Department } from './DepartmentChart';
 import { LifecycleControls } from './LifecycleControls';
 import { agentPath, api, errorMessage, type Agent, type Configuration, type Host, type Profile, type Skill } from './workspace-api';
@@ -71,7 +72,7 @@ export function AgentSettings({ organization, agent, agents, csrf, onSaved }: { 
     {current && <LifecycleControls organization={organization} agent={current.id} agentName={current.name} csrf={csrf} />}
     <div className="app-panel app-form"><h3>Skills and explicit workflows</h3>{configuration.skills.map((skill, index) => <fieldset key={index}><legend>Skill {index + 1}</legend><div className="app-form"><label>Skill name<input className="app-input" required pattern="[a-z0-9][a-z0-9_-]{0,63}" value={skill.name} onChange={(event) => changeSkill(index, { name: event.target.value })} /></label><label>Skill instructions<textarea className="app-textarea" required maxLength={200000} value={skill.content} onChange={(event) => changeSkill(index, { content: event.target.value })} /></label><label className="checkbox-label"><input type="checkbox" checked={skill.explicit_only} onChange={(event) => changeSkill(index, { explicit_only: event.target.checked })} />Only run when explicitly invoked</label><div><button type="button" className="app-button danger" onClick={() => setConfiguration({ ...configuration, skills: configuration.skills.filter((_, at) => at !== index) })}>Remove skill</button></div></div></fieldset>)}<div><button type="button" className="app-button" disabled={configuration.skills.length >= 100} onClick={() => setConfiguration({ ...configuration, skills: [...configuration.skills, { name: '', content: '', explicit_only: false }] })}>Add skill</button></div></div>
     {error && <p className="app-error" role="alert">{error}</p>}{notice && <p className="app-notice" role="status">{notice}</p>}<div className="app-actions"><button className="app-button primary" disabled={busy}>{busy ? 'Saving…' : 'Save and apply'}</button>{current && <button className="app-button" type="button" disabled={busy} onClick={applySelectedHarness}>Retry application</button>}</div>
-  </form></div>;
+  </form>{current && <AgentManagementSettings key={`${organization}:${current.id}`} organization={organization} agent={current.id} csrf={csrf} />}</div>;
 }
 
 function HarnessSwitchRecovery({ currentRuntime, pending, busy, onRetry, onApply }: { currentRuntime: 'opencode' | 'codex'; pending: PendingHarnessSwitch; busy: boolean; onRetry: () => void; onApply: () => void }) {
