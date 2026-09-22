@@ -657,8 +657,8 @@ class Dispatcher:
                         "clientUserMessageId": row["id"],
                         "model": configuration.model,
                     }
-                    # Null clears an earlier App Server override so a changed
-                    # agent setting returns existing threads to model default.
+                    # The Codex adapter resolves None to the selected account model’s
+                    # explicit default; native null would retain an old override.
                     turn["effort"] = configuration.reasoning_effort
                     reply = await adapter.call(
                         org,

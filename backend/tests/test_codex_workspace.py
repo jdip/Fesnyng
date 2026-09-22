@@ -3,7 +3,7 @@ import json
 import secrets
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -505,6 +505,8 @@ def test_codex_turn_resolves_model_default_after_an_explicit_effort(tmp_path):
     sent: list[tuple[str, dict[str, object]]] = []
 
     class NativeRuntime:
+        store = _app_instance.state.host_store
+
         async def running_port(self, actual_org, actual_agent):
             assert (actual_org, actual_agent) == (org, agent)
 
@@ -1250,3 +1252,66 @@ def test_workspace_creation_lookup_requires_the_bound_organization(tmp_path):
         "state": "reserved",
         "native_receipt": None,
     }
+
+
+def test_model_default_uses_applied_profile_instead_of_persistent_native_catalog(
+    tmp_path, monkeypatch
+):
+    app, org, agent, _token, _codex = _app(tmp_path)
+    host = app.state.host_store
+    previous = HostAgentConfiguration.model_validate_json(
+        host.agent(org, agent)["applied_envelope"]
+    )
+    profile = str(uuid4())
+    changed = previous.model_copy(
+        update={
+            "version": 2,
+            "configuration": previous.configuration.model_copy(
+                update={"profile_id": UUID(profile)}
+            ),
+        }
+    )
+    host.stage_agent(changed)
+    host.mark_applied(changed)
+    received = []
+
+    class NativeRuntime:
+        store = host
+        image = "fesnyng-agent:pinned"
+
+        async def running_port(self, _org, _agent):
+            return None
+
+    class Discovery:
+        def __init__(self, image, credentials):
+            assert image == "fesnyng-agent:pinned"
+
+        async def list_models(self, actual_org, actual_profile):
+            assert (actual_org, actual_profile) == (org, profile)
+            return {"data": [{"model": "gpt-6-astra", "defaultReasoningEffort": "low"}]}
+
+    class Transport:
+        async def call(self, _org, _agent, method, params):
+            assert method == "turn/start", (
+                "Persistent native inventory may belong to the previous profile"
+            )
+            received.append(params)
+            return {"turn": {"id": "turn"}}
+
+    async def resume(*_args):
+        return None
+
+    monkeypatch.setattr("fesnyng_backend.codex_runtime.CodexModelDiscovery", Discovery)
+    runtime = CodexRuntime(cast(Any, NativeRuntime()))
+    runtime.transport = cast(Any, Transport())
+    runtime.profile_credential_access = cast(Any, object())
+    cast(Any, runtime)._resume = resume
+    asyncio.run(
+        runtime.call(
+            org,
+            agent,
+            "turn/start",
+            {"threadId": "thread", "model": "gpt-6-astra", "effort": None, "input": []},
+        )
+    )
+    assert received[0]["effort"] == "low"

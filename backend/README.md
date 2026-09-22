@@ -89,10 +89,11 @@ The host starts a short-lived, named `--rm` App Server container from its pinned
 agent image, authenticates it over JSON-RPC stdin using that host-local profile,
 requests every `model/list` page with `includeHidden: true`, and removes the exact
 container on completion or failure. It does not reuse an employee container, mount
-employee state, or return access credentials. Native discovery failure is returned
-to the settings caller; there is no static model fallback. The nullable
-`configuration.reasoning_effort` uses the selected model default when null. Every
-new Codex turn sends that null explicitly, which clears an earlier App Server
+employee state, or return access credentials. A fresh in-memory home and a native remote-cache receipt establish that the
+catalog came from the selected account; bundled-only fallback is rejected.
+Native discovery failure is returned to the settings caller. The nullable
+`configuration.reasoning_effort` uses the selected model default when null. Before each new Codex turn, the adapter resolves that setting through the
+applied profile to an explicit native default effort. This replaces any earlier
 turn-level override on existing threads at the next safe turn boundary.
 
 New thread directories are prepared under the host's organization/employee-scoped

@@ -91,7 +91,15 @@ class CodexRuntime:
         model = params.get("model")
         if not isinstance(model, str) or not model:
             raise RuntimeUnavailable("Codex turn model is unavailable")
-        inventory = await self.list_models(organization_id, agent_id)
+        applied = self.runtime.store.agent(organization_id, agent_id)["applied_envelope"]
+        configuration = HostAgentConfiguration.model_validate_json(applied).configuration
+        # A persistent App Server cache is not keyed by account. Re-discover
+        # through the applied profile before resolving its default.
+        inventory = (
+            await self.discover_models(organization_id, str(configuration.profile_id))
+            if configuration.profile_id is not None
+            else await self.list_models(organization_id, agent_id)
+        )
         data = inventory.get("data")
         if not isinstance(data, list):
             raise RuntimeUnavailable("Codex model inventory receipt is invalid")
