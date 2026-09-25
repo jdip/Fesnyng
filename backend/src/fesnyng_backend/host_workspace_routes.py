@@ -372,6 +372,10 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                 RuntimeRouter.require_supported(session["runtime_type"])
     workspace = _workspace(request)
 
+    guard = request.app.state.maintenance_guard
+    with host_errors():
+        guard.require_events_open()
+
     async def stream():
         queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
 
@@ -444,7 +448,7 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                 task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return StreamingResponse(guard.event_stream(stream()), media_type="text/event-stream")
 
 
 @router.get("/agents/{agent_id}/opencode/file")

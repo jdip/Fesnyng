@@ -14,6 +14,7 @@ from fesnyng_backend.codex_runtime import CodexRuntime
 from fesnyng_backend.host_codex_routes import router
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_interactions import Interactions
+from fesnyng_backend.host_maintenance import MaintenanceGuard
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_runtime import RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
@@ -232,6 +233,7 @@ def _app(tmp_path, *, policy_applied=True):
     codex = Codex()
     app = FastAPI()
     app.state.host_store = store
+    app.state.maintenance_guard = MaintenanceGuard(store)
     app.state.host_runtime = Runtime(store, codex)
     app.state.dispatch_store = dispatches
     app.state.interactions = Interactions(store, app.state.host_runtime)

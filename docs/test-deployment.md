@@ -106,7 +106,11 @@ For a changed revision, the deployer builds a non-live release, then uses
 the host-local maintenance token file to acquire admission immediately before the
 symlink swap. It restarts both services, requires their health revisions to match,
 and only then releases admission. Busy or unavailable maintenance defers without
-changing `current`. After the restarted services report the selected revision,
+changing `current`. Once quiescence is verified, maintenance drains existing host
+event streams and rejects reconnects until release. Their control-plane relays
+finish on host EOF, so idle browser streams do not hold either service shutdown
+open. A deferred acquisition leaves those streams connected. After the restarted
+services report the selected revision,
 the updater calls the private `/maintenance/rollout` operation before releasing
 admission. The host compares Docker image contents (layers and configuration),
 following checkpoint ancestry, and rebuilds only stale running agents through
