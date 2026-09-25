@@ -115,7 +115,17 @@ private deployment configuration, bounding slow or blocked HTTP sends before
 systemd's stop timeout. The selected deployer adds this setting to existing
 installations without replacing their configuration; a conflicting custom value
 is preserved and reported. An already running process gets the bound only on its
-next start. After the restarted services report the selected revision,
+next start. During preparation, the selected deployer also installs the canonical
+[`fesnyng-test-service-exit.conf`](../deployment/systemd/fesnyng-test-service-exit.conf)
+as `50-fesnyng-exit-status.conf` under each service's user-unit drop-in directory,
+for both fresh and existing installations. It preserves the unit and other drop-ins,
+rejects conflicting managed files, reloads systemd, and verifies the effective
+settings. Numeric exit 143 from the uv launcher is classified as clean termination;
+`RestartForceExitStatus=143` retains automatic recovery when termination was not
+requested by a systemd stop or restart. Other failures and shutdown timeouts retain
+their existing handling. This classification alone does not prove that application
+shutdown completed: verify application shutdown logs and the subsequent health
+revision as usual. After the restarted services report the selected revision,
 the updater calls the private `/maintenance/rollout` operation before releasing
 admission. The host compares Docker image contents (layers and configuration),
 following checkpoint ancestry, and rebuilds only stale running agents through
