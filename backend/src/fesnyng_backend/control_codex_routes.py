@@ -79,7 +79,10 @@ def _response(reply: HostResponse, operation: str | None = None) -> Response:
     )
 
 
-@router.api_route("/{resource_path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+@router.get("/{resource_path:path}", operation_id="codex_workspace_get")
+@router.post("/{resource_path:path}", operation_id="codex_workspace_post")
+@router.patch("/{resource_path:path}", operation_id="codex_workspace_patch")
+@router.delete("/{resource_path:path}", operation_id="codex_workspace_delete")
 async def proxy(request: Request, organization_id: UUID, agent_id: UUID, resource_path: str):
     if not _allowed(request.method, resource_path):
         raise HTTPException(404, "Codex operation not found")

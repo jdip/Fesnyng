@@ -152,7 +152,10 @@ def _pinned_sessions(reply: HostResponse, pinned: list[str]) -> HostResponse:
     )
 
 
-@router.api_route("/{resource_path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+@router.get("/{resource_path:path}", operation_id="opencode_workspace_get")
+@router.post("/{resource_path:path}", operation_id="opencode_workspace_post")
+@router.patch("/{resource_path:path}", operation_id="opencode_workspace_patch")
+@router.delete("/{resource_path:path}", operation_id="opencode_workspace_delete")
 async def facade(
     request: Request, organization_id: UUID, agent_id: UUID, resource_path: str
 ) -> Response:
