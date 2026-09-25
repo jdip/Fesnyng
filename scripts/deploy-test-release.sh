@@ -74,9 +74,43 @@ configure_shutdown() {
     return 1
   fi
 }
+configure_service_exits() {
+  local unit directory destination updated success forced prevented
+  local settings="$release/deployment/systemd/fesnyng-test-service-exit.conf"
+  for unit in fesnyng-test-control.service fesnyng-test-host.service; do
+    directory="$HOME/.config/systemd/user/$unit.d"
+    destination="$directory/50-fesnyng-exit-status.conf"
+    [[ ! -L $directory ]] || { log failed "$target_revision" 'reason=linked-service-dropin-directory'; return 1; }
+    mkdir -p -- "$directory"
+    if [[ -e $destination || -L $destination ]]; then
+      if [[ -L $destination || ! -f $destination ]] || ! cmp -s -- "$settings" "$destination"; then
+        log failed "$target_revision" 'reason=conflicting-service-exit-settings'
+        return 1
+      fi
+    else
+      updated=$(mktemp "$directory/.fesnyng-exit.XXXXXX")
+      if ! install -m 600 -- "$settings" "$updated" || ! mv -T -- "$updated" "$destination"; then
+        rm -f -- "$updated"
+        return 1
+      fi
+    fi
+  done
+  systemctl --user daemon-reload
+  for unit in fesnyng-test-control.service fesnyng-test-host.service; do
+    success=$(systemctl --user show "$unit" -p SuccessExitStatus --value)
+    forced=$(systemctl --user show "$unit" -p RestartForceExitStatus --value)
+    prevented=$(systemctl --user show "$unit" -p RestartPreventExitStatus --value)
+    if [[ " $success " != *' 143 '* || " $forced " != *' 143 '* || " $prevented " == *' 143 '* ]]; then
+      log failed "$target_revision" 'reason=ineffective-service-exit-settings'
+      return 1
+    fi
+  done
+}
 prepare() {
   stage=shutdown-configuration
   configure_shutdown
+  stage=service-exit-configuration
+  configure_service_exits
   stage=dependencies
   log start "$target_revision" 'stage=dependencies'
   (cd "$release"; "$UV_BIN" sync --locked --project backend; npm ci --prefix frontend; npm ci --prefix agent-runtime)
