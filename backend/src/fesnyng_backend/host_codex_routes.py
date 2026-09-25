@@ -593,6 +593,10 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
     with host_errors():
         adapter, _ = _codex(request, org, agent)
 
+    guard = request.app.state.maintenance_guard
+    with host_errors():
+        guard.require_events_open()
+
     async def stream() -> AsyncIterator[str]:
         async for notification in adapter.events(org, agent):
             thread_id = _event_thread_id(notification)
@@ -615,4 +619,4 @@ async def events(request: Request, organization_id: UUID, agent_id: UUID):
                     )
             yield f"event: message\ndata: {json.dumps(notification, separators=(',', ':'))}\n\n"
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return StreamingResponse(guard.event_stream(stream()), media_type="text/event-stream")

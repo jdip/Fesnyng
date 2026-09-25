@@ -18,6 +18,7 @@ from fesnyng_backend.host_dispatch import DispatchStore, HostSubmission
 from fesnyng_backend.host_history import capture_session_history
 from fesnyng_backend.host_interactions import Interactions
 from fesnyng_backend.host_models import Actor, NativeID, SessionCreate, WorkspaceExpectation
+from fesnyng_backend.host_native_sessions import native_children, visit_native_child
 from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable, WorkspaceSafetyChanged
 from fesnyng_backend.host_store import HostStore
 from fesnyng_backend.host_workspace_lifecycle import WorkspaceLifecycle, workspace_history_snapshot
@@ -1284,30 +1285,22 @@ class Workspace:
                 f"/session/{parent['session_id']}/children",
                 directory=parent["directory"],
             )
-            if not isinstance(children, list):
-                raise RuntimeUnavailable("Native child sessions response is invalid")
-            for child in children:
-                if not isinstance(child, Mapping):
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                child_id = self._native_id(child.get("id"))
-                directory = child.get("directory")
-                if child.get("parentID") != parent["session_id"] or not isinstance(directory, str):
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+            for child_id, directory in native_children(
+                children, parent["session_id"], require_nonempty_directory=False
+            ):
                 if child_id in mapped:
                     if mapped[child_id]["directory"] != directory:
                         raise RuntimeUnavailable("Native child session ancestry is invalid")
                     # Explicitly mapped forks are roots in the façade even
                     # when native reports their parent relationship.
                     continue
-                if child_id in seen:
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+                visit_native_child(child_id, seen)
                 record = {
                     "session_id": child_id,
                     "directory": directory,
                     "root_session_id": parent["root_session_id"],
                     "runtime_type": parent["runtime_type"],
                 }
-                seen.add(child_id)
                 result.append(record)
                 pending.append(record)
         return result
@@ -1323,18 +1316,10 @@ class Workspace:
             children = await runtime.request(
                 org, agent, f"/session/{parent_id}/children", directory=directory
             )
-            if not isinstance(children, list):
-                raise RuntimeUnavailable("Native child sessions response is invalid")
-            for child in children:
-                if not isinstance(child, Mapping):
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                child_id = self._native_id(child.get("id"))
-                child_directory = child.get("directory")
-                if child.get("parentID") != parent_id or not isinstance(child_directory, str):
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
-                if child_id in seen:
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
-                seen.add(child_id)
+            for child_id, child_directory in native_children(
+                children, parent_id, require_nonempty_directory=False
+            ):
+                visit_native_child(child_id, seen)
                 count += 1
                 pending.append((child_id, child_directory))
         return count
@@ -1406,23 +1391,14 @@ class Workspace:
                 f"/session/{parent['session_id']}/children",
                 directory=parent["directory"],
             )
-            if not isinstance(children, list):
-                raise RuntimeUnavailable("Native child sessions response is invalid")
-            for child in children:
-                if not isinstance(child, Mapping):
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                child_id = self._native_id(child.get("id"))
-                child_directory = child.get("directory")
-                if child.get("parentID") != parent["session_id"] or not isinstance(
-                    child_directory, str
-                ):
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+            for child_id, child_directory in native_children(
+                children, parent["session_id"], require_nonempty_directory=False
+            ):
                 if child_id in mapped:
                     if mapped[child_id]["directory"] != child_directory:
                         raise RuntimeUnavailable("Native child session ancestry is invalid")
                     continue
-                if child_id in seen:
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
+                visit_native_child(child_id, seen)
                 if child_id == session_id:
                     return {
                         "session_id": child_id,
@@ -1430,7 +1406,6 @@ class Workspace:
                         "root_session_id": parent["root_session_id"],
                         "runtime_type": parent["runtime_type"],
                     }
-                seen.add(child_id)
                 pending.append(
                     {
                         "session_id": child_id,

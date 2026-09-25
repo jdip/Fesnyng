@@ -1,7 +1,8 @@
 """Host-local maintenance admission that remains closed until an explicit release."""
 
 import asyncio
-from contextlib import AsyncExitStack
+from collections.abc import AsyncGenerator
+from contextlib import AsyncExitStack, aclosing
 from typing import Any
 
 from fesnyng_backend.host_runtime import RuntimeUnavailable
@@ -27,6 +28,9 @@ class MaintenanceGuard:
         self.peer_delivery: Any | None = None
         self.lifecycle: Any | None = None
         self.operation_lock = asyncio.Lock()
+        self.stream_drain = asyncio.Event()
+        if store.maintenance_status()["state"] == "closed":
+            self.stream_drain.set()
 
     async def acquire(self) -> dict[str, str]:
         async with self.operation_lock:
@@ -40,7 +44,35 @@ class MaintenanceGuard:
         except MaintenanceBusy:
             self.store.open_maintenance_admission()
             raise
+        self.stream_drain.set()
         return self.store.maintenance_status()
+
+    def require_events_open(self) -> None:
+        if self.stream_drain.is_set():
+            raise ValueError("Host maintenance is draining event streams")
+
+    async def event_stream(self, source: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
+        """End idle responses after quiescence, including a blocked native read."""
+        drained = asyncio.create_task(self.stream_drain.wait())
+        pending: asyncio.Task[str] | None = None
+        async with aclosing(source):
+            try:
+                while not self.stream_drain.is_set():
+                    pending = asyncio.create_task(anext(source))
+                    done, _ = await asyncio.wait(
+                        (pending, drained), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if drained in done:
+                        return
+                    try:
+                        yield pending.result()
+                    except StopAsyncIteration:
+                        return
+            finally:
+                tasks = [drained, *([pending] if pending is not None else [])]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def require_quiet(self) -> None:
         """Hold runtime locks while verifying every owner has settled work."""
@@ -125,4 +157,5 @@ class MaintenanceGuard:
     async def release(self) -> dict[str, str]:
         async with self.operation_lock:
             self.store.open_maintenance_admission()
+            self.stream_drain.clear()
             return self.store.maintenance_status()
