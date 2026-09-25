@@ -17,13 +17,15 @@ release=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 read_revision() { [[ -r $1/.fesnyng-revision ]] && cat "$1/.fesnyng-revision"; }
 write_curl_config() { umask 077; printf 'header = "Authorization: Bearer %s"\n' "$(<"$MAINTENANCE_TOKEN_FILE")" > "$MAINTENANCE_CURL_CONFIG"; }
 maintenance() {
-  local action=$1 body status payload state reason
+  local action=$1 body status payload state reason timeout=20
+  [[ $action != rollout ]] || timeout=1800
   body=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/fesnyng-maintenance.XXXXXX")
-  status=$(curl --connect-timeout 5 --max-time 20 --silent --show-error --output "$body" --write-out '%{http_code}' --config "$MAINTENANCE_CURL_CONFIG" -X POST "http://127.0.0.1:$HOST_PORT/maintenance/$action" || true)
+  status=$(curl --connect-timeout 5 --max-time "$timeout" --silent --show-error --output "$body" --write-out '%{http_code}' --config "$MAINTENANCE_CURL_CONFIG" -X POST "http://127.0.0.1:$HOST_PORT/maintenance/$action" || true)
   payload=$(<"$body"); rm -f -- "$body"
   state=$(python3 -c 'import json,sys; value=json.load(sys.stdin); print(value.get("state", ""))' <<<"$payload" 2>/dev/null || true)
   reason=$(python3 -c 'import json,sys; value=json.load(sys.stdin); print(value.get("reason", ""))' <<<"$payload" 2>/dev/null || true)
   [[ $action == acquire && $status == 200 && $state == closed ]] && return 0
+  [[ $action == rollout && $status == 200 && $state == closed ]] && return 0
   [[ $action == release && $status == 200 && $state == open ]] && return 0
   if [[ $action == acquire && $status == 409 && $state == open ]]; then
     case $reason in
@@ -82,7 +84,13 @@ activate() {
   mv -Tf "$DEPLOY_BASE/current.next" "$DEPLOY_BASE/current"
   stage=restart; log start "$target_revision" 'stage=restart'; systemctl --user restart fesnyng-test-control.service fesnyng-test-host.service; log complete "$target_revision" 'stage=restart'
   stage=health; if ! health_has_revision "$CONTROL_PORT" || ! health_has_revision "$HOST_PORT"; then return 1; fi
-  [[ $initial == true ]] || { stage=release; maintenance release; }
+  if [[ $initial == false ]]; then
+    stage=runtime-rollout; log start "$target_revision" 'stage=runtime-rollout'
+    maintenance rollout
+    log complete "$target_revision" 'stage=runtime-rollout'
+    stage=health; if ! health_has_revision "$CONTROL_PORT" || ! health_has_revision "$HOST_PORT"; then return 1; fi
+    stage=release; maintenance release
+  fi
   log complete "$target_revision" 'result=healthy'
 }
 current_revision=

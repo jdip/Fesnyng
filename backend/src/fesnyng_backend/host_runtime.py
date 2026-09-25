@@ -405,7 +405,7 @@ class DockerRuntime:
         )
         if name not in listed:
             return None
-        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}}}'
+        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}},"image":{{json .Image}}}'
         info = json.loads(await self.docker("inspect", "--format", template, name))
         expected = {
             "fesnyng.host": str(self.store.instance_id),
@@ -415,6 +415,66 @@ class DockerRuntime:
         if any(info["labels"].get(key) != value for key, value in expected.items()):
             raise RuntimeUnavailable("Container ownership mismatch; resource retained")
         return info
+
+    async def image_is_current(self, organization_id: str, agent_id: str) -> bool:
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is missing; rebuild is required")
+        selected = await self._runtime_image(self.image)
+        actual = info.get("image")
+        # Checkpoints add writable layers and retain their Docker parent. Follow
+        # that ancestry so code-only releases preserve checkpoint contents.
+        # Build attestations can change image IDs without changing the runtime;
+        # compare native layers and configuration, not manifest identity alone.
+        seen: set[str] = set()
+        for _ in range(128):
+            if not isinstance(actual, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", actual):
+                break
+            if actual == selected["id"]:
+                return True
+            if actual in seen:
+                break
+            seen.add(actual)
+            current = await self._runtime_image(actual)
+            if all(
+                current[key] == selected[key] for key in ("config", "rootfs", "architecture", "os")
+            ):
+                return True
+            actual = current["parent"]
+            if actual is None or actual == "":
+                return False
+        raise RuntimeUnavailable("Runtime image identity is invalid; resource retained")
+
+    async def _runtime_image(self, image: str) -> dict[str, Any]:
+        template = '{"id":{{json .Id}},"parent":{{json (index . "Parent")}},"config":{{json .Config}},"rootfs":{{json .RootFS}},"architecture":{{json .Architecture}},"os":{{json .Os}}}'
+        try:
+            info = json.loads(await self.docker("image", "inspect", "--format", template, image))
+            rootfs = info["rootfs"]
+            valid = (
+                isinstance(info["id"], str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", info["id"])
+                and isinstance(info["config"], dict)
+                and isinstance(rootfs, dict)
+                and rootfs.get("Type") == "layers"
+                and isinstance(rootfs.get("Layers"), list)
+                and bool(rootfs["Layers"])
+                and all(
+                    isinstance(layer, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+                    for layer in rootfs["Layers"]
+                )
+                and isinstance(info["architecture"], str)
+                and bool(info["architecture"])
+                and isinstance(info["os"], str)
+                and bool(info["os"])
+                and "parent" in info
+            )
+            if valid:
+                return info
+        except (ValueError, KeyError, TypeError):
+            pass
+        # Image configuration may include environment credentials. Never include
+        # the inspected data in diagnostics.
+        raise RuntimeUnavailable("Runtime image identity is unavailable; resource retained")
 
     def native_port(self, organization_id: str, agent_id: str) -> int:
         try:
@@ -486,6 +546,7 @@ class DockerRuntime:
     async def rebuild(self, organization_id: str, agent_id: str) -> None:
         await self._require_retained_volumes(agent_id)
         info = await self.inspect(organization_id, agent_id)
+        await self.codex.transport.close_agent(organization_id, agent_id)
         if info is not None:
             if info["state"]["Running"]:
                 await self.docker("stop", "--time", "30", self.name(agent_id))

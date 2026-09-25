@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from fesnyng_backend.host_maintenance import MaintenanceAlreadyActive, MaintenanceBusy
+from fesnyng_backend.host_runtime import RuntimeUnavailable
 
 router = APIRouter(tags=["host maintenance"])
 
@@ -70,6 +71,17 @@ async def acquire(request: Request):
 
 
 @router.post("/maintenance/release")
-def release(request: Request):
+async def release(request: Request):
     require_maintenance_access(request)
-    return request.app.state.maintenance_guard.release()
+    return await request.app.state.maintenance_guard.release()
+
+
+@router.post("/maintenance/rollout")
+async def rollout(request: Request):
+    require_maintenance_access(request)
+    try:
+        return await request.app.state.maintenance_guard.rollout()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    except RuntimeUnavailable as error:
+        raise HTTPException(503, str(error)) from None

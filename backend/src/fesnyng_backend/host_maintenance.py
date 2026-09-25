@@ -25,8 +25,14 @@ class MaintenanceGuard:
         self.activity_locks: list[asyncio.Lock] = []
         self.dispatcher: Any | None = None
         self.peer_delivery: Any | None = None
+        self.lifecycle: Any | None = None
+        self.operation_lock = asyncio.Lock()
 
     async def acquire(self) -> dict[str, str]:
+        async with self.operation_lock:
+            return await self._acquire()
+
+    async def _acquire(self) -> dict[str, str]:
         if not self.store.close_maintenance_admission():
             raise MaintenanceAlreadyActive("Maintenance admission is already closed")
         try:
@@ -102,6 +108,21 @@ class MaintenanceGuard:
         if reason is not None:
             raise MaintenanceBusy(reason)
 
-    def release(self) -> dict[str, str]:
-        self.store.open_maintenance_admission()
-        return self.store.maintenance_status()
+    async def rollout(self) -> dict[str, str | int]:
+        async with self.operation_lock:
+            if self.store.maintenance_status()["state"] != "closed":
+                raise ValueError("Runtime rollout requires closed maintenance admission")
+            if self.lifecycle is None:
+                raise RuntimeError("Host lifecycle owner is unavailable")
+            await self.require_quiet()
+            updated = 0
+            for agent in self.store.maintenance_agents():
+                updated += await self.lifecycle.rollout_runtime(
+                    agent["organization_id"], agent["agent_id"]
+                )
+            return {"state": "closed", "updated": updated}
+
+    async def release(self) -> dict[str, str]:
+        async with self.operation_lock:
+            self.store.open_maintenance_admission()
+            return self.store.maintenance_status()

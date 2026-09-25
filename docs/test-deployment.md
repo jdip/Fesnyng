@@ -106,7 +106,17 @@ For a changed revision, the deployer builds a non-live release, then uses
 the host-local maintenance token file to acquire admission immediately before the
 symlink swap. It restarts both services, requires their health revisions to match,
 and only then releases admission. Busy or unavailable maintenance defers without
-changing `current`. A failure after acquire deliberately leaves admission closed:
+changing `current`. After the restarted services report the selected revision,
+the updater calls the private `/maintenance/rollout` operation before releasing
+admission. The host compares Docker image contents (layers and configuration),
+following checkpoint ancestry, and rebuilds only stale running agents through
+the existing retained-volume lifecycle owner. It reapplies their settled
+configuration and reconciles retained history. Equivalent image builds and
+different release tags do not replace containers or discard checkpoint layers. Intentionally stopped
+agents remain stopped and receive the current image on their next explicit Start;
+unsettled effects prevent replacement. The rollout request is bounded at 30 minutes.
+A timeout or partial replacement requires inspection; the updater does not retry
+or resume it automatically. A failure after acquire deliberately leaves admission closed:
 inspect the journal and both health endpoints, repair the retained release, then
 POST `/maintenance/release` on loopback with the private curl config. Do not
 delete state, interrupt agents, or use rollback automation.

@@ -305,8 +305,11 @@ def test_lifecycle_waiting_on_runtime_inspection_cannot_transition_after_acquire
                 inspection_started.set()
                 await release_inspection.wait()
 
-        async def assert_quiet(self, _org: str, _agent: str) -> None:
+        async def assert_quiet(self, organization_id: str, agent_id: str) -> None:
             return None
+
+        async def image_is_current(self, organization_id: str, agent_id: str) -> bool:
+            raise AssertionError("lifecycle must not start")
 
         async def start(self, organization_id: str, agent_id: str) -> None:
             raise AssertionError("lifecycle must not start")
@@ -338,6 +341,9 @@ def test_lifecycle_waiting_on_runtime_inspection_cannot_transition_after_acquire
 
     class Configuration:
         async def apply_agent(self, organization_id: str, agent_id: str) -> str:
+            raise AssertionError("lifecycle must not start")
+
+        async def refresh_runtime(self, organization_id: str, agent_id: str) -> None:
             raise AssertionError("lifecycle must not start")
 
     runtime = Runtime()
@@ -432,3 +438,92 @@ def test_maintenance_acquire_defers_busy_or_unknown_native_work_for_each_harness
             }
 
     asyncio.run(check())
+
+
+def test_runtime_rollout_is_private_requires_maintenance_and_keeps_failure_closed(
+    tmp_path, monkeypatch
+):
+    token = secrets.token_urlsafe(32)
+    monkeypatch.setenv("FESNYNG_MAINTENANCE_TOKEN", token)
+    settings = ServiceSettings(
+        service="agent-host",
+        database_path=tmp_path / "host.sqlite3",
+        state_directory=tmp_path / "state",
+    )
+    app = create_app(settings)
+    store = app.state.host_store
+    org, agent = str(uuid4()), str(uuid4())
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Rollout"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+
+    class Runtime:
+        def lock(self, agent_id):
+            return asyncio.Lock()
+
+        async def assert_quiet(self, organization_id, agent_id):
+            return None
+
+    class Lifecycle:
+        fail = False
+        calls = 0
+
+        async def rollout_runtime(self, organization_id, agent_id):
+            assert store.maintenance_status() == {"state": "closed"}
+            self.calls += 1
+            if self.fail:
+                raise RuntimeUnavailable("image replacement failed")
+            return True
+
+    lifecycle = Lifecycle()
+    app.state.maintenance_guard.runtime = Runtime()
+    app.state.maintenance_guard.lifecycle = lifecycle
+
+    async def check():
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 8000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://host") as client:
+            assert (await client.post("/maintenance/rollout")).status_code == 401
+            client.headers["Authorization"] = f"Bearer {token}"
+            assert (await client.post("/maintenance/rollout")).status_code == 409
+            assert lifecycle.calls == 0
+            assert (await client.post("/maintenance/acquire")).status_code == 200
+            result = await client.post("/maintenance/rollout")
+            assert result.status_code == 200
+            assert result.json() == {"state": "closed", "updated": 1}
+            lifecycle.fail = True
+            assert (await client.post("/maintenance/rollout")).status_code == 503
+            assert (await client.get("/maintenance")).json() == {"state": "closed"}
+        remote = httpx.ASGITransport(app=app, client=("192.0.2.1", 8000))
+        async with httpx.AsyncClient(transport=remote, base_url="http://host") as client:
+            assert (
+                await client.post(
+                    "/maintenance/rollout", headers={"Authorization": f"Bearer {token}"}
+                )
+            ).status_code == 403
+        assert lifecycle.calls == 2
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("runtime_state", ["checkpointing", "replacing"])
+def test_maintenance_defers_interrupted_checkpoint_replacement(tmp_path, runtime_state):
+    app = create_app(
+        ServiceSettings(
+            service="agent-host",
+            database_path=tmp_path / "host.sqlite3",
+            state_directory=tmp_path / "state",
+        )
+    )
+    store = app.state.host_store
+    org, agent = str(uuid4()), str(uuid4())
+    store.bind_organization(org, secrets.token_urlsafe(32))
+    envelope = HostAgentConfiguration(
+        host_id=store.instance_id, organization_id=org, agent_id=agent, version=1, name="Checkpoint"
+    )
+    store.stage_agent(envelope)
+    store.mark_applied(envelope)
+    store.set_runtime_state(org, agent, runtime_state)
+    assert store.maintenance_pending_reason() == "configuration or lifecycle transition"

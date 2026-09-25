@@ -86,6 +86,25 @@ class HostConfiguration:
         envelope = HostAgentConfiguration.model_validate_json(current["desired_envelope"])
         return (await self._reconcile_agent(envelope, lifecycle_operation=True))[1]
 
+    async def refresh_runtime(self, organization_id: str, agent_id: str) -> None:
+        """Restore the already-applied configuration during a gated image rollout."""
+        async with self.runtime.lock(agent_id):
+            if self.host.maintenance_status()["state"] != "closed":
+                raise ValueError("Runtime refresh requires closed maintenance admission")
+            current = self.host.agent(organization_id, agent_id)
+            if (
+                not current["applied_envelope"]
+                or current["desired_envelope"] != current["applied_envelope"]
+                or current["switch_state"] is not None
+                or current["lifecycle_state"] != "recovering"
+            ):
+                raise RuntimeUnavailable("Runtime refresh requires settled configuration")
+            self._require_safe_delivery_effects(organization_id, agent_id)
+            await self.runtime.assert_quiet(organization_id, agent_id)
+            await self.runtime.configure(
+                HostAgentConfiguration.model_validate_json(current["applied_envelope"])
+            )
+
     async def switch_harness(
         self, organization_id: str, agent_id: str, expected_version: int, target_runtime: str
     ) -> dict[str, object]:

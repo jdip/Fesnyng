@@ -1,6 +1,7 @@
 """Owned-resource teardown support for opt-in Docker proofs."""
 
 import asyncio
+import os
 import shutil
 import signal
 import sys
@@ -82,6 +83,26 @@ async def _dispose_proof(
             return None
 
     container = await attempt(lambda: runtime.inspect(organization_id, agent_id))
+    # Native tools run as root inside the employee and can create root-owned
+    # directories in this proof's bind-mounted workspace. Restore only that
+    # proven-owned subtree before removing successful fixtures on the host.
+    workspace = runtime.employee_workspace_root(organization_id, agent_id)
+    if (
+        verified
+        and container is not None
+        and container["state"]["Running"]
+        and workspace.is_relative_to(state_directory)
+    ):
+        await attempt(
+            lambda: runtime.docker(
+                "exec",
+                runtime.name(agent_id),
+                "chown",
+                "-hR",
+                f"{os.getuid()}:{os.getgid()}",
+                str(workspace),
+            )
+        )
     if container is not None and container["state"]["Running"]:
         await attempt(lambda: runtime.stop(organization_id, agent_id))
         container = await attempt(lambda: runtime.inspect(organization_id, agent_id))

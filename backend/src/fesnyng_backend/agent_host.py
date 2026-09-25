@@ -149,6 +149,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         app.state.dispatcher,
         app.state.host_configuration,
     )
+    app.state.maintenance_guard.lifecycle = app.state.agent_lifecycle
 
     async def reconcile_configuration():
         while True:
