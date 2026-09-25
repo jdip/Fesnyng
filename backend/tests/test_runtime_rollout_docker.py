@@ -63,8 +63,18 @@ def test_rollout_and_deferred_start_preserve_native_state(harness):
             await runtime.write_file(
                 org, agent, "/workspace/rollout-proof.txt", "retained workspace"
             )
+            await runtime.write_file(org, agent, "/opt/rollout-checkpoint.txt", "retained layer")
+            await runtime.replace(org, agent)
             original = await container_id()
             await guard.acquire()
+            assert await guard.rollout() == {"state": "closed", "updated": 0}
+            assert await container_id() == original
+            assert (
+                await runtime.docker(
+                    "exec", runtime.name(agent), "cat", "/opt/rollout-checkpoint.txt"
+                )
+                == b"retained layer"
+            )
             runtime.image = new_image
             assert await guard.rollout() == {"state": "closed", "updated": 1}
             replacement = await container_id()
@@ -131,7 +141,16 @@ def test_rollout_and_deferred_start_preserve_native_state(harness):
         verified = True
     finally:
         with _defer_proof_interrupts() as deferred:
-            cleaned = asyncio.run(_dispose_proof(runtime, org, agent, directory, verified=verified))
+            cleaned = asyncio.run(
+                _dispose_proof(
+                    runtime,
+                    org,
+                    agent,
+                    directory,
+                    verified=verified,
+                    snapshot_image=store.agent(org, agent)["snapshot_image"],
+                )
+            )
         interrupts.extend(deferred)
         if verified and not cleaned:
             raise RuntimeError("Rollout proof cleanup failed")

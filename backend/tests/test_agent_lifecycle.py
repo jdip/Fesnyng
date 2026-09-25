@@ -455,6 +455,8 @@ def test_image_identity_uses_immutable_id_and_rejects_missing_image_evidence(tmp
             return {"image": self.actual}
 
         async def docker(self, *args, content=None):
+            if args == ("image", "inspect", "--format", "{{.Parent}}", self.actual):
+                return b""
             assert args == ("image", "inspect", "--format", "{{.Id}}", "new-release-tag")
             return self.selected.encode()
 
@@ -496,3 +498,28 @@ def test_failed_rollout_preserves_recovery_state_and_closed_admission(tmp_path, 
         asyncio.run(lifecycle.rollout_runtime(organization, agent))
     assert store.agent_status(organization, agent)["lifecycle_state"] == "recovery_required"
     assert store.maintenance_status() == {"state": "closed"}
+
+
+def test_checkpoint_image_keeps_its_underlying_runtime_identity(tmp_path):
+    store, organization, agent = _applied_agent(tmp_path)
+    base = "sha256:" + "a" * 64
+    checkpoint = "sha256:" + "b" * 64
+    nested = "sha256:" + "c" * 64
+
+    class CheckpointRuntime(DockerRuntime):
+        selected = base
+
+        async def inspect(self, organization_id, agent_id):
+            return {"image": nested}
+
+        async def docker(self, *args, content=None):
+            assert args[:3] == ("image", "inspect", "--format")
+            if args[3] == "{{.Id}}":
+                return self.selected.encode()
+            assert args[3] == "{{.Parent}}"
+            return {nested: checkpoint, checkpoint: base, base: ""}[args[4]].encode()
+
+    runtime = CheckpointRuntime(store, "http://127.0.0.1:1", image="selected-image")
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is True
+    runtime.selected = "sha256:" + "d" * 64
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is False

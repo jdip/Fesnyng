@@ -426,12 +426,33 @@ class DockerRuntime:
             .strip()
         )
         actual = info.get("image")
-        if not all(
-            isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
-            for value in (selected, actual)
+        if (
+            not isinstance(actual, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", actual)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", selected)
         ):
             raise RuntimeUnavailable("Runtime image identity is unavailable; resource retained")
-        return actual == selected
+        # Checkpoint replacement adds a writable layer while retaining the
+        # runtime image as a Docker parent. A code-only release must preserve
+        # that layer rather than mistake the checkpoint for a runtime upgrade.
+        seen: set[str] = set()
+        for _ in range(128):
+            if actual == selected:
+                return True
+            if actual in seen:
+                break
+            seen.add(actual)
+            parent = (
+                (await self.docker("image", "inspect", "--format", "{{.Parent}}", actual))
+                .decode()
+                .strip()
+            )
+            if not parent:
+                return False
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", parent):
+                break
+            actual = parent
+        raise RuntimeUnavailable("Runtime image identity is invalid; resource retained")
 
     def native_port(self, organization_id: str, agent_id: str) -> int:
         try:
