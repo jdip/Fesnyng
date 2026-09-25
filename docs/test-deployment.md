@@ -108,10 +108,11 @@ symlink swap. It restarts both services, requires their health revisions to matc
 and only then releases admission. Busy or unavailable maintenance defers without
 changing `current`. After the restarted services report the selected revision,
 the updater calls the private `/maintenance/rollout` operation before releasing
-admission. The host compares immutable Docker image IDs and rebuilds only stale
-running agents through the existing retained-volume lifecycle owner, reapplies
-their settled configuration and reconciles retained history. Different release
-tags pointing to the same image do not replace containers. Intentionally stopped
+admission. The host compares Docker image contents (layers and configuration),
+following checkpoint ancestry, and rebuilds only stale running agents through
+the existing retained-volume lifecycle owner. It reapplies their settled
+configuration and reconciles retained history. Equivalent image builds and
+different release tags do not replace containers or discard checkpoint layers. Intentionally stopped
 agents remain stopped and receive the current image on their next explicit Start;
 unsettled effects prevent replacement. The rollout request is bounded at 30 minutes.
 A timeout or partial replacement requires inspection; the updater does not retry
