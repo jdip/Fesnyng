@@ -192,3 +192,22 @@ commands and owns its retained services.
 Use [the PR-to-test runbook](workflows/pr-to-test.md) and canonical script for review, merge and verification of the committed tree. Application checks now run as part of that script's local gate. Main promotion remains separate.
 
 During normal discovery, use `dependabot-upkeep` to read actionable alerts. Preserve alert-only protection and the operator-confirmed rules; empty alert lists do not prove hosted settings. Dependency changes update the owning manifest and lockfile together.
+
+### Runtime image rollout proof
+
+Build the candidate agent-runtime image, then provide an existing older image and
+that candidate to the opt-in proof:
+
+```bash
+FESNYNG_ROLLOUT_DOCKER_TESTS=true \
+FESNYNG_ROLLOUT_OLD_IMAGE=fesnyng-agent:previous \
+FESNYNG_ROLLOUT_NEW_IMAGE=fesnyng-agent:candidate \
+  uv run --locked --project backend pytest backend/tests/test_runtime_rollout_docker.py -q -s
+```
+
+The proof exercises both harnesses through the real maintenance and lifecycle
+owners: stale running-image replacement, unchanged-image no-op, intentional Stop,
+replacement on next Start, and retained native thread/home/workspace state. It
+also checks the pinned Codex version and native model inventory without provider
+credentials. Its exact containers and volumes are isolated; successful fixtures
+are removed, while failed compute is stopped and diagnostic state retained.

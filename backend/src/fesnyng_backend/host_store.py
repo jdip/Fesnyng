@@ -308,6 +308,7 @@ class HostStore:
             if connection.execute(
                 """SELECT 1 FROM host_agents
                 WHERE lifecycle_state NOT IN ('running','stopped')
+                   OR runtime_state IN ('checkpointing','replacing')
                    OR switch_state IS NOT NULL
                    OR (desired_state='running' AND (
                         applied_envelope IS NULL OR desired_envelope != applied_envelope

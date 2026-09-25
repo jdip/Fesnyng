@@ -304,6 +304,12 @@ class Runtime:
     def lock(self, agent_id):
         return self.locks.setdefault(agent_id, asyncio.Lock())
 
+    async def image_is_current(self, organization_id, agent_id):
+        return True
+
+    async def assert_quiet(self, organization_id, agent_id):
+        return None
+
     async def inspect(self, organization_id, agent_id):
         if self.container is None:
             return None
@@ -367,3 +373,126 @@ class Dispatcher:
 class Configuration:
     async def apply_agent(self, organization_id, agent_id):
         return "applied"
+
+    async def refresh_runtime(self, organization_id, agent_id):
+        return None
+
+
+def test_runtime_rollout_replaces_only_stale_running_agents_and_retains_maintenance(tmp_path):
+    store, organization, agent = _applied_agent(tmp_path)
+
+    class ImageRuntime(Runtime):
+        stale = True
+
+        async def image_is_current(self, organization_id, agent_id):
+            return not self.stale
+
+        async def assert_quiet(self, organization_id, agent_id):
+            assert store.maintenance_status() == {"state": "closed"}
+
+        async def rebuild(self, organization_id, agent_id):
+            await super().rebuild(organization_id, agent_id)
+            self.stale = False
+
+    class RolloutConfiguration(Configuration):
+        async def refresh_runtime(self, organization_id, agent_id):
+            assert store.maintenance_status() == {"state": "closed"}
+            runtime.events.append("configure")
+
+    runtime = ImageRuntime()
+    lifecycle = AgentLifecycle(store, runtime, Dispatcher(), RolloutConfiguration())
+
+    async def check():
+        with pytest.raises(ValueError, match="maintenance"):
+            await lifecycle.rollout_runtime(organization, agent)
+        assert runtime.events == []
+        assert store.close_maintenance_admission()
+        assert await lifecycle.rollout_runtime(organization, agent) is True
+        assert runtime.events == ["rebuild", "configure"]
+        assert (await lifecycle.status(organization, agent))["lifecycle_state"] == "running"
+        assert await lifecycle.rollout_runtime(organization, agent) is False
+        runtime.stale = True
+        runtime.container = "exited"
+        store.set_lifecycle_state(organization, agent, desired="stopped", state="stopped")
+        assert await lifecycle.rollout_runtime(organization, agent) is False
+        assert runtime.events == ["rebuild", "configure"]
+        assert store.maintenance_status() == {"state": "closed"}
+
+    asyncio.run(check())
+
+
+def test_start_updates_stopped_image_but_never_replaces_unsettled_effects(tmp_path):
+    store, organization, agent = _applied_agent(tmp_path)
+    store.set_lifecycle_state(organization, agent, desired="stopped", state="stopped")
+
+    class StaleRuntime(Runtime):
+        async def image_is_current(self, organization_id, agent_id):
+            return False
+
+    runtime = StaleRuntime(container="exited")
+    dispatcher = Dispatcher(settled=False)
+    lifecycle = AgentLifecycle(store, runtime, dispatcher, Configuration())
+    request = HostLifecycleRequest(
+        action="start", author=Actor(kind="human", id=uuid4(), name="Owner")
+    )
+    with pytest.raises(RuntimeUnavailable, match="reconciliation"):
+        asyncio.run(lifecycle.perform(organization, agent, request))
+    assert runtime.events == []
+    dispatcher.settled = True
+    result = asyncio.run(lifecycle.perform(organization, agent, request))
+    assert runtime.events == ["rebuild"]
+    assert result["lifecycle_state"] == "running"
+
+
+def test_image_identity_uses_immutable_id_and_rejects_missing_image_evidence(tmp_path):
+    store, organization, agent = _applied_agent(tmp_path)
+
+    class ImageRuntime(DockerRuntime):
+        selected = "sha256:" + "a" * 64
+        actual = "sha256:" + "a" * 64
+
+        async def inspect(self, organization_id, agent_id):
+            return {"image": self.actual}
+
+        async def docker(self, *args, content=None):
+            assert args == ("image", "inspect", "--format", "{{.Id}}", "new-release-tag")
+            return self.selected.encode()
+
+    runtime = ImageRuntime(store, "http://127.0.0.1:1", image="new-release-tag")
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is True
+    runtime.actual = "sha256:" + "b" * 64
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is False
+    runtime.selected = ""
+    with pytest.raises(RuntimeUnavailable, match="image identity"):
+        asyncio.run(runtime.image_is_current(organization, agent))
+
+
+@pytest.mark.parametrize("failure", ["rebuild", "configuration", "reconciliation", "cancelled"])
+def test_failed_rollout_preserves_recovery_state_and_closed_admission(tmp_path, failure):
+    store, organization, agent = _applied_agent(tmp_path)
+    store.close_maintenance_admission()
+
+    class StaleRuntime(Runtime):
+        async def image_is_current(self, organization_id, agent_id):
+            return False
+
+        async def rebuild(self, organization_id, agent_id):
+            if failure == "cancelled":
+                raise asyncio.CancelledError
+            if failure == "rebuild":
+                raise RuntimeUnavailable("replacement failed")
+            await super().rebuild(organization_id, agent_id)
+
+    class RolloutConfiguration(Configuration):
+        async def refresh_runtime(self, organization_id, agent_id):
+            if failure == "configuration":
+                raise RuntimeUnavailable("configuration failed")
+            if failure == "reconciliation":
+                dispatcher.settled = False
+
+    dispatcher = Dispatcher()
+    lifecycle = AgentLifecycle(store, StaleRuntime(), dispatcher, RolloutConfiguration())
+    with pytest.raises(asyncio.CancelledError if failure == "cancelled" else RuntimeUnavailable):
+        asyncio.run(lifecycle.rollout_runtime(organization, agent))
+    assert store.agent_status(organization, agent)["lifecycle_state"] == "recovery_required"
+    assert store.maintenance_status() == {"state": "closed"}

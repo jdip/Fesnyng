@@ -10,13 +10,13 @@
     "check": "eslint . && tsc --noEmit && node --test host-auth.test.mjs"
   },
   "dependencies": {
-    "@openai/codex": "0.154.0",
+    "@openai/codex": "0.156.1",
     "opencode-ai": "1.18.30"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "22.20.2",
     "eslint": "10.10.0",
-    "typescript": "5.7.3",
-    "@types/node": "22.20.2"
+    "typescript": "5.7.3"
   }
 }

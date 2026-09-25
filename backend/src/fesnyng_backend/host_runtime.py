@@ -405,7 +405,7 @@ class DockerRuntime:
         )
         if name not in listed:
             return None
-        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}}}'
+        template = '{"labels":{{json .Config.Labels}},"state":{{json .State}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}},"image":{{json .Image}}}'
         info = json.loads(await self.docker("inspect", "--format", template, name))
         expected = {
             "fesnyng.host": str(self.store.instance_id),
@@ -415,6 +415,23 @@ class DockerRuntime:
         if any(info["labels"].get(key) != value for key, value in expected.items()):
             raise RuntimeUnavailable("Container ownership mismatch; resource retained")
         return info
+
+    async def image_is_current(self, organization_id: str, agent_id: str) -> bool:
+        info = await self.inspect(organization_id, agent_id)
+        if info is None:
+            raise RuntimeUnavailable("Agent container is missing; rebuild is required")
+        selected = (
+            (await self.docker("image", "inspect", "--format", "{{.Id}}", self.image))
+            .decode()
+            .strip()
+        )
+        actual = info.get("image")
+        if not all(
+            isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+            for value in (selected, actual)
+        ):
+            raise RuntimeUnavailable("Runtime image identity is unavailable; resource retained")
+        return actual == selected
 
     def native_port(self, organization_id: str, agent_id: str) -> int:
         try:
@@ -486,6 +503,7 @@ class DockerRuntime:
     async def rebuild(self, organization_id: str, agent_id: str) -> None:
         await self._require_retained_volumes(agent_id)
         info = await self.inspect(organization_id, agent_id)
+        await self.codex.transport.close_agent(organization_id, agent_id)
         if info is not None:
             if info["state"]["Running"]:
                 await self.docker("stop", "--time", "30", self.name(agent_id))

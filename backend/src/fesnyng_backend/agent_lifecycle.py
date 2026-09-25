@@ -37,6 +37,10 @@ class Runtime(Protocol):
 
     async def rebuild(self, organization_id: str, agent_id: str) -> None: ...
 
+    async def image_is_current(self, organization_id: str, agent_id: str) -> bool: ...
+
+    async def assert_quiet(self, organization_id: str, agent_id: str) -> None: ...
+
 
 class Dispatcher(Protocol):
     async def agent_active(self, organization_id: str, agent_id: str) -> bool: ...
@@ -52,6 +56,8 @@ class Dispatcher(Protocol):
 
 class Configuration(Protocol):
     async def apply_agent(self, organization_id: str, agent_id: str) -> str: ...
+
+    async def refresh_runtime(self, organization_id: str, agent_id: str) -> None: ...
 
 
 class AgentLifecycle:
@@ -106,6 +112,52 @@ class AgentLifecycle:
         self.store.require_maintenance_open()
         async with self.operation_locks.setdefault(agent_id, asyncio.Lock()):
             return await self._perform(organization_id, agent_id, request)
+
+    async def rollout_runtime(self, organization_id: str, agent_id: str) -> bool:
+        """Replace a stale running image while deployment holds admission closed."""
+        async with self.operation_locks.setdefault(agent_id, asyncio.Lock()):
+            if self.store.maintenance_status()["state"] != "closed":
+                raise ValueError("Runtime rollout requires closed maintenance admission")
+            current = self.store.agent(organization_id, agent_id)
+            if current["desired_state"] == "stopped":
+                return False
+            if current["lifecycle_state"] != "running" or current["switch_state"] is not None:
+                raise RuntimeUnavailable("Runtime rollout requires a stable agent")
+            async with self.runtime.lock(agent_id):
+                container = await self.runtime.inspect(organization_id, agent_id)
+                if container is None or not container["state"]["Running"]:
+                    raise RuntimeUnavailable("Runtime rollout requires a running container")
+                if await self.runtime.image_is_current(organization_id, agent_id):
+                    return False
+                if not self.dispatcher.agent_effects_settled(organization_id, agent_id):
+                    raise RuntimeUnavailable("Runtime rollout needs delivery reconciliation")
+                await self.runtime.assert_quiet(organization_id, agent_id)
+                self.store.set_lifecycle_state(organization_id, agent_id, state="recovering")
+                try:
+                    await self.runtime.rebuild(organization_id, agent_id)
+                except BaseException:
+                    self.store.set_lifecycle_state(
+                        organization_id,
+                        agent_id,
+                        state="recovery_required",
+                        error="Runtime rollout interrupted; inspect retained container and receipts",
+                    )
+                    raise
+            try:
+                await self.configuration.refresh_runtime(organization_id, agent_id)
+                await self.dispatcher.reconcile_agent_effects(organization_id, agent_id)
+                if not self.dispatcher.agent_effects_settled(organization_id, agent_id):
+                    raise RuntimeUnavailable("Runtime rollout needs delivery reconciliation")
+                self.store.set_lifecycle_state(organization_id, agent_id, state="running")
+            except BaseException:
+                self.store.set_lifecycle_state(
+                    organization_id,
+                    agent_id,
+                    state="recovery_required",
+                    error="Runtime rollout incomplete; inspect configuration and retained receipts",
+                )
+                raise
+            return True
 
     async def _perform(
         self, organization_id: str, agent_id: str, request: HostLifecycleRequest
@@ -217,7 +269,17 @@ class AgentLifecycle:
                     organization_id, agent_id, desired="running", state="transitioning"
                 )
                 async with self.runtime.lock(agent_id):
-                    await self.runtime.start(organization_id, agent_id)
+                    container = await self.runtime.inspect(organization_id, agent_id)
+                    if (
+                        container is not None
+                        and not container["state"]["Running"]
+                        and not await self.runtime.image_is_current(organization_id, agent_id)
+                    ):
+                        if not self.dispatcher.agent_effects_settled(organization_id, agent_id):
+                            raise RuntimeUnavailable("Image update needs delivery reconciliation")
+                        await self.runtime.rebuild(organization_id, agent_id)
+                    else:
+                        await self.runtime.start(organization_id, agent_id)
                 await self.dispatcher.reconcile_agent_effects(organization_id, agent_id)
                 if not self.dispatcher.agent_effects_settled(organization_id, agent_id):
                     raise RuntimeUnavailable("Agent start needs delivery reconciliation")
