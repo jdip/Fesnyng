@@ -13,14 +13,15 @@ from contextlib import asynccontextmanager
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import Field, TypeAdapter, ValidationError, model_validator
+from pydantic import Field, model_validator
 
 from fesnyng_backend.agent_models import Contract
 from fesnyng_backend.codex_history import full_turns, is_unmaterialized
 from fesnyng_backend.host_effects import native_tools_settled
 from fesnyng_backend.host_interactions import Interactions
-from fesnyng_backend.host_models import Actor, HostAgentConfiguration, NativeID
+from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_native_evidence import NativeEvidence
+from fesnyng_backend.host_native_sessions import native_children, visit_native_child
 from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable, codex_thread_family
 from fesnyng_backend.host_store import HostStore
 
@@ -47,9 +48,6 @@ class Submission(Contract):
 
 class HostSubmission(Submission):
     author: Actor
-
-
-_native_id = TypeAdapter(NativeID)
 
 
 class DispatchStore:
@@ -1468,24 +1466,10 @@ class Dispatcher:
                 f"/session/{parent_id}/children",
                 directory=directory,
             )
-            if not isinstance(children, list):
-                raise RuntimeUnavailable("Native child sessions response is invalid")
-            for child in children:
-                if not isinstance(child, Mapping):
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                try:
-                    child_id = _native_id.validate_python(child.get("id"))
-                except ValidationError:
-                    raise RuntimeUnavailable("Native child session receipt is invalid") from None
-                child_directory = child.get("directory")
-                if (
-                    child.get("parentID") != parent_id
-                    or child_id in seen
-                    or not isinstance(child_directory, str)
-                    or not child_directory
-                ):
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
-                seen.add(child_id)
+            for child_id, child_directory in native_children(
+                children, parent_id, require_nonempty_directory=True
+            ):
+                visit_native_child(child_id, seen)
                 if child_id in mapped:
                     if mapped[child_id]["directory"] != child_directory:
                         raise RuntimeUnavailable("Native child session ancestry is invalid")
