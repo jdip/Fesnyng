@@ -80,6 +80,7 @@ def test_rollout_and_deferred_start_preserve_native_state(harness):
             replacement = await container_id()
             assert replacement != original
             assert await runtime.image_is_current(org, agent)
+            runtime.image = os.environ["FESNYNG_ROLLOUT_EQUIVALENT_IMAGE"]
             assert await guard.rollout() == {"state": "closed", "updated": 0}
             assert await container_id() == replacement
             assert store.agent_status(org, agent)["lifecycle_state"] == "running"

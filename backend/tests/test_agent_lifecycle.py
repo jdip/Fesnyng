@@ -1,5 +1,7 @@
 import asyncio
+import json
 import secrets
+from typing import ClassVar
 from uuid import uuid4
 
 import pytest
@@ -444,27 +446,42 @@ def test_start_updates_stopped_image_but_never_replaces_unsettled_effects(tmp_pa
     assert result["lifecycle_state"] == "running"
 
 
-def test_image_identity_uses_immutable_id_and_rejects_missing_image_evidence(tmp_path):
+def _image_record(image_id, *, parent=None, layer=None):
+    return {
+        "id": image_id,
+        "parent": parent,
+        "config": {"Cmd": ["runtime"]},
+        "rootfs": {"Type": "layers", "Layers": [layer or image_id]},
+        "architecture": "amd64",
+        "os": "linux",
+    }
+
+
+def test_image_identity_compares_contents_and_rejects_missing_evidence(tmp_path):
     store, organization, agent = _applied_agent(tmp_path)
+    selected = "sha256:" + "a" * 64
+    actual = "sha256:" + "b" * 64
 
     class ImageRuntime(DockerRuntime):
-        selected = "sha256:" + "a" * 64
-        actual = "sha256:" + "a" * 64
+        records: ClassVar[dict] = {
+            "new-release-tag": _image_record(selected),
+            actual: _image_record(actual),
+        }
 
         async def inspect(self, organization_id, agent_id):
-            return {"image": self.actual}
+            return {"image": actual}
 
         async def docker(self, *args, content=None):
-            if args == ("image", "inspect", "--format", "{{.Parent}}", self.actual):
-                return b""
-            assert args == ("image", "inspect", "--format", "{{.Id}}", "new-release-tag")
-            return self.selected.encode()
+            assert args[:3] == ("image", "inspect", "--format")
+            return json.dumps(self.records[args[-1]]).encode()
 
     runtime = ImageRuntime(store, "http://127.0.0.1:1", image="new-release-tag")
-    assert asyncio.run(runtime.image_is_current(organization, agent)) is True
-    runtime.actual = "sha256:" + "b" * 64
     assert asyncio.run(runtime.image_is_current(organization, agent)) is False
-    runtime.selected = ""
+    runtime.records[actual] = _image_record(actual, layer=selected)
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is True
+    runtime.records[actual]["config"] = {"Cmd": ["changed-runtime"]}
+    assert asyncio.run(runtime.image_is_current(organization, agent)) is False
+    runtime.records["new-release-tag"]["rootfs"] = {}
     with pytest.raises(RuntimeUnavailable, match="image identity"):
         asyncio.run(runtime.image_is_current(organization, agent))
 
@@ -508,18 +525,20 @@ def test_checkpoint_image_keeps_its_underlying_runtime_identity(tmp_path):
 
     class CheckpointRuntime(DockerRuntime):
         selected = base
+        parents: ClassVar[dict] = {nested: checkpoint, checkpoint: base, base: None}
 
         async def inspect(self, organization_id, agent_id):
             return {"image": nested}
 
         async def docker(self, *args, content=None):
             assert args[:3] == ("image", "inspect", "--format")
-            if args[3] == "{{.Id}}":
-                return self.selected.encode()
-            assert args[3] == "{{.Parent}}"
-            return {nested: checkpoint, checkpoint: base, base: ""}[args[4]].encode()
+            image_id = self.selected if args[-1] == "selected-image" else args[-1]
+            return json.dumps(_image_record(image_id, parent=self.parents.get(image_id))).encode()
 
     runtime = CheckpointRuntime(store, "http://127.0.0.1:1", image="selected-image")
     assert asyncio.run(runtime.image_is_current(organization, agent)) is True
     runtime.selected = "sha256:" + "d" * 64
     assert asyncio.run(runtime.image_is_current(organization, agent)) is False
+    runtime.parents[base] = nested
+    with pytest.raises(RuntimeUnavailable, match="image identity"):
+        asyncio.run(runtime.image_is_current(organization, agent))

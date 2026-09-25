@@ -420,39 +420,61 @@ class DockerRuntime:
         info = await self.inspect(organization_id, agent_id)
         if info is None:
             raise RuntimeUnavailable("Agent container is missing; rebuild is required")
-        selected = (
-            (await self.docker("image", "inspect", "--format", "{{.Id}}", self.image))
-            .decode()
-            .strip()
-        )
+        selected = await self._runtime_image(self.image)
         actual = info.get("image")
-        if (
-            not isinstance(actual, str)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", actual)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", selected)
-        ):
-            raise RuntimeUnavailable("Runtime image identity is unavailable; resource retained")
-        # Checkpoint replacement adds a writable layer while retaining the
-        # runtime image as a Docker parent. A code-only release must preserve
-        # that layer rather than mistake the checkpoint for a runtime upgrade.
+        # Checkpoints add writable layers and retain their Docker parent. Follow
+        # that ancestry so code-only releases preserve checkpoint contents.
+        # Build attestations can change image IDs without changing the runtime;
+        # compare native layers and configuration, not manifest identity alone.
         seen: set[str] = set()
         for _ in range(128):
-            if actual == selected:
+            if not isinstance(actual, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", actual):
+                break
+            if actual == selected["id"]:
                 return True
             if actual in seen:
                 break
             seen.add(actual)
-            parent = (
-                (await self.docker("image", "inspect", "--format", "{{.Parent}}", actual))
-                .decode()
-                .strip()
-            )
-            if not parent:
+            current = await self._runtime_image(actual)
+            if all(
+                current[key] == selected[key] for key in ("config", "rootfs", "architecture", "os")
+            ):
+                return True
+            actual = current["parent"]
+            if actual is None or actual == "":
                 return False
-            if not re.fullmatch(r"sha256:[0-9a-f]{64}", parent):
-                break
-            actual = parent
         raise RuntimeUnavailable("Runtime image identity is invalid; resource retained")
+
+    async def _runtime_image(self, image: str) -> dict[str, Any]:
+        template = '{"id":{{json .Id}},"parent":{{json (index . "Parent")}},"config":{{json .Config}},"rootfs":{{json .RootFS}},"architecture":{{json .Architecture}},"os":{{json .Os}}}'
+        try:
+            info = json.loads(await self.docker("image", "inspect", "--format", template, image))
+            rootfs = info["rootfs"]
+            valid = (
+                isinstance(info["id"], str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", info["id"])
+                and isinstance(info["config"], dict)
+                and isinstance(rootfs, dict)
+                and rootfs.get("Type") == "layers"
+                and isinstance(rootfs.get("Layers"), list)
+                and bool(rootfs["Layers"])
+                and all(
+                    isinstance(layer, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+                    for layer in rootfs["Layers"]
+                )
+                and isinstance(info["architecture"], str)
+                and bool(info["architecture"])
+                and isinstance(info["os"], str)
+                and bool(info["os"])
+                and "parent" in info
+            )
+            if valid:
+                return info
+        except (ValueError, KeyError, TypeError):
+            pass
+        # Image configuration may include environment credentials. Never include
+        # the inspected data in diagnostics.
+        raise RuntimeUnavailable("Runtime image identity is unavailable; resource retained")
 
     def native_port(self, organization_id: str, agent_id: str) -> int:
         try:

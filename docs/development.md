@@ -195,13 +195,14 @@ During normal discovery, use `dependabot-upkeep` to read actionable alerts. Pres
 
 ### Runtime image rollout proof
 
-Build the candidate agent-runtime image, then provide an existing older image and
-that candidate to the opt-in proof:
+Build the candidate agent-runtime image twice under separate tags, then provide
+an existing older image and both equivalent candidate builds to the opt-in proof:
 
 ```bash
 FESNYNG_ROLLOUT_DOCKER_TESTS=true \
 FESNYNG_ROLLOUT_OLD_IMAGE=fesnyng-agent:previous \
 FESNYNG_ROLLOUT_NEW_IMAGE=fesnyng-agent:candidate \
+FESNYNG_ROLLOUT_EQUIVALENT_IMAGE=fesnyng-agent:candidate-rebuilt \
   uv run --locked --project backend pytest backend/tests/test_runtime_rollout_docker.py -q -s
 ```
 
