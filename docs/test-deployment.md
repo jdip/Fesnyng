@@ -109,8 +109,13 @@ and only then releases admission. Busy or unavailable maintenance defers without
 changing `current`. Once quiescence is verified, maintenance drains existing host
 event streams and rejects reconnects until release. Their control-plane relays
 finish on host EOF, so idle browser streams do not hold either service shutdown
-open. A deferred acquisition leaves those streams connected. After the restarted
-services report the selected revision,
+open. A deferred acquisition leaves those streams connected. Both service
+launchers also load the native 10-second Uvicorn graceful-shutdown limit from
+private deployment configuration, bounding slow or blocked HTTP sends before
+systemd's stop timeout. The selected deployer adds this setting to existing
+installations without replacing their configuration; a conflicting custom value
+is preserved and reported. An already running process gets the bound only on its
+next start. After the restarted services report the selected revision,
 the updater calls the private `/maintenance/rollout` operation before releasing
 admission. The host compares Docker image contents (layers and configuration),
 following checkpoint ancestry, and rebuilds only stale running agents through
