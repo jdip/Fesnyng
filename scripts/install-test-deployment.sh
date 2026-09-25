@@ -83,6 +83,7 @@ MAINTENANCE_TOKEN_FILE=$(printf '%q' "$token")
 MAINTENANCE_CURL_CONFIG=$(printf '%q' "$state_root/maintenance.curl")
 CONTROL_PORT=8000
 HOST_PORT=8001
+export UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=10
 DEPLOY_ORIGIN=$(printf '%q' "$origin")
 AGENT_HOST_CREDENTIAL_URL=$(printf '%q' "$credential_url")
 export PATH=$(printf '%q' "$node_root/bin"):\$PATH

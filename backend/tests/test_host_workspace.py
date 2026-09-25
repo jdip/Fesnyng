@@ -14,6 +14,7 @@ from fesnyng_backend.agent_host import create_app
 from fesnyng_backend.agent_models import AgentConfiguration
 from fesnyng_backend.host_dispatch import Dispatcher, DispatchStore, Submission
 from fesnyng_backend.host_interactions import Interactions
+from fesnyng_backend.host_maintenance import MaintenanceGuard
 from fesnyng_backend.host_models import Actor, HostAgentConfiguration
 from fesnyng_backend.host_runtime import (
     RuntimeUnavailable,
@@ -1019,6 +1020,7 @@ def test_workspace_events_use_native_identity_shapes_sse_framing_and_new_directo
     store.save_session(org, agent, "ses_main", "/workspace/default/main", "Main")
     app = FastAPI()
     app.state.host_store = store
+    app.state.maintenance_guard = MaintenanceGuard(store)
     app.state.host_runtime = EventNative()
     app.state.dispatch_store = DispatchStore(store)
     app.state.dispatch_store.initialize()

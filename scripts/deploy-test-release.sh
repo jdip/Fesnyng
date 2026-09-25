@@ -54,7 +54,29 @@ health_has_revision() {
   log health "$target_revision" "port=$port result=failed"
   return 1
 }
+configure_shutdown() {
+  # Existing installed launchers source this private file on every service start.
+  # Preserve all operator configuration and avoid silently overriding a custom bound.
+  local setting='export UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=10' updated
+  if grep -qxF "$setting" "$config_file" &&
+     [[ ${UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN:-} == 10 && $(declare -p UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN 2>/dev/null) == 'declare -x '* ]]; then
+    return 0
+  fi
+  if grep -q 'UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN' "$config_file"; then
+    log failed "$target_revision" 'reason=conflicting-graceful-shutdown-setting'
+    return 1
+  fi
+  updated=$(mktemp "$config_file.XXXXXX")
+  if ! cp -p -- "$config_file" "$updated" ||
+     ! printf '\n%s\n' "$setting" >> "$updated" ||
+     ! mv -f -- "$updated" "$config_file"; then
+    rm -f -- "$updated"
+    return 1
+  fi
+}
 prepare() {
+  stage=shutdown-configuration
+  configure_shutdown
   stage=dependencies
   log start "$target_revision" 'stage=dependencies'
   (cd "$release"; "$UV_BIN" sync --locked --project backend; npm ci --prefix frontend; npm ci --prefix agent-runtime)
