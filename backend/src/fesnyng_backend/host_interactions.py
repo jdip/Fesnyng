@@ -18,6 +18,7 @@ from fesnyng_backend.host_models import (
     NativeID,
     permission_rules,
 )
+from fesnyng_backend.host_native_sessions import native_children, visit_native_child
 from fesnyng_backend.host_runtime import RuntimeRouter, RuntimeUnavailable
 from fesnyng_backend.host_store import HostStore
 
@@ -597,18 +598,10 @@ class Interactions:
                 f"/session/{parent_id}/children",
                 directory=directory,
             )
-            if not isinstance(children, list):
-                raise RuntimeUnavailable("Native child sessions response is invalid")
-            for child in children:
-                if not isinstance(child, Mapping):
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                child_id = _validated_native_id(child.get("id"))
-                if child.get("parentID") != parent_id or child_id in seen:
-                    raise RuntimeUnavailable("Native child session ancestry is invalid")
-                child_directory = child.get("directory")
-                if not isinstance(child_directory, str) or not child_directory:
-                    raise RuntimeUnavailable("Native child session receipt is invalid")
-                seen.add(child_id)
+            for child_id, child_directory in native_children(
+                children, parent_id, require_nonempty_directory=True
+            ):
+                visit_native_child(child_id, seen)
                 sessions.append((child_id, child_directory))
                 pending.append((child_id, child_directory))
         return sessions
